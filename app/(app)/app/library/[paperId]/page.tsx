@@ -7,6 +7,7 @@ import { eyebrowClass, primaryButtonClass } from "@/lib/ui";
 import { useQuery } from "convex/react";
 import Link from "next/link";
 import { use } from "react";
+import { PageSkeleton } from "../../_components/skeletons";
 import { SessionStatusChip } from "../../sessions/_components/session-row";
 import { StatusChip, byline } from "../_components/paper-meta";
 import { PdfPanel } from "../_components/pdf-panel";
@@ -35,7 +36,7 @@ export default function PaperPage({
   });
 
   if (paper === undefined) {
-    return <p className="font-sans text-sm text-ink-faint">Loading…</p>;
+    return <PageSkeleton />;
   }
 
   if (paper === null) {

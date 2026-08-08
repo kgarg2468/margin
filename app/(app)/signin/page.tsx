@@ -4,7 +4,9 @@ import { useAuthActions } from "@convex-dev/auth/react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
+import { PageSurface } from "@/app/(marketing)/_components/hero-surface";
 import {
+  cardClass,
   errorClass,
   inputClass,
   labelClass,
@@ -97,112 +99,137 @@ export default function SignInPage() {
   }
 
   return (
-    <div className="flex min-h-screen flex-col bg-page px-6 py-16 sm:px-10">
-      <main className="mx-auto flex w-full max-w-sm flex-1 flex-col justify-center gap-10">
-        <header className="flex flex-col gap-3 border-l border-rule pl-6">
-          <Link
-            href="/"
-            className="font-serif text-4xl lowercase tracking-tight text-ink-strong"
-          >
-            margin
-          </Link>
-          {/* The sentence, not the wordmark, is what this page is called: it
-              says which of the two things you are here to do, and it changes
-              when you switch. The wordmark above it stays what it looks like
-              — the way home. Sized as it was drawn; a heading level is not a
-              type scale. */}
-          <h1 className="font-serif text-base leading-relaxed text-ink-muted">
-            {flow === "signIn"
-              ? "Pick up where your lab left off."
-              : "Start reading with your lab."}
-          </h1>
-        </header>
+    // The same desk the landing is ruled on, at its faintest: this is the
+    // door between the two, and the sheet should not end at the doorway.
+    <PageSurface>
+      <div className="flex min-h-screen flex-col bg-transparent px-6 py-16 sm:px-10">
+        <main className="mx-auto flex w-full max-w-sm flex-1 flex-col justify-center gap-10">
+          <header className="flex flex-col gap-3 border-l border-rule pl-6">
+            <Link
+              href="/"
+              className="self-start font-serif text-4xl lowercase tracking-tight text-ink-strong transition-opacity hover:opacity-75"
+            >
+              margin
+            </Link>
+            {/* The sentence, not the wordmark, is what this page is called:
+                it says which of the two things you are here to do, and it
+                changes when you switch. The wordmark above it stays what it
+                looks like — the way home. Sized as it was drawn; a heading
+                level is not a type scale. */}
+            <h1 className="font-serif text-base leading-relaxed text-ink-muted">
+              {flow === "signIn"
+                ? "Pick up where your lab left off."
+                : "Start reading with your lab."}
+            </h1>
+          </header>
 
-        <form onSubmit={handleSubmit} className="flex flex-col gap-5">
-          {flow === "signUp" && (
+          <form
+            onSubmit={handleSubmit}
+            className={`${cardClass} flex flex-col gap-5`}
+          >
+            {/* The name field stays in the tree and folds open when the form
+                becomes a sign-up: rows and the swallowed flex gap ease
+                together, so the switch is a fold rather than a jump. The
+                input is disabled while folded — out of the tab order and out
+                of the submitted form. */}
+            <div
+              aria-hidden={flow !== "signUp"}
+              className={
+                "grid motion-safe:transition-[grid-template-rows,opacity,margin] motion-safe:duration-300 motion-safe:ease-[cubic-bezier(0.16,1,0.3,1)] " +
+                (flow === "signUp"
+                  ? "grid-rows-[1fr] opacity-100"
+                  : "-mt-5 grid-rows-[0fr] opacity-0")
+              }
+            >
+              <div className="overflow-hidden">
+                <div className="flex flex-col gap-2 p-px">
+                  <label htmlFor="name" className={labelClass}>
+                    Name
+                  </label>
+                  <input
+                    id="name"
+                    name="name"
+                    type="text"
+                    autoComplete="name"
+                    placeholder="Ada Lovelace"
+                    disabled={flow !== "signUp"}
+                    className={inputClass}
+                  />
+                </div>
+              </div>
+            </div>
+
             <div className="flex flex-col gap-2">
-              <label htmlFor="name" className={labelClass}>
-                Name
+              <label htmlFor="email" className={labelClass}>
+                Email
               </label>
               <input
-                id="name"
-                name="name"
-                type="text"
-                autoComplete="name"
-                placeholder="Ada Lovelace"
+                id="email"
+                name="email"
+                type="email"
+                required
+                autoComplete="email"
+                placeholder="you@university.edu"
                 className={inputClass}
               />
             </div>
-          )}
 
-          <div className="flex flex-col gap-2">
-            <label htmlFor="email" className={labelClass}>
-              Email
-            </label>
-            <input
-              id="email"
-              name="email"
-              type="email"
-              required
-              autoComplete="email"
-              placeholder="you@university.edu"
-              className={inputClass}
-            />
-          </div>
+            <div className="flex flex-col gap-2">
+              <label htmlFor="password" className={labelClass}>
+                Password
+              </label>
+              <input
+                id="password"
+                name="password"
+                type="password"
+                required
+                minLength={8}
+                autoComplete={
+                  flow === "signIn" ? "current-password" : "new-password"
+                }
+                placeholder="At least 8 characters"
+                className={inputClass}
+              />
+            </div>
 
-          <div className="flex flex-col gap-2">
-            <label htmlFor="password" className={labelClass}>
-              Password
-            </label>
-            <input
-              id="password"
-              name="password"
-              type="password"
-              required
-              minLength={8}
-              autoComplete={
-                flow === "signIn" ? "current-password" : "new-password"
-              }
-              placeholder="At least 8 characters"
-              className={inputClass}
-            />
-          </div>
+            {error !== null && (
+              <p role="alert" className={`${errorClass} pop-in`}>
+                {error}
+              </p>
+            )}
 
-          {error !== null && (
-            <p role="alert" className={errorClass}>
-              {error}
-            </p>
-          )}
+            <button
+              type="submit"
+              disabled={pending}
+              className={`${primaryButtonClass} tap-target`}
+            >
+              {pending
+                ? "One moment…"
+                : flow === "signIn"
+                  ? "Sign in"
+                  : "Create account"}
+            </button>
+          </form>
 
-          <button
-            type="submit"
-            disabled={pending}
-            className={`${primaryButtonClass} tap-target`}
-          >
-            {pending
-              ? "One moment…"
-              : flow === "signIn"
-                ? "Sign in"
-                : "Create account"}
-          </button>
-        </form>
+          <p className="font-sans text-sm text-ink-muted">
+            {flow === "signIn"
+              ? "New to Margin? "
+              : "Already have an account? "}
+            <button
+              type="button"
+              className={`${linkButtonClass} tap-target`}
+              onClick={switchFlow}
+            >
+              {flow === "signIn" ? "Create an account" : "Sign in"}
+            </button>
+          </p>
+        </main>
 
-        <p className="font-sans text-sm text-ink-muted">
-          {flow === "signIn" ? "New to Margin? " : "Already have an account? "}
-          <button
-            type="button"
-            className={`${linkButtonClass} tap-target`}
-            onClick={switchFlow}
-          >
-            {flow === "signIn" ? "Create an account" : "Sign in"}
-          </button>
-        </p>
-      </main>
-
-      <footer className="mx-auto w-full max-w-sm pt-10 font-sans text-xs leading-relaxed text-ink-faint">
-        Margin never tracks what you read. The only record it keeps is what you
-        choose to write down.
-      </footer>
-    </div>
+        <footer className="mx-auto w-full max-w-sm pt-10 font-sans text-xs leading-relaxed text-ink-faint">
+          Margin never tracks what you read. The only record it keeps is what
+          you choose to write down.
+        </footer>
+      </div>
+    </PageSurface>
   );
 }

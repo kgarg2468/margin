@@ -9,6 +9,7 @@ import Link from "next/link";
 import { use, useState } from "react";
 import type { LabSummary } from "../_components/lab-provider";
 import { useLabs } from "../_components/lab-provider";
+import { ListSkeleton, PageSkeleton } from "../_components/skeletons";
 import { ScheduleForm } from "./_components/schedule-form";
 import { SessionRow } from "./_components/session-row";
 
@@ -28,7 +29,7 @@ export default function SessionsPage({
   const { labs, currentLab } = useLabs();
 
   if (labs === undefined) {
-    return <p className="font-sans text-sm text-ink-faint">Loading…</p>;
+    return <PageSkeleton />;
   }
 
   if (currentLab === null) {
@@ -119,7 +120,7 @@ function Calendar({
       <section className="flex flex-col gap-5">
         <h2 className={eyebrowClass}>Ahead</h2>
         {sessions === undefined ? (
-          <p className="font-sans text-sm text-ink-faint">Loading…</p>
+          <ListSkeleton />
         ) : upcoming.length === 0 ? (
           <p className="max-w-prose font-serif text-base leading-relaxed text-ink-muted">
             Nothing on the calendar. A session is a paper, a time, and whoever

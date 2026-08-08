@@ -82,7 +82,7 @@ export function Composer({
     <div
       ref={rootRef}
       style={{ top: draft.top, left: draft.left }}
-      className="pop-in absolute z-30 w-80 max-w-[calc(100vw-3rem)] rounded-md border border-rule bg-surface p-4 shadow-[0_16px_44px_-20px_rgba(42,33,29,0.55)]"
+      className="pop-in absolute z-30 w-80 max-w-[calc(100vw-3rem)] rounded-md border border-rule bg-surface p-4 shadow-[var(--shadow-sheet)]"
       // A click inside must not count as a click outside.
       onMouseDown={(event) => event.stopPropagation()}
       onMouseUp={(event) => event.stopPropagation()}

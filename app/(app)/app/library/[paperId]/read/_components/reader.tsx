@@ -3,7 +3,7 @@
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { loadPdfjs } from "@/lib/pdf/extract";
-import { eyebrowClass } from "@/lib/ui";
+import { eyebrowClass, skeletonClass } from "@/lib/ui";
 import { useQuery } from "convex/react";
 import Link from "next/link";
 import type {
@@ -363,7 +363,24 @@ export function Reader({
 
   // --- render ------------------------------------------------------------
   if (paper === undefined) {
-    return <ReaderShell>{null}</ReaderShell>;
+    // The desk being set: a title line arriving and the sheet of the first
+    // page already in place, so opening a paper never shows a blank room.
+    return (
+      <ReaderShell>
+        <div
+          role="status"
+          aria-label="Opening the paper"
+          className="mx-auto flex w-full max-w-3xl flex-col items-center gap-6 py-10"
+        >
+          <span aria-hidden className={`${skeletonClass} h-6 w-2/3 self-start`} />
+          <span
+            aria-hidden
+            className={`${skeletonClass} aspect-[8.5/11] w-full max-w-2xl rounded-[3px] shadow-[var(--shadow-card)]`}
+            style={{ animationDelay: "140ms" }}
+          />
+        </div>
+      </ReaderShell>
+    );
   }
   if (paper === null) {
     return (

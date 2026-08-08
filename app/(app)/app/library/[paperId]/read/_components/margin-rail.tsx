@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnnotationCard } from "./annotation-card";
 import { typeStyle } from "./ontology";
-import { eyebrowClass } from "@/lib/ui";
+import { eyebrowClass, skeletonClass } from "@/lib/ui";
 import type { AnchorState, AnnotationId, AnnotationView } from "./types";
 
 export type RailCard = {
@@ -260,12 +260,32 @@ export function MarginRail({
         // "Nothing in the margin yet" while the margin is still on its way is
         // the wrong sentence, and it is the one a reader would believe.
         (loading ? (
-          <p
-            aria-live="polite"
-            className="max-w-prose font-sans text-xs leading-relaxed text-ink-faint"
-          >
-            Reading the margin…
-          </p>
+          // Ghosts of two notes rather than a sentence: the rail composes at
+          // its final shape, and cards landing replace like for like.
+          <div role="status" aria-label="Reading the margin" className="flex flex-col gap-2.5">
+            {[0, 1].map((i) => (
+              <div
+                key={i}
+                className="flex flex-col gap-2 rounded-md border border-rule border-l-2 bg-surface py-2.5 pl-3 pr-2.5"
+              >
+                <span
+                  aria-hidden
+                  className={`${skeletonClass} h-4 w-24`}
+                  style={{ animationDelay: `${i * 160}ms` }}
+                />
+                <span
+                  aria-hidden
+                  className={`${skeletonClass} h-3.5 w-full`}
+                  style={{ animationDelay: `${i * 160 + 80}ms` }}
+                />
+                <span
+                  aria-hidden
+                  className={`${skeletonClass} h-3.5 w-2/3`}
+                  style={{ animationDelay: `${i * 160 + 160}ms` }}
+                />
+              </div>
+            ))}
+          </div>
         ) : (
           <p className="max-w-prose font-serif text-sm leading-relaxed text-ink-faint">
             Nothing in the margin yet. Select a passage to write the first
