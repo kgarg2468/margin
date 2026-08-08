@@ -1,15 +1,17 @@
 /*
- * The Fig. 1 build-up.
+ * The Fig. 1 performance.
  *
- * The scroll wrapper decides *which* notes are on (a number), and these rules
- * decide what "off" looks like and how "on" arrives: the wash sweeps across
- * the passage left to right the way a highlighter does, the underline settles
- * a beat later, and the note fades up in the margin. All of it is state the
- * server renders as "on", so a reader without JavaScript — or without the
- * patience for scroll theatre — still gets the finished figure.
+ * The scroll wrapper decides *which* beat the figure is on (a number), and
+ * these rules decide what each state looks like and how the next one
+ * arrives: the wash sweeps across the passage the way a highlighter does,
+ * the underline settles a beat later, the note fades up in the margin, the
+ * composer sheet pops and files, words arrive at a hand's pace, and the
+ * synthesis unfolds from zero height. All of it is state the server renders
+ * as "finished", so a reader without JavaScript — or without the patience
+ * for scroll theatre — still gets the finished figure.
  *
- * Transitions only exist under no-preference; with reduced motion the wrapper
- * never switches anything off, and these rules do nothing at all.
+ * Transitions only exist under no-preference; with reduced motion the
+ * wrapper never leaves the finished state, and these rules do nothing.
  */
 
 .mark {
@@ -44,6 +46,64 @@
   translate: 0 12px;
 }
 
+/* a word inside text that writes itself */
+.word {
+  opacity: 1;
+}
+
+.word[data-active="false"] {
+  opacity: 0;
+  transition-delay: 0s;
+}
+
+/* the composer sheet: closed → open → (typed is the words' job) → filed */
+.sheet {
+  opacity: 1;
+  translate: 0 0;
+  scale: 1;
+}
+
+.sheet[data-state="hidden"] {
+  opacity: 0;
+  translate: 0 10px;
+  scale: 0.985;
+  pointer-events: none;
+}
+
+/* the caret blinks while the sheet is open and still being typed into */
+.caret {
+  display: inline-block;
+  width: 1px;
+  height: 1em;
+  vertical-align: -0.15em;
+  background: var(--accent);
+  opacity: 0;
+}
+
+/* the synthesis unfolds from zero height, then its words arrive */
+.grow {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+}
+
+.grow[data-active="true"] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.grow > * {
+  overflow: hidden;
+}
+
+/* the live dot in the session header */
+.live {
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  display: inline-block;
+}
+
 @media (prefers-reduced-motion: no-preference) {
   .mark {
     transition:
@@ -57,5 +117,42 @@
     transition:
       opacity 0.55s cubic-bezier(0.16, 1, 0.3, 1) 0.15s,
       translate 0.55s cubic-bezier(0.16, 1, 0.3, 1) 0.15s;
+  }
+  .word {
+    transition: opacity 0.25s ease;
+  }
+  .sheet {
+    transition:
+      opacity 0.4s cubic-bezier(0.16, 1, 0.3, 1),
+      translate 0.4s cubic-bezier(0.16, 1, 0.3, 1),
+      scale 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .caret[data-state="open"],
+  .caret[data-state="typed"] {
+    animation: margin-caret 1s steps(1) infinite;
+  }
+  .grow {
+    transition:
+      grid-template-rows 0.65s cubic-bezier(0.16, 1, 0.3, 1),
+      opacity 0.5s ease;
+  }
+  .live[data-active="true"] {
+    animation: margin-live 2s ease-in-out infinite;
+  }
+}
+
+@keyframes margin-caret {
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes margin-live {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
   }
 }

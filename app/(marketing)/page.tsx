@@ -1,16 +1,22 @@
 import Link from "next/link";
 import { primaryButtonClass } from "@/lib/ui";
-import { HeroSurface } from "./_components/hero-surface";
+import { HeroSurface, PageSurface } from "./_components/hero-surface";
+import { Magnetic } from "./_components/magnetic";
+import { SweepMark } from "./_components/marks";
+import { ReadingProgress } from "./_components/progress";
 import { Reveal, Rise } from "./_components/reveal";
 import { ShowcaseFig1 } from "./_components/showcase";
 import { COLUMN, CONTAINER, GRID, RAIL, Section } from "./_components/section";
+import { TimelineDraw } from "./_components/timeline";
 
 /**
  * The landing page is a manuscript, and it is deliberately almost silent:
  * the hero speaks, the section heads speak briefly, and everything else is
  * shown rather than said. Fig. 1 does the arguing — the annotated passage
- * assembles itself as the reader scrolls, which is the product doing the one
- * thing it is for.
+ * performs a whole session as the reader scrolls, which is the product doing
+ * the one thing it is for. Around that, the page behaves like a sheet on a
+ * desk: the ruling lights under the cursor, a pen line follows the hand
+ * across the masthead, and anything marked gets marked while you watch.
  */
 
 const failures = [
@@ -37,9 +43,29 @@ const layers = [
   },
 ];
 
+function StartCta() {
+  return (
+    <Magnetic>
+      <Link
+        href="/signin?flow=signup"
+        className={`group tap-target ${primaryButtonClass}`}
+      >
+        Start a journal club
+        <span
+          aria-hidden
+          className="ml-2 inline-block motion-safe:transition-transform motion-safe:group-hover:translate-x-0.5"
+        >
+          &rarr;
+        </span>
+      </Link>
+    </Magnetic>
+  );
+}
+
 export default function LandingPage() {
   return (
     <div className="min-h-screen bg-page">
+      <ReadingProgress />
       <a
         href="#main"
         className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-sm focus:bg-accent focus:px-3 focus:py-2 focus:font-sans focus:text-sm focus:text-accent-contrast"
@@ -106,7 +132,7 @@ export default function LandingPage() {
                   </p>
                 </Rise>
 
-                <Rise delay={0.22}>
+                <Rise delay={0.22} className="relative">
                   <p className="mt-7 font-serif text-xl leading-relaxed text-ink sm:text-2xl">
                     <mark
                       className="box-decoration-clone rounded-[0.15em] px-[0.15em] text-ink-strong"
@@ -117,23 +143,43 @@ export default function LandingPage() {
                     >
                       Run your next journal club here.
                     </mark>
+                    <sup
+                      aria-hidden
+                      className="ml-[0.2em] font-sans text-[0.55em] font-medium text-accent"
+                    >
+                      1
+                    </sup>
                   </p>
+
+                  {/* The page annotating its own thesis — the product's whole
+                      grammar, demonstrated in the empty right margin. */}
+                  <Rise delay={1.15} className="absolute left-[calc(100%-11rem)] top-16 hidden w-52 xl:block">
+                    <div
+                      aria-hidden
+                      className="rotate-[0.8deg] rounded-md border border-rule bg-surface p-3 shadow-[0_14px_36px_-20px_rgba(42,33,29,0.5)]"
+                    >
+                      <p className="flex items-center gap-1.5 font-sans text-[0.6rem] font-medium uppercase tracking-[0.12em]">
+                        <span
+                          className="rounded-sm px-1.5 py-0.5"
+                          style={{
+                            backgroundColor: "var(--note-hypothesis-wash)",
+                            color: "var(--note-hypothesis)",
+                          }}
+                        >
+                          1 hypothesis
+                        </span>
+                      </p>
+                      <p className="mt-2 font-serif text-[0.8rem] leading-relaxed text-ink">
+                        The argument doesn&rsquo;t have to stay in the margin
+                        any more.
+                      </p>
+                    </div>
+                  </Rise>
                 </Rise>
 
                 <Rise delay={0.32}>
                   <div className="mt-10">
-                    <Link
-                      href="/signin?flow=signup"
-                      className={`group tap-target ${primaryButtonClass}`}
-                    >
-                      Start a journal club
-                      <span
-                        aria-hidden
-                        className="ml-2 inline-block motion-safe:transition-transform motion-safe:group-hover:translate-x-0.5"
-                      >
-                        &rarr;
-                      </span>
-                    </Link>
+                    <StartCta />
                   </div>
                   <p className="mt-8 font-sans text-xs leading-relaxed text-ink-faint">
                     Closed beta with partner labs, fall 2026.
@@ -144,131 +190,121 @@ export default function LandingPage() {
           </div>
         </HeroSurface>
 
-        {/* --- the artifact --------------------------------------------- */}
-        <Section
-          id="passage"
-          index="Fig. 1"
-          title="What a session leaves behind"
-          gloss="Five typed notes from four people, on one paper. Keep scrolling; the session writes itself."
-        >
-          <ShowcaseFig1 />
-        </Section>
+        <PageSurface>
+          {/* --- the artifact ------------------------------------------- */}
+          <Section
+            id="passage"
+            index="Fig. 1"
+            title="What a session leaves behind"
+            gloss="Five typed notes from four people, on one paper. Keep scrolling; the session writes itself."
+          >
+            <ShowcaseFig1 />
+          </Section>
 
-        {/* --- problem --------------------------------------------------- */}
-        <Section
-          id="problem"
-          index="§ 1"
-          title="The problem"
-          gloss="Labs read more than ever. The reading doesn't accumulate."
-        >
-          <ul className="flex max-w-[38rem] flex-col gap-10">
-            {failures.map((failure, i) => (
-              <li key={failure.lead}>
-                <Reveal delay={i * 0.08}>
-                  <p className="grid grid-cols-[2.5rem_minmax(0,1fr)] items-baseline gap-x-2">
-                    <span
-                      aria-hidden
-                      className="font-serif text-2xl italic leading-none text-ink-faint"
-                    >
-                      {i + 1}.
-                    </span>
-                    <span className="font-serif text-xl leading-snug text-ink sm:text-[1.6rem] sm:leading-[1.35]">
-                      <mark
-                        className="box-decoration-clone rounded-[0.15em] px-[0.15em] text-ink"
-                        style={{
-                          backgroundColor: `var(--note-${failure.ink}-wash)`,
-                          boxShadow: `inset 0 -0.08em 0 0 var(--note-${failure.ink})`,
-                        }}
+          {/* --- problem ------------------------------------------------- */}
+          <Section
+            id="problem"
+            index="§ 1"
+            title="The problem"
+            gloss="Labs read more than ever. The reading doesn't accumulate."
+          >
+            <ul className="flex max-w-[38rem] flex-col gap-10">
+              {failures.map((failure, i) => (
+                <li key={failure.lead}>
+                  <Reveal delay={i * 0.08}>
+                    <p className="grid grid-cols-[2.5rem_minmax(0,1fr)] items-baseline gap-x-2">
+                      <span
+                        aria-hidden
+                        className="font-serif text-2xl italic leading-none text-ink-faint"
                       >
-                        {failure.lead}
-                      </mark>
-                    </span>
-                  </p>
-                </Reveal>
-              </li>
-            ))}
-          </ul>
-        </Section>
+                        {i + 1}.
+                      </span>
+                      <span className="font-serif text-xl leading-snug text-ink sm:text-[1.6rem] sm:leading-[1.35]">
+                        <SweepMark ink={failure.ink} delay={0.25 + i * 0.35}>
+                          {failure.lead}
+                        </SweepMark>
+                      </span>
+                    </p>
+                  </Reveal>
+                </li>
+              ))}
+            </ul>
+          </Section>
 
-        {/* --- how it works ---------------------------------------------- */}
-        <Section
-          id="how"
-          index="§ 2"
-          title="How it works"
-          gloss="Three layers. Each one is only possible because the group already uses the one above it."
-        >
-          <ol className="max-w-[40rem] border-l border-rule">
-            {layers.map((layer, i) => (
-              <li
-                key={layer.name}
-                className="relative pb-14 pl-8 last:pb-0 sm:pl-10"
-              >
-                <Reveal delay={i * 0.08}>
-                  <span
-                    aria-hidden
-                    className="absolute -left-[6px] top-2 h-3 w-3 rounded-full border"
-                    style={{
-                      borderColor: i === 0 ? "var(--rule)" : "var(--accent)",
-                      backgroundColor:
-                        i === 2 ? "var(--accent)" : "var(--surface)",
-                    }}
-                  />
-                  <p className="font-sans text-[0.65rem] uppercase tracking-[0.2em] text-ink-faint">
-                    <span className="text-accent">{`0${i + 1}`}</span>
-                    <span aria-hidden className="mx-2 text-rule">
-                      /
-                    </span>
-                    {layer.kind}
-                  </p>
-                  <h3 className="mt-3 font-serif text-2xl leading-tight text-ink-strong sm:text-3xl">
-                    {layer.name}
-                  </h3>
-                  <p className="mt-3 font-serif text-base leading-relaxed text-ink-muted sm:text-lg">
-                    {layer.line}
-                  </p>
-                </Reveal>
-              </li>
-            ))}
-          </ol>
+          {/* --- how it works -------------------------------------------- */}
+          <Section
+            id="how"
+            index="§ 2"
+            title="How it works"
+            gloss="Three layers. Each one is only possible because the group already uses the one above it."
+          >
+            <TimelineDraw>
+              <ol className="max-w-[40rem]">
+                {layers.map((layer, i) => (
+                  <li
+                    key={layer.name}
+                    className="relative pb-14 pl-8 last:pb-0 sm:pl-10"
+                  >
+                    <Reveal delay={i * 0.08}>
+                      <span
+                        aria-hidden
+                        className="absolute -left-[6px] top-2 h-3 w-3 rounded-full border"
+                        style={{
+                          borderColor: i === 0 ? "var(--rule)" : "var(--accent)",
+                          backgroundColor:
+                            i === 2 ? "var(--accent)" : "var(--surface)",
+                        }}
+                      />
+                      <p className="font-sans text-[0.65rem] uppercase tracking-[0.2em] text-ink-faint">
+                        <span className="text-accent">{`0${i + 1}`}</span>
+                        <span aria-hidden className="mx-2 text-rule">
+                          /
+                        </span>
+                        {layer.kind}
+                      </p>
+                      <h3 className="mt-3 font-serif text-2xl leading-tight text-ink-strong sm:text-3xl">
+                        {layer.name}
+                      </h3>
+                      <p className="mt-3 font-serif text-base leading-relaxed text-ink-muted sm:text-lg">
+                        {layer.line}
+                      </p>
+                    </Reveal>
+                  </li>
+                ))}
+              </ol>
+            </TimelineDraw>
 
-          <Reveal>
-            <p className="mt-14 max-w-[40rem] font-serif text-base italic leading-relaxed text-ink sm:text-lg">
-              A lab fifty sessions in has something a lab on its first session
-              cannot buy.
-            </p>
-          </Reveal>
-        </Section>
+            <Reveal>
+              <p className="mt-14 max-w-[40rem] font-serif text-base italic leading-relaxed text-ink sm:text-lg">
+                A lab fifty sessions in has something a lab on its first
+                session cannot buy.
+              </p>
+            </Reveal>
+          </Section>
 
-        {/* --- call to action --------------------------------------------- */}
-        <Section
-          id="start"
-          index="¶"
-          title="Start"
-          gloss="Setup is a DOI and an invite. The first session makes the case."
-        >
-          <Reveal>
-            <p className="max-w-[34rem] font-serif text-3xl leading-[1.15] tracking-[-0.01em] text-ink-strong sm:text-5xl">
-              Bring one paper. See what your group leaves in the margins.
-            </p>
-            <div className="mt-10">
-              <Link
-                href="/signin?flow=signup"
-                className={`group tap-target ${primaryButtonClass}`}
-              >
-                Start a journal club
-                <span
-                  aria-hidden
-                  className="ml-2 inline-block motion-safe:transition-transform motion-safe:group-hover:translate-x-0.5"
-                >
-                  &rarr;
-                </span>
-              </Link>
-            </div>
-            <p className="mt-8 font-sans text-xs leading-relaxed text-ink-faint">
-              Annotations stay inside the lab that wrote them.
-            </p>
-          </Reveal>
-        </Section>
+          {/* --- call to action ------------------------------------------- */}
+          <Section
+            id="start"
+            index="¶"
+            title="Start"
+            gloss="Setup is a DOI and an invite. The first session makes the case."
+          >
+            <Reveal>
+              <p className="max-w-[34rem] font-serif text-3xl leading-[1.15] tracking-[-0.01em] text-ink-strong sm:text-5xl">
+                Bring one paper. See what your group leaves{" "}
+                <SweepMark ink="hypothesis" underline="var(--accent)" delay={0.3}>
+                  in the margins.
+                </SweepMark>
+              </p>
+              <div className="mt-10">
+                <StartCta />
+              </div>
+              <p className="mt-8 font-sans text-xs leading-relaxed text-ink-faint">
+                Annotations stay inside the lab that wrote them.
+              </p>
+            </Reveal>
+          </Section>
+        </PageSurface>
       </main>
 
       <footer className="border-t border-rule">
