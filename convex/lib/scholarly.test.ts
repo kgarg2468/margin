@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { arxivPdfUrl, openAlexPdfCandidates } from "./scholarly";
+import {
+  arxivPdfUrl,
+  isFetchableHost,
+  nextRedirectHop,
+  openAlexPdfCandidates,
+} from "./scholarly";
 
 /**
  * The two pure decisions in the "find the free copy" path.
@@ -146,5 +151,68 @@ describe("arxivPdfUrl", () => {
     expect(arxivPdfUrl("10.48550/arxiv.../../etc/passwd")).toBeUndefined();
     expect(arxivPdfUrl("10.48550/arxiv.2103.00020?x=1")).toBeUndefined();
     expect(arxivPdfUrl("10.48550/arxiv.2103.00020 2103.00021")).toBeUndefined();
+  });
+});
+
+describe("isFetchableHost", () => {
+  it("accepts the hostnames papers actually live at", () => {
+    expect(isFetchableHost("arxiv.org")).toBe(true);
+    expect(isFetchableHost("www.biorxiv.org")).toBe(true);
+    expect(isFetchableHost("EPRINTS.example.AC.UK")).toBe(true);
+  });
+
+  it("refuses anything naming a machine rather than a site", () => {
+    expect(isFetchableHost("localhost")).toBe(false);
+    expect(isFetchableHost("127.0.0.1")).toBe(false);
+    // The link-local address every cloud keeps its instance metadata on.
+    expect(isFetchableHost("169.254.169.254")).toBe(false);
+    // The same address, spelled to get past a check that only reads dots.
+    expect(isFetchableHost("2852039166")).toBe(false);
+    expect(isFetchableHost("0x7f.0x0.0x0.0x1")).toBe(false);
+    // `URL.hostname` keeps the brackets on an IPv6 literal.
+    expect(isFetchableHost("[::1]")).toBe(false);
+    expect(isFetchableHost("[fd00::1]")).toBe(false);
+    // A single-label intranet name resolves inside the network, not outside.
+    expect(isFetchableHost("metadata")).toBe(false);
+  });
+});
+
+describe("nextRedirectHop", () => {
+  const from = "https://repo.example.org/record/1/download";
+
+  it("resolves an absolute, a rooted and a relative Location", () => {
+    expect(nextRedirectHop(from, "https://cdn.example.net/paper.pdf")).toBe(
+      "https://cdn.example.net/paper.pdf",
+    );
+    expect(nextRedirectHop(from, "/files/paper.pdf")).toBe(
+      "https://repo.example.org/files/paper.pdf",
+    );
+    expect(nextRedirectHop(from, "paper.pdf")).toBe(
+      "https://repo.example.org/record/1/paper.pdf",
+    );
+  });
+
+  it("refuses a public host that redirects somewhere internal", () => {
+    // The finding this exists for: the first URL passed every check, and the
+    // second one would never have been asked.
+    expect(
+      nextRedirectHop(from, "http://169.254.169.254/latest/meta-data/"),
+    ).toBe(null);
+    expect(
+      nextRedirectHop(from, "https://169.254.169.254/latest/meta-data/"),
+    ).toBe(null);
+    expect(nextRedirectHop(from, "https://localhost:8080/admin")).toBe(null);
+    expect(nextRedirectHop(from, "https://[::1]/admin")).toBe(null);
+  });
+
+  it("refuses a downgrade to plaintext, even to the same host", () => {
+    expect(nextRedirectHop(from, "http://repo.example.org/paper.pdf")).toBe(null);
+  });
+
+  it("refuses a Location that is missing, empty, or not a URL", () => {
+    expect(nextRedirectHop(from, null)).toBe(null);
+    expect(nextRedirectHop(from, "   ")).toBe(null);
+    expect(nextRedirectHop(from, "file:///etc/passwd")).toBe(null);
+    expect(nextRedirectHop(from, "javascript:alert(1)")).toBe(null);
   });
 });

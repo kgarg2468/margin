@@ -13,7 +13,13 @@ import { getMembership, requireMembership, requireUserId } from "./lib/authz";
 import { isPlausibleDoi, normalizeDoi } from "./lib/doi";
 import { recordEvent } from "./lib/ledger";
 import type { PaperMetadata } from "./lib/scholarly";
-import { arxivPdfUrl, fetchCrossref, fetchOpenAlex } from "./lib/scholarly";
+import {
+  arxivPdfUrl,
+  fetchCrossref,
+  fetchOpenAlex,
+  isFetchableHost,
+  nextRedirectHop,
+} from "./lib/scholarly";
 import { ingestStatus } from "./schema";
 
 /**
@@ -692,6 +698,14 @@ export const insertFromDoi = internalMutation({
 });
 
 /**
+ * A repository that accepts the connection and then stops talking would
+ * otherwise hold an action open for as long as the platform allows. Per
+ * request, not per link: a redirect chain that stalls on its fourth leg has
+ * still stalled.
+ */
+const PDF_FETCH_TIMEOUT_MS = 20_000;
+
+/**
  * Best effort, and only ever that. An OA link can 403, redirect to an
  * interstitial, or hand back an HTML "verifying your browser" page; none of
  * those should cost the member their metadata. A failure here just means the
@@ -706,43 +720,59 @@ async function fetchOpenAccessPdf(url: string): Promise<Blob | null> {
       return null;
     }
 
+    // Redirects are followed by `fetch` itself here, and that is right for
+    // this path: a DOI candidate is a publisher or repository URL that hops
+    // through a resolver and a CDN as a matter of course, and every one of
+    // them came from OpenAlex rather than from a member. The pasted-link path
+    // below is the one where the destination is worth re-checking.
     const response = await fetch(url, {
       headers: { Accept: "application/pdf" },
-      // A repository that accepts the connection and then stops talking would
-      // otherwise hold this action open for as long as the platform allows.
-      signal: AbortSignal.timeout(20_000),
+      signal: AbortSignal.timeout(PDF_FETCH_TIMEOUT_MS),
     });
-    if (!response.ok) {
-      return null;
-    }
-
-    // Refuse the download before starting it when the host is honest about
-    // the size. It can lie or say nothing, so the check after the read stays
-    // as the one that actually holds.
-    const declaredBytes = Number(response.headers.get("content-length"));
-    if (Number.isFinite(declaredBytes) && declaredBytes > MAX_PDF_BYTES) {
-      return null;
-    }
-
-    const blob = await response.blob();
-    if (blob.size === 0 || blob.size > MAX_PDF_BYTES) {
-      return null;
-    }
-
-    const contentType = response.headers.get("content-type") ?? "";
-    if (!contentType.toLowerCase().includes("pdf")) {
-      // Plenty of repositories serve `application/octet-stream`. Trust the
-      // magic bytes over the header, and nothing else.
-      const header = new Uint8Array(await blob.slice(0, 5).arrayBuffer());
-      const signature = String.fromCharCode(...header);
-      if (signature !== "%PDF-") {
-        return null;
-      }
-    }
-    return blob;
+    return await pdfFromResponse(response);
   } catch {
     return null;
   }
+}
+
+/**
+ * The bytes at the end of any of these fetches, or `null` if they aren't a
+ * PDF we agreed to hold.
+ *
+ * Shared by both fetch paths deliberately. The pasted-link path differs from
+ * the DOI walk in where the URL came from and in how far it is trusted to
+ * redirect — it does not differ in what counts as a PDF, and two copies of
+ * this would be two places for the size cap to drift.
+ */
+async function pdfFromResponse(response: Response): Promise<Blob | null> {
+  if (!response.ok) {
+    return null;
+  }
+
+  // Refuse the download before starting it when the host is honest about
+  // the size. It can lie or say nothing, so the check after the read stays
+  // as the one that actually holds.
+  const declaredBytes = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredBytes) && declaredBytes > MAX_PDF_BYTES) {
+    return null;
+  }
+
+  const blob = await response.blob();
+  if (blob.size === 0 || blob.size > MAX_PDF_BYTES) {
+    return null;
+  }
+
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.toLowerCase().includes("pdf")) {
+    // Plenty of repositories serve `application/octet-stream`. Trust the
+    // magic bytes over the header, and nothing else.
+    const header = new Uint8Array(await blob.slice(0, 5).arrayBuffer());
+    const signature = String.fromCharCode(...header);
+    if (signature !== "%PDF-") {
+      return null;
+    }
+  }
+  return blob;
 }
 
 /**
@@ -825,17 +855,32 @@ export const createFromDoi = action({
     // The DOI itself is a source of last resort: an arXiv DOI says where the
     // file is whether or not OpenAlex managed to index it, and arXiv records
     // are among the likeliest to arrive with no `pdf_url` at all.
-    const candidates = [...(merged.pdfUrls ?? [])];
+    //
+    // Last, but guaranteed a slot. It goes last because OpenAlex's candidates
+    // are matched to this exact record and its curated pick is likelier to be
+    // the published version than arXiv's preprint. It gets a slot because
+    // "last" and "inside the attempt window" are not the same thing: append it
+    // to a list already at the cap and it is appended to nothing — and a
+    // record padded out with four dead repository mirrors is precisely the
+    // record this shortcut exists for. The one URL we positively know serves
+    // the file should not be the one the truncation eats.
+    const candidates = merged.pdfUrls ?? [];
     const arxiv = arxivPdfUrl(doi);
-    if (arxiv !== undefined && !candidates.includes(arxiv)) {
-      candidates.push(arxiv);
-    }
+    const attempts =
+      arxiv === undefined
+        ? candidates.slice(0, MAX_PDF_FETCH_ATTEMPTS)
+        : [
+            ...candidates
+              .filter((candidate) => candidate !== arxiv)
+              .slice(0, MAX_PDF_FETCH_ATTEMPTS - 1),
+            arxiv,
+          ];
 
     // First one that hands back actual PDF bytes wins; the rest are mirrors of
     // the same file. All of them failing is not an error — the paper is still
     // worth having, and it lands as `needs-pdf` exactly as it always did.
     let storageId: Id<"_storage"> | undefined;
-    for (const candidate of candidates.slice(0, MAX_PDF_FETCH_ATTEMPTS)) {
+    for (const candidate of attempts) {
       const pdf = await fetchOpenAccessPdf(candidate);
       if (pdf !== null) {
         storageId = await ctx.storage.store(pdf);
@@ -919,18 +964,11 @@ export const attachFetchedPdf = internalMutation({
  * A URL a member typed, on its way into `fetch`.
  *
  * Every other URL this file fetches came from Crossref or OpenAlex. This one
- * came from a text box, which makes it the one that can be aimed at us:
- * Convex actions run inside infrastructure that has a private network around
- * it, and `fetch` will resolve `https://localhost:8080/` or an IP literal into
- * a request originating from in there — the classic way to read a metadata
- * endpoint or an internal service through someone else's server. Refusing
- * hosts that name a machine rather than a name costs a member nothing, since
- * a free copy of a paper lives at a hostname.
- *
- * It is half the problem, honestly: a public hostname that resolves to a
- * private address still gets through, and closing that means resolving DNS
- * ourselves and checking the address before connecting. This takes the easy
- * half off the table now.
+ * came from a text box, which makes it the one that can be aimed at us — see
+ * `isFetchableHost` for what that means and how far the guard goes. The rules
+ * live there so the redirect loop can apply the same ones; what lives here is
+ * the part that only makes sense for a URL a person typed, which is telling
+ * them which rule they tripped over.
  */
 function readPastedPdfUrl(input: string): string {
   let parsed: URL;
@@ -948,13 +986,7 @@ function readPastedPdfUrl(input: string): string {
     );
   }
 
-  const host = parsed.hostname.toLowerCase();
-  const isIpv6Literal = host.startsWith("[");
-  // Dotted-quad, and the decimal and hex spellings of the same address.
-  const isNumericHost = /^(?:\d|0x)[0-9a-fx.]*$/i.test(host);
-  // `localhost`, and anything else with no public suffix to it.
-  const isSingleLabel = !host.includes(".");
-  if (isIpv6Literal || isNumericHost || isSingleLabel) {
+  if (!isFetchableHost(parsed.hostname)) {
     throw new ConvexError(
       "That link points at a machine rather than a public site. Paste the address you would send to a colleague.",
     );
@@ -964,14 +996,65 @@ function readPastedPdfUrl(input: string): string {
 }
 
 /**
+ * Long enough for the resolver-then-CDN-then-file chains real repositories
+ * actually use, short enough that a redirect loop is a refusal rather than a
+ * timeout.
+ */
+const MAX_REDIRECT_HOPS = 5;
+
+/**
+ * Fetch the pasted link, checking every address the chain lands on.
+ *
+ * `readPastedPdfUrl` vetted one URL — the one the member typed. A redirect is
+ * the second place a URL is chosen, and that first check does not travel with
+ * it: a public host is free to answer 302 with `Location: http://169.254.
+ * 169.254/…`, and `fetch` following redirects on its own would have made that
+ * request before anything in this file saw the address. So this one steers
+ * manually and re-runs the rules on every hop.
+ *
+ * Failing closed is the whole point. A refused hop, a missing `Location`, a
+ * chain longer than five, a runtime that hides the redirect from us — all of
+ * them come back `null`, which the caller reports as the same "no PDF came
+ * back from that link" a dead URL gets. Losing a legitimate five-hop redirect
+ * costs the member the download button they already had; the other kind of
+ * mistake costs everyone.
+ */
+async function fetchPastedPdf(url: string): Promise<Blob | null> {
+  try {
+    let target = url;
+    for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
+      const response = await fetch(target, {
+        headers: { Accept: "application/pdf" },
+        redirect: "manual",
+        signal: AbortSignal.timeout(PDF_FETCH_TIMEOUT_MS),
+      });
+
+      if (response.status < 300 || response.status >= 400) {
+        return await pdfFromResponse(response);
+      }
+
+      const next = nextRedirectHop(target, response.headers.get("location"));
+      if (next === null) {
+        return null;
+      }
+      target = next;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Fetch a free copy from a link the member found.
  *
  * OpenAlex misses copies — a repository it has not indexed, a record where
  * every `pdf_url` is empty — and the member is frequently looking at the file
  * in another tab while Margin says there isn't one. Their recourse used to be
- * download, then re-upload. This is the shortcut: the same fetcher the DOI
- * path uses, pointed where they say, server-side so no publisher's CORS
- * policy gets a vote.
+ * download, then re-upload. This is the shortcut: the same idea of a PDF the
+ * DOI path uses, pointed where they say, server-side so no publisher's CORS
+ * policy gets a vote — and rather more careful about where it ends up, since
+ * this is the one address in this file a member chose.
  *
  * It will not replace a file. A paper that already has a PDF has a text layer
  * anchored to it, and swapping that out is `attachPdf`'s job — it re-extracts
@@ -994,10 +1077,10 @@ export const fetchPdfFromUrl = action({
     }
 
     const url = readPastedPdfUrl(args.url);
-    const pdf = await fetchOpenAccessPdf(url);
+    const pdf = await fetchPastedPdf(url);
     if (pdf === null) {
       // The likeliest cause by a distance, and the member can fix it in one
-      // move once they know: `fetchOpenAccessPdf` checks the magic bytes, so
+      // move once they know: `pdfFromResponse` checks the magic bytes, so
       // an abstract page or a "download" interstitial fails here exactly like
       // a dead link does.
       throw new ConvexError(

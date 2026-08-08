@@ -90,6 +90,72 @@ function readHttpUrl(value: unknown): string | undefined {
   }
 }
 
+/**
+ * Whether a hostname names a site or a machine.
+ *
+ * The same paranoia as `readHttpUrl`, one step further out. A scheme check
+ * says the string is a URL we can fetch; this says the thing on the other end
+ * is somewhere on the public web rather than something wearing our own
+ * network's address. Convex actions run inside infrastructure with a private
+ * network around them, and `fetch` will resolve `localhost`, `127.0.0.1`, or
+ * `169.254.169.254` into a request that originates from in there — which is
+ * how a text box becomes a way to read an internal service through us.
+ *
+ * A free copy of a paper lives at a hostname, so this costs a member nothing.
+ * It is also only half the problem: a public name that resolves to a private
+ * address still passes, and closing that means resolving DNS ourselves and
+ * checking the address before connecting.
+ */
+export function isFetchableHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  // `URL.hostname` keeps the brackets on an IPv6 literal, which is the only
+  // thing that can start with one.
+  if (host.startsWith("[")) {
+    return false;
+  }
+  // Dotted-quad, and the decimal and hex spellings of the same address.
+  if (/^(?:\d|0x)[0-9a-fx.]*$/i.test(host)) {
+    return false;
+  }
+  // `localhost`, and every other name with no public suffix on it.
+  return host.includes(".");
+}
+
+/**
+ * Where a `Location` header actually points, or `null` if we won't go there.
+ *
+ * A redirect is the second place a URL gets chosen, and the check we ran on
+ * the first one does not travel with it: a perfectly public host can answer
+ * 302 with an internal address, and a fetch that follows redirects by itself
+ * will have made that request before anything gets a look at it. So the hop
+ * is resolved here — `Location` is allowed to be relative — and put through
+ * the same two rules the typed URL passed.
+ *
+ * Pure, so the resolution and the refusals are testable without a server on
+ * the other end willing to redirect.
+ */
+export function nextRedirectHop(
+  currentUrl: string,
+  location: string | null,
+): string | null {
+  const raw = location?.trim();
+  if (raw === undefined || raw.length === 0) {
+    return null;
+  }
+
+  let next: URL;
+  try {
+    next = new URL(raw, currentUrl);
+  } catch {
+    return null;
+  }
+
+  if (next.protocol !== "https:" || !isFetchableHost(next.hostname)) {
+    return null;
+  }
+  return next.toString();
+}
+
 function readYear(value: unknown): number | undefined {
   const year = typeof value === "number" ? value : Number(value);
   if (!Number.isInteger(year) || year < 1600 || year > 2200) {
