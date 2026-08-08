@@ -31,6 +31,13 @@ export default convexAuthNextjsMiddleware(
 );
 
 export const config = {
-  // Run on every route except static assets and Next internals.
-  matcher: ["/((?!.*\\..*|_next).*)", "/", "/(api|trpc)(.*)"],
+  // Only the routes that can have a session. The stock Convex Auth matcher
+  // covers the whole site, so every hit on the landing page — a prerendered
+  // file with no authenticated content — ran a token check and could come
+  // back carrying `Set-Cookie` (verified: with an expired cookie present, `/`
+  // answered with three), which is exactly what stops a CDN caching it.
+  // Nothing is lost by dropping `/`: the middleware only reads the session to
+  // pick a redirect, and `/` has no redirect to pick.
+  // (`:path*` is zero-or-more, so this covers `/app` itself.)
+  matcher: ["/signin", "/app/:path*"],
 };
