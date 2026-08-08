@@ -1405,6 +1405,22 @@ export function assembleMarkdown<A extends string = string>(
 }
 
 /**
+ * Is this still the draft the approver was editing?
+ *
+ * Discriminated on `generatedAt` rather than on the row's id, because the id
+ * does not move: `store` re-generates with `db.replace`, so a session's
+ * write-up keeps one `syntheses` row for its whole life and an id check would
+ * pass happily across a rewrite. The timestamp is the only thing that changes
+ * when the draft does.
+ */
+export function isSameDraft(
+  synthesis: { generatedAt: number } | null,
+  draftGeneratedAt: number,
+): boolean {
+  return synthesis !== null && synthesis.generatedAt === draftGeneratedAt;
+}
+
+/**
  * The draft, as the editable markdown the approval form opens on.
  *
  * Presenter or PI only, because nobody else can act on it — and assembled from
@@ -1468,9 +1484,30 @@ export const draftForApproval = query({
  * it — it need not — but because the approved copy's staleness is measured
  * against the draft's citations, and a write-up with nothing behind it is the
  * unfalsifiable prose this whole feature is built to refuse.
+ *
+ * ## Why the caller has to say which draft it edited
+ *
+ * The snapshot has to describe the draft the text was written from, and the
+ * approval form is open for as long as it takes somebody to read a page and
+ * rewrite it. A generation run finishing in that window replaces the draft
+ * underneath them — so taking "the current row" would pair prose edited from
+ * one draft with citations taken from another, and every staleness verdict
+ * afterwards would be computed against notes that never backed this text.
+ * A miscounted banner is worse than no banner: it is the one part of the
+ * surface whose whole job is to be believed.
+ *
+ * So the approver names the draft, and a mismatch is refused rather than
+ * reconciled. Nothing can be reconciled here — the superseded draft is gone
+ * (`store` replaces the row in place), and the person is the only one who can
+ * say whether their edits still hold against a write-up that has changed.
  */
 export const approve = mutation({
-  args: { sessionId: v.id("sessions"), text: v.string() },
+  args: {
+    sessionId: v.id("sessions"),
+    text: v.string(),
+    /** `generatedAt` of the draft this text was edited from. */
+    draftGeneratedAt: v.number(),
+  },
   returns: v.null(),
   handler: async (ctx, args) => {
     const { session, userId } = await requireApprover(ctx, args.sessionId);
@@ -1494,6 +1531,11 @@ export const approve = mutation({
     if (synthesis === null) {
       throw new ConvexError(
         "There's no draft to approve yet. Generate the write-up first — an approved copy is a version of something the lab's own notes back.",
+      );
+    }
+    if (!isSameDraft(synthesis, args.draftGeneratedAt)) {
+      throw new ConvexError(
+        "The draft was written again while this was open, so what you edited is no longer the write-up it came from. Nothing has been saved — read the new draft, then approve your version against it.",
       );
     }
 

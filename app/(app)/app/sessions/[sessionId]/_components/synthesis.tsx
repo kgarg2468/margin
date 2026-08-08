@@ -454,34 +454,61 @@ function ApprovalEditor({
     );
   }
 
+  if (draft === null) {
+    return (
+      <p className="max-w-prose font-serif text-base leading-relaxed text-ink-muted">
+        There&rsquo;s no draft to approve. Generate the write-up first — what
+        gets approved is a version of something the lab&rsquo;s own notes back.
+      </p>
+    );
+  }
+
   return (
     <ApprovalForm
       session={session}
       // An approved copy is what the approver last said; opening on anything
       // else would throw away their edits the first time somebody re-reads it.
       // With none, the draft is the starting point.
-      initial={approved ?? draft?.markdown ?? ""}
-      draft={draft?.markdown}
+      initial={approved ?? draft.markdown}
+      editedFrom={draft.generatedAt}
+      draft={draft}
       onDone={onDone}
     />
   );
 }
 
+/**
+ * `draft` is live and `editedFrom` is not, and that difference is the point.
+ *
+ * The form stays open for as long as it takes to read a page and rewrite it,
+ * and a generation run finishing in that window replaces the draft underneath
+ * the person editing. The subscription notices; the text in the box does not.
+ * So the draft the text was actually written against is pinned in state at
+ * mount and moves only when the approver deliberately moves it — which is what
+ * lets the mismatch be *seen* here and refused on the server, rather than
+ * quietly papered over by sending whatever timestamp happened to be current at
+ * the moment somebody clicked.
+ */
 function ApprovalForm({
   session,
   initial,
+  editedFrom,
   draft,
   onDone,
 }: {
   session: SessionDetail;
   initial: string;
-  draft: string | undefined;
+  editedFrom: number;
+  draft: { markdown: string; generatedAt: number };
   onDone: () => void;
 }) {
   const approve = useMutation(api.synthesis.approve);
   const [text, setText] = useState(initial);
+  const [basis, setBasis] = useState(editedFrom);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+
+  const rewritten = draft.generatedAt !== basis;
 
   return (
     <div className="pop-in flex flex-col gap-3">
@@ -492,6 +519,15 @@ function ApprovalForm({
         Assembled from the draft, attributions and all. Cut it, rewrite it, say
         what the model missed — what you approve is what the lab keeps.
       </p>
+
+      {rewritten && (
+        <p role="status" className={`${errorClass} max-w-prose`}>
+          The draft was written again while this was open, so what you have
+          here no longer matches the write-up it came from. Nothing you typed
+          has been touched — read the new draft above, then say which it is.
+        </p>
+      )}
+
       <textarea
         id="synthesis-approval"
         rows={18}
@@ -504,13 +540,22 @@ function ApprovalForm({
       <div className="flex flex-wrap items-center gap-x-5 gap-y-3">
         <button
           type="button"
-          disabled={pending || text.trim().length === 0}
+          // Disabled while the draft has moved, rather than left to fail: the
+          // server refuses this pairing anyway, and a button that is certain
+          // to be refused should say so before it is pressed. The round trip
+          // still guards the narrower race — a run landing between this click
+          // and the mutation.
+          disabled={pending || rewritten || text.trim().length === 0}
           className={primaryButtonClass}
           onClick={async () => {
             setError(null);
             setPending(true);
             try {
-              await approve({ sessionId: session._id, text });
+              await approve({
+                sessionId: session._id,
+                text,
+                draftGeneratedAt: basis,
+              });
               onDone();
             } catch (caught) {
               setError(
@@ -524,13 +569,30 @@ function ApprovalForm({
           {pending ? "Approving…" : "Approve write-up"}
         </button>
 
-        {draft !== undefined && draft !== text && (
+        {rewritten && (
+          // The person is the only one who can say whether their edits still
+          // hold against a write-up that has changed, so both answers are
+          // offered and neither is taken for them: keep the text and stand
+          // behind it, or take the new draft and lose it.
           <button
             type="button"
-            onClick={() => setText(draft)}
+            onClick={() => setBasis(draft.generatedAt)}
             className="font-sans text-sm text-accent underline-offset-4 hover:underline"
           >
-            Start again from the draft
+            My text still stands — approve against the new draft
+          </button>
+        )}
+
+        {draft.markdown !== text && (
+          <button
+            type="button"
+            onClick={() => {
+              setText(draft.markdown);
+              setBasis(draft.generatedAt);
+            }}
+            className="font-sans text-sm text-accent underline-offset-4 hover:underline"
+          >
+            {rewritten ? "Start again from the new draft" : "Start again from the draft"}
           </button>
         )}
 

@@ -10,6 +10,7 @@ import {
   countWithdrawn,
   extractJson,
   fence,
+  isSameDraft,
   isStillShared,
   nameIndex,
   sanitizeSections,
@@ -539,6 +540,39 @@ describe("assembleMarkdown", () => {
 
   it("is empty for a write-up with nothing in any section", () => {
     expect(assembleMarkdown([empty])).toBe("");
+  });
+});
+
+describe("isSameDraft", () => {
+  /**
+   * The pairing this protects: an approved copy and the citation snapshot it
+   * is measured against have to describe the *same* draft. The approval form
+   * is open for as long as it takes to rewrite a page, and a generation run
+   * finishing in that window replaces the draft underneath it — so approving
+   * against "whatever is current" would measure one person's prose against
+   * another draft's notes, and every staleness verdict afterwards would be
+   * quietly wrong.
+   */
+  it("accepts the draft the text was actually edited from", () => {
+    expect(isSameDraft({ generatedAt: 1_000 }, 1_000)).toBe(true);
+  });
+
+  it("refuses a draft that was written again while the form was open", () => {
+    expect(isSameDraft({ generatedAt: 2_000 }, 1_000)).toBe(false);
+  });
+
+  it("refuses a stored draft older than the one claimed", () => {
+    // Not reachable through the UI, and refused all the same: the check is
+    // that the two are the same draft, not that one is newer than the other.
+    expect(isSameDraft({ generatedAt: 1_000 }, 2_000)).toBe(false);
+  });
+
+  it("refuses when there is no draft at all", () => {
+    expect(isSameDraft(null, 1_000)).toBe(false);
+  });
+
+  it("does not treat a missing draft as matching a zero timestamp", () => {
+    expect(isSameDraft(null, 0)).toBe(false);
   });
 });
 
