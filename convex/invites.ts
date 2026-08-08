@@ -177,7 +177,16 @@ export const inviteByEmail = action({
   returns: v.object({
     code: v.string(),
     sent: v.number(),
-    failed: v.number(),
+    /**
+     * The addresses Resend would not take, so the PI can see which ones to
+     * fix rather than being told a number and left to guess.
+     *
+     * Handing them back is not a change of privacy stance: they arrived in
+     * this same call, they are returned to the caller who sent them, and
+     * nothing writes them anywhere. There is still no record of who was
+     * invited — only of who joined.
+     */
+    failed: v.array(v.string()),
   }),
   // The return type is spelled out because this action calls `createInvite`
   // through `api.invites`, i.e. through the type of the module it is declared
@@ -187,7 +196,7 @@ export const inviteByEmail = action({
   handler: async (
     ctx,
     args,
-  ): Promise<{ code: string; sent: number; failed: number }> => {
+  ): Promise<{ code: string; sent: number; failed: string[] }> => {
     // Checked before anything is minted: a code created for a batch that could
     // never be delivered is just litter in the PI's list.
     if (!emailIsConfigured()) {
@@ -257,10 +266,16 @@ export const inviteByEmail = action({
       ),
     );
 
-    const failed = results.filter(
-      (result) => result.status === "rejected",
-    ).length;
-    return { code: invite.code, sent: recipients.length - failed, failed };
+    // Paired back up by position — `Promise.allSettled` preserves the order of
+    // what it was given, so index `i` is `recipients[i]`.
+    const failed = recipients.filter(
+      (_, index) => results[index]?.status === "rejected",
+    );
+    return {
+      code: invite.code,
+      sent: recipients.length - failed.length,
+      failed,
+    };
   },
 });
 

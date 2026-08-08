@@ -13,7 +13,7 @@ import {
 } from "@/lib/ui";
 import { useAction, useMutation, useQuery } from "convex/react";
 import Link from "next/link";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { SessionStatusChip } from "../sessions/_components/session-row";
 import { ConfirmAction } from "./confirm-action";
 import { DigestInbox } from "./digest";
@@ -249,28 +249,45 @@ function InviteByEmail({ lab }: { lab: LabSummary }) {
   const [error, setError] = useState<string | null>(null);
   const [sent, setSent] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  // The field is read and rewritten directly rather than mirrored into state:
+  // what a half-delivered batch needs is for the addresses that failed to
+  // still be sitting there, which is a change to the box, not to a model of it.
+  const field = useRef<HTMLTextAreaElement>(null);
 
   return (
     <form
       className="flex flex-col gap-3 border-t border-rule pt-6"
       onSubmit={async (event) => {
         event.preventDefault();
-        const formData = new FormData(event.currentTarget);
-        const form = event.currentTarget;
         setError(null);
         setSent(null);
         setPending(true);
         try {
           const result = await inviteByEmail({
             labId: lab._id,
-            emails: [String(formData.get("emails") ?? "")],
+            emails: [field.current?.value ?? ""],
           });
-          form.reset();
-          setSent(
-            result.failed === 0
-              ? `Sent to ${result.sent} ${result.sent === 1 ? "person" : "people"}. The code is in the list above.`
-              : `Sent to ${result.sent}; ${result.failed} didn't go through. Try those addresses again.`,
-          );
+          if (result.failed.length === 0) {
+            if (field.current !== null) {
+              field.current.value = "";
+            }
+            setSent(
+              `Sent to ${result.sent} ${result.sent === 1 ? "person" : "people"}. The code is in the list above.`,
+            );
+          } else {
+            // Everything that went through is gone from the box and everything
+            // that didn't is still in it, so "send again" means pressing the
+            // button again — not reconstructing the list from a count.
+            if (field.current !== null) {
+              field.current.value = result.failed.join(", ");
+            }
+            setError(
+              (result.sent > 0
+                ? `Sent to ${result.sent} of ${result.sent + result.failed.length}. `
+                : "None of those went through. ") +
+                `Still to send: ${result.failed.join(", ")} — left in the box so you can try again.`,
+            );
+          }
         } catch (caught) {
           setError(
             readableError(caught, "We couldn't send those invitations."),
@@ -284,6 +301,7 @@ function InviteByEmail({ lab }: { lab: LabSummary }) {
         Or send it by email
       </label>
       <textarea
+        ref={field}
         id="invite-emails"
         name="emails"
         rows={2}

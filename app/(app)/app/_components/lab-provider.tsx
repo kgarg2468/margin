@@ -2,15 +2,33 @@
 
 import { api } from "@/convex/_generated/api";
 import { useMutation, useQuery } from "convex/react";
+import { ConvexError } from "convex/values";
 import type { FunctionReturnType } from "convex/server";
-import { createContext, useCallback, useContext, useEffect, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import type { ReactNode } from "react";
 import { readableError } from "./errors";
 
 export type LabSummary = FunctionReturnType<typeof api.labs.getMyLabs>[number];
 
-/** What became of an invite code that arrived in the URL, once we know. */
-type InviteNoticeState = { tone: "joined" | "refused"; message: string };
+/**
+ * What became of an invite code that arrived in the URL, once we know.
+ *
+ * `retryCode` is set only when the attempt failed for a reason that might not
+ * still be true in ten seconds — the code itself is still good, and it is
+ * still in the address bar waiting to be spent.
+ */
+type InviteNoticeState = {
+  tone: "joined" | "refused";
+  message: string;
+  retryCode?: string;
+};
 
 type LabContextValue = {
   /** `undefined` while the first query is in flight. */
@@ -20,6 +38,8 @@ type LabContextValue = {
   /** The outcome of an emailed invitation, until it is dismissed. */
   inviteNotice: InviteNoticeState | null;
   dismissInviteNotice: () => void;
+  /** Present only while a failed-but-retryable invitation is on the notice. */
+  retryInviteNotice: () => void;
 };
 
 const LabContext = createContext<LabContextValue | null>(null);
@@ -28,6 +48,28 @@ const STORAGE_KEY = "margin.currentLabId";
 
 /** The shape `convex/invites.ts` mints; anything else in the URL is not a code. */
 const INVITE_PATTERN = /^[A-Za-z0-9]{1,16}$/;
+
+/**
+ * Spend the code out of the address bar.
+ *
+ * Called only once the server has actually accepted it — or has refused it in
+ * terms that will not change. Removing it any earlier throws away a live
+ * invitation: a dropped connection or a mutation that lost an OCC race would
+ * leave the recipient on a URL that no longer says what they were invited to,
+ * with the code now only recoverable from the original email.
+ *
+ * Checks that the code is still the one in the bar before deleting, so a
+ * response that lands after the reader has navigated somewhere else doesn't
+ * rewrite a URL it has nothing to do with.
+ */
+function clearInviteParam(code: string): void {
+  const url = new URL(window.location.href);
+  if (url.searchParams.get("invite") !== code) {
+    return;
+  }
+  url.searchParams.delete("invite");
+  window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+}
 
 /**
  * Which lab you are looking at is a client-side concern for now — one route
@@ -60,29 +102,23 @@ export function LabProvider({ children }: { children: ReactNode }) {
 
   const dismissInviteNotice = useCallback(() => setInviteNotice(null), []);
 
-  useEffect(() => {
-    // Read from the URL directly rather than through `useSearchParams`: this
-    // runs once on mount and the hook would opt the whole shell out of static
-    // rendering to answer a question we only ask in the browser anyway.
-    const url = new URL(window.location.href);
-    const code = url.searchParams.get("invite");
-    if (code === null || !INVITE_PATTERN.test(code)) {
-      return;
-    }
-
-    // Spend the code out of the address bar before spending it at the server,
-    // so a refresh mid-flight cannot start a second redemption.
-    url.searchParams.delete("invite");
-    window.history.replaceState(
-      null,
-      "",
-      url.pathname + url.search + url.hash,
-    );
-
-    let live = true;
-    void redeemInvite({ code })
-      .then(({ labId, labName, alreadyMember }) => {
-        if (!live) return;
+  /**
+   * Try to spend one invite code, and say what happened.
+   *
+   * The two ways this fails are not the same failure, and conflating them is
+   * what made the first version lose invitations. A `ConvexError` is the
+   * server's considered answer — revoked, expired, full — and it will say the
+   * same thing forever, so the code is spent out of the URL and the reader is
+   * told to ask for a new one. Anything else (a dropped connection, a 5xx, a
+   * transaction that lost its race) is weather: the code is untouched and
+   * still in the address bar, so a retry — or simply a reload — picks it up.
+   */
+  const attemptRedeem = useCallback(
+    async (code: string) => {
+      setInviteNotice(null);
+      try {
+        const { labId, labName, alreadyMember } = await redeemInvite({ code });
+        clearInviteParam(code);
         selectLab(labId);
         setInviteNotice({
           tone: "joined",
@@ -90,22 +126,56 @@ export function LabProvider({ children }: { children: ReactNode }) {
             ? `You're already in ${labName}.`
             : `You've joined ${labName}.`,
         });
-      })
-      .catch((caught: unknown) => {
-        if (!live) return;
+      } catch (caught) {
+        if (caught instanceof ConvexError) {
+          clearInviteParam(code);
+          setInviteNotice({
+            tone: "refused",
+            message: readableError(
+              caught,
+              "That invitation is no longer valid. Ask whoever sent it for a new one.",
+            ),
+          });
+          return;
+        }
         setInviteNotice({
           tone: "refused",
-          message: readableError(
-            caught,
-            "That invitation is no longer valid. Ask whoever sent it for a new one.",
-          ),
+          message:
+            "We couldn't reach Margin to accept that invitation. It's still good — try again.",
+          retryCode: code,
         });
-      });
+      }
+    },
+    [redeemInvite, selectLab],
+  );
 
-    return () => {
-      live = false;
-    };
-  }, [redeemInvite, selectLab]);
+  // One attempt per code per mount. Without this, StrictMode's double-invoke
+  // in development fires two redemptions for the same code; the mutation is
+  // idempotent per member so nothing breaks, but there is no reason to ask
+  // twice. The retry button calls `attemptRedeem` directly and is not gated.
+  const attempted = useRef<string | null>(null);
+
+  useEffect(() => {
+    // Read from the URL directly rather than through `useSearchParams`: this
+    // runs once on mount and the hook would opt the whole shell out of static
+    // rendering to answer a question we only ask in the browser anyway.
+    const code = new URL(window.location.href).searchParams.get("invite");
+    if (code === null || !INVITE_PATTERN.test(code)) {
+      return;
+    }
+    if (attempted.current === code) {
+      return;
+    }
+    attempted.current = code;
+    void attemptRedeem(code);
+  }, [attemptRedeem]);
+
+  const retryCode = inviteNotice?.retryCode;
+  const retryInviteNotice = useCallback(() => {
+    if (retryCode !== undefined) {
+      void attemptRedeem(retryCode);
+    }
+  }, [retryCode, attemptRedeem]);
 
   const currentLab =
     labs?.find((lab) => lab._id === selectedId) ?? labs?.[0] ?? null;
@@ -118,6 +188,7 @@ export function LabProvider({ children }: { children: ReactNode }) {
         selectLab,
         inviteNotice,
         dismissInviteNotice,
+        retryInviteNotice,
       }}
     >
       {children}
@@ -135,7 +206,7 @@ export function LabProvider({ children }: { children: ReactNode }) {
  * doesn't.
  */
 export function InviteNotice() {
-  const { inviteNotice, dismissInviteNotice } = useLabs();
+  const { inviteNotice, dismissInviteNotice, retryInviteNotice } = useLabs();
   if (inviteNotice === null) {
     return null;
   }
@@ -153,13 +224,24 @@ export function InviteNotice() {
       <p className="font-serif text-base leading-relaxed text-ink">
         {inviteNotice.message}
       </p>
-      <button
-        type="button"
-        onClick={dismissInviteNotice}
-        className="tap-target font-sans text-xs uppercase tracking-[0.14em] text-ink-faint transition-colors hover:text-ink"
-      >
-        Dismiss
-      </button>
+      <span className="flex items-baseline gap-4">
+        {inviteNotice.retryCode !== undefined && (
+          <button
+            type="button"
+            onClick={retryInviteNotice}
+            className="tap-target font-sans text-xs uppercase tracking-[0.14em] text-accent transition-colors hover:text-accent-strong"
+          >
+            Try again
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={dismissInviteNotice}
+          className="tap-target font-sans text-xs uppercase tracking-[0.14em] text-ink-faint transition-colors hover:text-ink"
+        >
+          Dismiss
+        </button>
+      </span>
     </div>
   );
 }
