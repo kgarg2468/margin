@@ -3,7 +3,7 @@
 import { readableError } from "@/app/(app)/app/_components/errors";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { extractPdfFile } from "@/lib/pdf/extract";
+import { describePdfOpenError, extractPdfFile } from "@/lib/pdf/extract";
 import {
   errorClass,
   eyebrowClass,
@@ -105,10 +105,17 @@ export function PdfPanel({
       setStatus(null);
     } catch (caught) {
       setStatus(null);
-      const message = readableError(
-        caught,
-        "Margin couldn't read that PDF. If it opens elsewhere, it may be encrypted.",
-      );
+      // This catch covers the whole attach, not just the read: an upload or a
+      // mutation can fail here too, and those arrive as `ConvexError`s whose
+      // message is the one worth showing. So ask pdf.js's classifier first —
+      // it only answers for the failures it recognises — and fall through to
+      // `readableError` for everything else.
+      const message =
+        describePdfOpenError(caught) ??
+        readableError(
+          caught,
+          "Margin couldn't read that PDF. If it opens elsewhere, it may be encrypted.",
+        );
       setError(message);
       await recover(uploaded, message);
     }
