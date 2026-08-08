@@ -3,13 +3,14 @@
 import { readableError } from "@/app/(app)/app/_components/errors";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { extractPdf, extractPdfFile } from "@/lib/pdf/extract";
+import { extractPdfFile } from "@/lib/pdf/extract";
 import { errorClass, eyebrowClass } from "@/lib/ui";
 import { useMutation, useQuery } from "convex/react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { IngestStatus } from "./paper-meta";
 import { PdfDropzone } from "./pdf-dropzone";
 import { uploadPdf } from "./pdf-ingest";
+import { useTextLayer } from "./use-text-layer";
 
 /**
  * The file half of a paper: whether Margin has the PDF, whether it has the
@@ -44,10 +45,10 @@ export function PdfPanel({
   );
   const generateUploadUrl = useMutation(api.papers.generateUploadUrl);
   const attachPdf = useMutation(api.papers.attachPdf);
-  const saveExtractedText = useMutation(api.papers.saveExtractedText);
   const markIngestFailed = useMutation(api.papers.markIngestFailed);
   const discardUpload = useMutation(api.papers.discardUpload);
 
+  const textLayer = useTextLayer();
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -105,39 +106,6 @@ export function PdfPanel({
   }
 
   /**
-   * The text layer for a file Margin fetched itself. pdf.js runs in the
-   * browser, so the extraction that upload does at ingest has to happen the
-   * first time a member asks for it instead.
-   */
-  async function readStoredPdf() {
-    if (pdfUrl === undefined || pdfUrl === null) {
-      return;
-    }
-    setError(null);
-    try {
-      setStatus("Fetching the PDF…");
-      const response = await fetch(pdfUrl);
-      if (!response.ok) {
-        // Without this, a 404 body goes to pdf.js and comes back as
-        // "couldn't read that PDF" — which blames the file for the fetch.
-        throw new Error(`The stored file came back ${response.status}.`);
-      }
-      const data = await response.arrayBuffer();
-      const extraction = await extractPdf(data, {
-        onProgress: (pagesDone, pages) =>
-          setStatus(`Reading page ${pagesDone} of ${pages}…`),
-      });
-      await saveExtractedText({ paperId, pages: extraction.pages });
-      setStatus(null);
-    } catch (caught) {
-      setStatus(null);
-      const message = readableError(caught, "That PDF wouldn't open.");
-      setError(message);
-      await recover(null, message);
-    }
-  }
-
-  /**
    * Extraction is worth offering when it has never run, or when it ran and
    * broke. It is not worth offering for a scan: that file has been read, it
    * had no text in it, and reading it again would call a mutation that has
@@ -145,6 +113,34 @@ export function PdfPanel({
    */
   const canReadText =
     !hasText && (pageCount === undefined || ingestStatus === "failed");
+
+  /**
+   * A text layer that has never been attempted is not a decision anyone needs
+   * to be asked about — it is the rest of the ingest, waiting for a browser.
+   * Landing on this page is enough; start it.
+   *
+   * Only where it has never run. A paper whose extraction already failed keeps
+   * its button, because retrying the same broken file on every visit is a loop,
+   * not a recovery.
+   */
+  const neverAttempted =
+    hasPdf && !hasText && pageCount === undefined && ingestStatus !== "failed";
+
+  // `read` is the stable half of the hook; depending on the hook's object
+  // would re-run this on every render for no reason.
+  const { read } = textLayer;
+  useEffect(() => {
+    if (neverAttempted) {
+      void read(paperId);
+    }
+  }, [neverAttempted, paperId, read]);
+
+  // Attaching a file and reading a stored one are two routes to the same two
+  // sentences, so they share them rather than each drawing their own.
+  const busyMessage =
+    status ?? (textLayer.phase.kind === "working" ? textLayer.phase.message : null);
+  const problem =
+    error ?? (textLayer.phase.kind === "failed" ? textLayer.phase.message : null);
 
   return (
     <section className="flex flex-col gap-4">
@@ -174,9 +170,9 @@ export function PdfPanel({
             {canReadText && (
               <button
                 type="button"
-                disabled={status !== null}
-                onClick={readStoredPdf}
-                className="font-sans text-sm text-accent underline-offset-4 hover:underline disabled:opacity-50"
+                disabled={busyMessage !== null}
+                onClick={() => void textLayer.read(paperId, true)}
+                className="tap-target font-sans text-sm text-accent underline-offset-4 hover:underline disabled:opacity-50"
               >
                 {ingestStatus === "failed"
                   ? "Try reading it again"
@@ -212,7 +208,7 @@ export function PdfPanel({
               <PdfDropzone
                 id="replace-pdf"
                 hint="The old file is discarded."
-                disabled={status !== null}
+                disabled={busyMessage !== null}
                 onFile={attach}
               />
             </div>
@@ -227,20 +223,20 @@ export function PdfPanel({
           <PdfDropzone
             id="attach-pdf"
             hint="Read here in your browser, then stored for the lab."
-            disabled={status !== null}
+            disabled={busyMessage !== null}
             onFile={attach}
           />
         </div>
       )}
 
-      {status !== null && (
+      {busyMessage !== null && (
         <p className="font-sans text-sm text-ink-muted" aria-live="polite">
-          {status}
+          {busyMessage}
         </p>
       )}
-      {error !== null && (
+      {problem !== null && (
         <p role="alert" className={errorClass}>
-          {error}
+          {problem}
         </p>
       )}
     </section>

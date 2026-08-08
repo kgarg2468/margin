@@ -59,15 +59,20 @@ function Library({ lab }: { lab: LabSummary }) {
         </p>
       </header>
 
-      {/* An empty library has nothing to hide the form behind. */}
+      {/* An empty library has nothing to hide the form behind.
+          `onAdded` pins the panel open the moment a lookup succeeds: without
+          it the first paper closed the form by arriving, because `isEmpty`
+          stopped being true and `adding` had never been set — taking the
+          outcome of the lookup off the screen at the one moment it was worth
+          reading. Closing it is now something the reader does. */}
       {isEmpty || adding ? (
         <div className="flex flex-col gap-3">
-          <AddPaper labId={lab._id} />
+          <AddPaper labId={lab._id} onAdded={() => setAdding(true)} />
           {!isEmpty && (
             <button
               type="button"
               onClick={() => setAdding(false)}
-              className="self-start font-sans text-sm text-accent underline-offset-4 hover:underline"
+              className="tap-target self-start font-sans text-sm text-accent underline-offset-4 hover:underline"
             >
               Done adding
             </button>
@@ -77,7 +82,7 @@ function Library({ lab }: { lab: LabSummary }) {
         <button
           type="button"
           onClick={() => setAdding(true)}
-          className={`${secondaryButtonClass} self-start`}
+          className={`${secondaryButtonClass} tap-target self-start`}
         >
           Add a paper
         </button>
@@ -123,14 +128,20 @@ function Library({ lab }: { lab: LabSummary }) {
                       {line}
                     </span>
                   )}
-                  {readable && (
-                    <Link
-                      href={`/app/library/${paper._id}`}
-                      className="self-start font-sans text-xs text-ink-faint underline-offset-4 hover:text-accent hover:underline"
-                    >
-                      Record
-                    </Link>
-                  )}
+                  {/* A paper that can't be read yet has exactly one thing
+                      worth doing to it, and "TEXT PENDING" next to a title
+                      does not say what that is or where. One named action,
+                      in the accent, rather than a chip to decode. */}
+                  <Link
+                    href={`/app/library/${paper._id}`}
+                    className={
+                      readable
+                        ? "tap-target self-start font-sans text-xs text-ink-faint underline-offset-4 hover:text-accent hover:underline"
+                        : "tap-target self-start font-sans text-sm text-accent underline-offset-4 hover:underline"
+                    }
+                  >
+                    {readable ? "Record" : "Finish preparing this paper →"}
+                  </Link>
                 </li>
               );
             })}

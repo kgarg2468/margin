@@ -18,6 +18,8 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { PdfDropzone } from "./pdf-dropzone";
 import { parseAuthors, titleFromFilename, uploadPdf } from "./pdf-ingest";
+import type { TextLayerPhase } from "./use-text-layer";
+import { useTextLayer } from "./use-text-layer";
 
 /**
  * Two ways to add a paper, and they are genuinely different acts.
@@ -28,7 +30,19 @@ import { parseAuthors, titleFromFilename, uploadPdf } from "./pdf-ingest";
  * call it. Tabs rather than one clever box that guesses, because guessing
  * wrong on the way in is expensive later.
  */
-export function AddPaper({ labId }: { labId: Id<"labs"> }) {
+export function AddPaper({
+  labId,
+  onAdded,
+}: {
+  labId: Id<"labs">;
+  /**
+   * Fired once a DOI has produced a paper. The library hides this whole panel
+   * as soon as it has something on the shelf, which used to take the outcome
+   * of the lookup down with it the instant the query updated — so the panel
+   * asks to be kept open rather than assuming it will be.
+   */
+  onAdded?: () => void;
+}) {
   const [tab, setTab] = useState<"doi" | "upload">("doi");
 
   return (
@@ -53,7 +67,7 @@ export function AddPaper({ labId }: { labId: Id<"labs"> }) {
       </div>
 
       {tab === "doi" ? (
-        <DoiTab labId={labId} />
+        <DoiTab labId={labId} onAdded={onAdded} />
       ) : (
         <UploadTab labId={labId} />
       )}
@@ -101,8 +115,15 @@ type DoiResult = {
   hasPdf: boolean;
 };
 
-function DoiTab({ labId }: { labId: Id<"labs"> }) {
+function DoiTab({
+  labId,
+  onAdded,
+}: {
+  labId: Id<"labs">;
+  onAdded?: () => void;
+}) {
   const createFromDoi = useAction(api.papers.createFromDoi);
+  const textLayer = useTextLayer();
   const [doi, setDoi] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -131,8 +152,18 @@ function DoiTab({ labId }: { labId: Id<"labs"> }) {
           setResult(null);
           setPending(true);
           try {
-            setResult(await createFromDoi({ labId, doi }));
+            const outcome = await createFromDoi({ labId, doi });
+            setResult(outcome);
             setDoi("");
+            onAdded?.();
+            // A copy Margin fetched itself has never been near a browser that
+            // could read it, and pdf.js only runs in one. Nobody should have
+            // to be told that, or go and find the button: the reader is right
+            // here, so do it now and say so. The promise on this panel is that
+            // an open-access paper "arrives ready to read".
+            if (!outcome.alreadyInLibrary && outcome.hasPdf) {
+              void textLayer.read(outcome.paperId);
+            }
           } catch (caught) {
             setError(readableError(caught, "That lookup didn't work."));
           } finally {
@@ -174,41 +205,77 @@ function DoiTab({ labId }: { labId: Id<"labs"> }) {
         </button>
       </form>
 
-      {result !== null && <DoiOutcome result={result} />}
+      {result !== null && (
+        <DoiOutcome result={result} textLayer={textLayer.phase} />
+      )}
     </div>
   );
 }
 
 /**
- * Four endings, and every one of them is about what is still missing.
+ * What happened, and it stays said.
  *
- * "Added" alone would be a small lie in three of the four cases: a fetched PDF
- * has never been near a browser that could read its text layer, and a paper
- * that was already here may still be waiting for its file. Saying which — and
- * pointing at the place it gets fixed — is the difference between a paper that
- * gets read and a dead row.
+ * This panel used to be unmounted by its own success: the library only shows
+ * the add form while the shelf is empty, so the first paper's outcome vanished
+ * at the moment the query came back with it. The library now keeps the panel
+ * open (`onAdded`), and everything below is written to be read after the fact
+ * rather than glimpsed.
+ *
+ * "Added" alone would still be a small lie in most cases — a paper that was
+ * already here may be waiting for its file, and a fetched PDF has no text
+ * layer until this browser makes one. Where that last step is running, this
+ * says so and then says when it is done; where it can't, it points at the
+ * place it gets fixed.
  */
-function DoiOutcome({ result }: { result: DoiResult }) {
-  const href = `/app/library/${result.paperId}`;
+function DoiOutcome({
+  result,
+  textLayer,
+}: {
+  result: DoiResult;
+  textLayer: TextLayerPhase;
+}) {
+  const record = `/app/library/${result.paperId}`;
+  const extracting = !result.alreadyInLibrary && result.hasPdf;
+  const ready = extracting && textLayer.kind === "done";
+
+  function line(): string {
+    if (result.alreadyInLibrary) {
+      return result.hasPdf
+        ? "Already in the library — nothing to add."
+        : "Already in the library — it still needs a PDF, open it to attach one.";
+    }
+    if (!result.hasPdf) {
+      return "Added, metadata only. No open-access copy was available, so the reader needs the PDF attaching before anyone can annotate it.";
+    }
+    switch (textLayer.kind) {
+      case "working":
+        return `Added. ${textLayer.message}`;
+      case "done":
+        return "Added, and its text is read — the margins are open.";
+      case "failed":
+        return `Added, but its text layer wouldn't come out. ${textLayer.message}`;
+      default:
+        return "Added — open the paper to read its text layer.";
+    }
+  }
 
   return (
     <div className="flex flex-col gap-2 border-l-2 border-accent pl-4">
-      <p className="font-serif text-base leading-relaxed text-ink">
-        {result.alreadyInLibrary
-          ? result.hasPdf
-            ? "Already in the library — nothing to add."
-            : "Already in the library — it still needs a PDF, open it to attach one."
-          : result.hasPdf
-            ? "Added — open the paper to read its text layer."
-            : "Added, metadata only. No open-access copy was available, so the reader needs the PDF attaching before anyone can annotate it."}
+      {/* Polite, and on the container: this sentence is rewritten several
+          times as the pages are read, and each rewrite is the same news
+          getting more specific rather than a new thing to announce. */}
+      <p className="font-serif text-base leading-relaxed text-ink" aria-live="polite">
+        {line()}
       </p>
       <Link
-        href={href}
-        className="font-sans text-sm text-accent underline-offset-4 hover:underline"
+        href={ready ? `${record}/read` : record}
+        className="tap-target self-start font-sans text-sm text-accent underline-offset-4 hover:underline"
       >
-        {result.hasPdf
-          ? `Open ${result.title}`
-          : `Attach the PDF to ${result.title}`}
+        {ready
+          ? `Read ${result.title}`
+          : result.hasPdf
+            ? `Open ${result.title}`
+            : `Attach the PDF to ${result.title}`}
       </Link>
     </div>
   );
