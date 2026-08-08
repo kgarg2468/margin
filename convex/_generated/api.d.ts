@@ -19,6 +19,7 @@ import type * as lib_doi from "../lib/doi.js";
 import type * as lib_ledger from "../lib/ledger.js";
 import type * as lib_scholarly from "../lib/scholarly.js";
 import type * as papers from "../papers.js";
+import type * as search from "../search.js";
 import type * as sessions from "../sessions.js";
 import type * as synthesis from "../synthesis.js";
 import type * as users from "../users.js";
@@ -41,6 +42,7 @@ declare const fullApi: ApiFromModules<{
   "lib/ledger": typeof lib_ledger;
   "lib/scholarly": typeof lib_scholarly;
   papers: typeof papers;
+  search: typeof search;
   sessions: typeof sessions;
   synthesis: typeof synthesis;
   users: typeof users;
