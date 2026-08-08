@@ -52,6 +52,16 @@
   --violet-600: #5c4b8a;
   --violet-400: #a796d8;
 
+  /* Three more inks for the annotation ontology (see below). Chosen to sit
+   * beside espresso on sand without turning the page into a highlighter set:
+   * a dry moss, an iron-oxide rust, a slate teal. */
+  --moss-700: #4a5f3a;
+  --moss-300: #9cb489;
+  --rust-700: #8a4a2f;
+  --rust-300: #d79a7c;
+  --teal-700: #2c5f63;
+  --teal-300: #7fb3b6;
+
   /* --- semantic tokens ---------------------------------------
    * light-dark(light, dark). Dark mode is a deep, warm brown-black page
    * with sand-toned ink. Which branch applies is decided by the used
@@ -84,6 +94,55 @@
     color-mix(in oklab, var(--wedgwood-300) 22%, transparent)
   );
 
+  /* --- annotation ontology ------------------------------------
+   * A Margin annotation is typed, not just coloured, but the type has to
+   * be legible at a glance in a crowded margin — so each one gets an ink
+   * and a matching highlighter wash mixed from it. Two of the five reuse
+   * the brand pair (accent = hypothesis, secondary = open question), which
+   * keeps the palette honest: the ontology *is* the brand.
+   *
+   * Every ink carries small sans-serif text, so all five clear AA on the
+   * lightest ground they land on. Light values on --surface (#fdfaf4):
+   * hypothesis 7.9:1, method 6.8:1, critique 6.5:1, connection 7.0:1,
+   * question 7.1:1. Dark values on --surface-sunken (#251e1a): none below
+   * 6.2:1. An ink on its own wash is the tightest pairing and still clears
+   * it — critique, the closest, is 5.3:1 light and 5.1:1 dark.
+   *
+   * The washes are written as light-dark(color-mix(), color-mix()) rather
+   * than color-mix() over a light-dark() ink: mixing a value that is only
+   * resolved at used-value time is a corner browsers disagree about, and
+   * this way each branch is a plain colour.
+   */
+  --note-hypothesis: light-dark(var(--wedgwood-700), var(--wedgwood-300));
+  --note-hypothesis-wash: light-dark(
+    color-mix(in oklab, var(--wedgwood-700) 14%, transparent),
+    color-mix(in oklab, var(--wedgwood-300) 20%, transparent)
+  );
+
+  --note-method: light-dark(var(--moss-700), var(--moss-300));
+  --note-method-wash: light-dark(
+    color-mix(in oklab, var(--moss-700) 14%, transparent),
+    color-mix(in oklab, var(--moss-300) 20%, transparent)
+  );
+
+  --note-critique: light-dark(var(--rust-700), var(--rust-300));
+  --note-critique-wash: light-dark(
+    color-mix(in oklab, var(--rust-700) 14%, transparent),
+    color-mix(in oklab, var(--rust-300) 20%, transparent)
+  );
+
+  --note-connection: light-dark(var(--teal-700), var(--teal-300));
+  --note-connection-wash: light-dark(
+    color-mix(in oklab, var(--teal-700) 14%, transparent),
+    color-mix(in oklab, var(--teal-300) 20%, transparent)
+  );
+
+  --note-question: light-dark(var(--violet-600), var(--violet-400));
+  --note-question-wash: light-dark(
+    color-mix(in oklab, var(--violet-600) 14%, transparent),
+    color-mix(in oklab, var(--violet-400) 20%, transparent)
+  );
+
   /* follow the system by default; the classes below force a mode */
   color-scheme: light dark;
 }
@@ -114,6 +173,12 @@
   --color-secondary: var(--secondary);
   --color-highlight: var(--highlight);
   --color-ring: var(--ring);
+
+  --color-note-hypothesis: var(--note-hypothesis);
+  --color-note-method: var(--note-method);
+  --color-note-critique: var(--note-critique);
+  --color-note-connection: var(--note-connection);
+  --color-note-question: var(--note-question);
 
   /* Serif leads (reading + headings); sans is for UI chrome only. */
   --font-serif: var(--font-source-serif), ui-serif, Georgia, serif;
