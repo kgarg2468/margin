@@ -40,6 +40,12 @@ import { recordEvent } from "./lib/ledger";
  * anywhere, least of all to a model — the read is pinned to
  * `by_paper_and_visibility` at `"lab"` and session-scoped rows are re-checked
  * in memory.
+ *
+ * That is a check at generation time, and a write-up outlives it. Notes get
+ * withdrawn and members flip a note back to private, so `getForSession`
+ * re-checks every citation on the way out and redacts what no longer holds
+ * (see `applyWithdrawals`). Privacy here is a property of the read, not of the
+ * stored row.
  */
 
 /* -------------------------------------------------------------------------
@@ -1071,7 +1077,107 @@ export const store = internalMutation({
   },
 });
 
-/** The stored write-up for a session, for anyone in the lab. */
+/* -------------------------------------------------------------------------
+ * Reading it back
+ * ---------------------------------------------------------------------- */
+
+/**
+ * What stands in for an item whose notes have all been taken back.
+ *
+ * The same sentence the reader already renders for this case, so the two
+ * cannot say different things about the same item — and so a client that only
+ * ever reads `text` (a cache, an export, the next surface somebody builds)
+ * shows the redaction rather than the sentence it replaced.
+ */
+export const WITHDRAWN_ITEM_TEXT =
+  "A line here rested on notes that are no longer shared.";
+
+/**
+ * Is this citation still something the lab is allowed to be shown?
+ *
+ * Three ways a note stops counting, and they are one condition rather than
+ * three because the write-up cannot tell them apart and should not try: the
+ * row is gone, it was withdrawn (`deletedAt`), or its author flipped it back
+ * to `private`. The lab check is the same one the caller passed to get here —
+ * a stored id is a claim about a row, and a claim is worth re-reading.
+ */
+export function isStillShared(
+  annotation: Pick<
+    Doc<"annotations">,
+    "labId" | "visibility" | "deletedAt"
+  > | null,
+  labId: Id<"labs">,
+): boolean {
+  return (
+    annotation !== null &&
+    annotation.deletedAt === undefined &&
+    annotation.visibility === "lab" &&
+    annotation.labId === labId
+  );
+}
+
+/**
+ * Re-apply the margin's current state to a write-up that was frozen when it
+ * was generated.
+ *
+ * A synthesis item is a paraphrase of the annotations it cites, so when those
+ * annotations stop being shared the item is a paraphrase of writing the reader
+ * is no longer allowed to read. Two thresholds, and they are exactly the ones
+ * `SessionSynthesis` applies on the client:
+ *
+ * - **No citation still shared** — the text is replaced outright. Not
+ *   unlinked, not dropped: replaced, so the record still says a line was here
+ *   while the sentence itself stops travelling.
+ * - **Some citation still shared** — the text stands, because at least one
+ *   note behind it is still readable, but the attribution goes. Names are the
+ *   union of the cited notes' authors and cannot be mapped back to individual
+ *   ids, so a partial withdrawal means no particular name is still provably
+ *   owed.
+ *
+ * The cited ids are kept in both cases. They are what lets the client run the
+ * same test against what it can actually see and reach the same verdict; strip
+ * them and the reader would render a redaction marker as though it were the
+ * write-up's own prose.
+ */
+export function applyWithdrawals<A extends string = string>(
+  sections: readonly Section<A>[],
+  stillShared: ReadonlySet<A>,
+): Section<A>[] {
+  return sections.map((section) => ({
+    ...section,
+    items: section.items.map((item) => {
+      const live = item.annotationIds.filter((id) => stillShared.has(id));
+      if (live.length === item.annotationIds.length) {
+        return item;
+      }
+      if (live.length === 0) {
+        return {
+          text: WITHDRAWN_ITEM_TEXT,
+          attribution: [],
+          annotationIds: item.annotationIds,
+        };
+      }
+      return { ...item, attribution: [] };
+    }),
+  }));
+}
+
+/**
+ * The stored write-up for a session, for anyone in the lab.
+ *
+ * The row is not the answer. It was written against the margin as it stood at
+ * generation time, and the margin moves: notes get withdrawn, and a member can
+ * flip one from lab-visible back to private. So every citation is re-checked
+ * here, against the annotations as they are now, and the items are redacted on
+ * the way out — because a write-up that keeps quoting a note somebody took
+ * back is a way around `visibility: "private"`, and the redaction has to
+ * happen before the text crosses the wire rather than after it has landed in
+ * every reader's cache.
+ *
+ * The reads are bounded by the row: a synthesis is five sections of a few
+ * items each, every item cites a handful of annotations, and the union is
+ * deduped before anything is fetched.
+ */
 export const getForSession = query({
   args: { sessionId: v.id("sessions") },
   returns: v.union(
@@ -1099,10 +1205,30 @@ export const getForSession = query({
     if (synthesis === null) {
       return null;
     }
+
+    // Which of the annotations this write-up rests on are still shared with
+    // this lab. Deduped first, so an item cited by three sections costs one
+    // read; `visibility` is re-read from the row rather than assumed, because
+    // flipping a note back to private is one tap and leaves the write-up
+    // untouched.
+    const cited = new Set<Id<"annotations">>();
+    for (const section of synthesis.sections) {
+      for (const item of section.items) {
+        for (const annotationId of item.annotationIds) cited.add(annotationId);
+      }
+    }
+    const stillShared = new Set<Id<"annotations">>();
+    for (const annotationId of cited) {
+      const annotation = await ctx.db.get(annotationId);
+      if (isStillShared(annotation, session.labId)) {
+        stillShared.add(annotationId);
+      }
+    }
+
     return {
       _id: synthesis._id,
       sessionId: synthesis.sessionId,
-      sections: synthesis.sections,
+      sections: applyWithdrawals(synthesis.sections, stillShared),
       model: synthesis.model,
       generatedAt: synthesis.generatedAt,
     };

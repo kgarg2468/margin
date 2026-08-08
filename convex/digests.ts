@@ -152,22 +152,72 @@ async function sessionCursor(
     .unique();
 }
 
+/** The one refusal for a digest that isn't the caller's — as `markDigestSeen`. */
+const NOT_YOUR_DIGEST = "That digest isn't in your inbox.";
+
 /**
- * Mark a paper or a session as looked at, now.
+ * A cursor only ever moves forward.
  *
- * The reader calls this on open. It is the only thing Margin stores about
- * attention, and note what it is *not*: a view count, a dwell time, or a
- * record that anyone can query about anyone else. A cursor is a single
- * timestamp, readable only by its owner's own digests, and it exists so that
- * "what's new since you last looked" has a meaning. Nothing reads it to ask
- * whether a member has kept up.
+ * `markSeen` can be told to stamp a moment that has already passed (the
+ * digest's own `generatedAt`), and digests do not arrive in the order they
+ * were written: acknowledging last week's after this morning's would otherwise
+ * drag the cursor backwards and re-deliver a fortnight the member has already
+ * read. A cursor answers "what's new since you last looked", and looking is
+ * not something that can be undone.
+ */
+async function advanceCursor(
+  ctx: MutationCtx,
+  existing: Doc<"seenCursors"> | null,
+  at: number,
+  fresh: Omit<Doc<"seenCursors">, "_id" | "_creationTime" | "lastSeenAt">,
+): Promise<void> {
+  if (existing === null) {
+    await ctx.db.insert("seenCursors", { ...fresh, lastSeenAt: at });
+  } else if (at > existing.lastSeenAt) {
+    await ctx.db.patch(existing._id, { lastSeenAt: at });
+  }
+}
+
+/**
+ * Mark a paper or a session as looked at.
+ *
+ * **Only ever an explicit act by the person it is about.** Nothing calls this
+ * on open, and nothing may: a cursor that moved because a panel scrolled into
+ * view is dwell tracking, which the privacy constitution forbids outright.
+ * "I'm caught up" is a button with a person behind it. This is the only thing
+ * Margin stores about attention, and note what it is *not*: a view count, a
+ * dwell time, or a record that anyone can query about anyone else. A cursor is
+ * a single timestamp, readable only by its owner's own digests, and it exists
+ * so that "what's new since you last looked" has a meaning. Nothing reads it
+ * to ask whether a member has kept up.
  *
  * Exactly one of `paperId` / `sessionId` — a cursor addresses one thing.
+ *
+ * ## Why `digestId` rather than `now`
+ *
+ * The click that moves a cursor is somebody acknowledging a *digest*, and the
+ * digest was assembled earlier — minutes, or a night's sleep. Stamping the
+ * clock at click time buried everything written in between: those annotations
+ * were never in the digest the member read, and they were now behind the
+ * cursor, so no later digest would ever mention them. What the member is
+ * saying is "I have read up to what this told me", and the only honest cursor
+ * is the digest's own `generatedAt`.
+ *
+ * It is derived here from the id rather than passed as a timestamp, because a
+ * timestamp is an argument a client can be wrong about — or lie about — and
+ * this one decides what a member is never shown again. The digest must be the
+ * caller's own, and must actually address the paper or session being stamped;
+ * otherwise a stale acknowledgement could be pointed at an unrelated cursor.
+ *
+ * Without `digestId` the stamp is `now`, which is what an acknowledgement of
+ * something other than a digest would mean.
  */
 export const markSeen = mutation({
   args: {
     paperId: v.optional(v.id("papers")),
     sessionId: v.optional(v.id("sessions")),
+    /** The digest this acknowledgement is of; its `generatedAt` is the stamp. */
+    digestId: v.optional(v.id("digests")),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
@@ -175,7 +225,22 @@ export const markSeen = mutation({
       throw new ConvexError("Mark either a paper or a session as seen.");
     }
     const userId = await requireUserId(ctx);
-    const now = Date.now();
+
+    let at = Date.now();
+    if (args.digestId !== undefined) {
+      const digest = await ctx.db.get(args.digestId);
+      if (digest === null || digest.userId !== userId) {
+        throw new ConvexError(NOT_YOUR_DIGEST);
+      }
+      const addresses =
+        args.paperId === undefined
+          ? digest.sessionId === args.sessionId
+          : digest.items.some((item) => item.paperId === args.paperId);
+      if (!addresses) {
+        throw new ConvexError(NOT_YOUR_DIGEST);
+      }
+      at = digest.generatedAt;
+    }
 
     if (args.paperId !== undefined) {
       const paper = await ctx.db.get(args.paperId);
@@ -184,17 +249,12 @@ export const markSeen = mutation({
       if (paper === null || membership === null) {
         throw new ConvexError(NO_SUCH_TARGET);
       }
-      const existing = await paperCursor(ctx, userId, args.paperId);
-      if (existing === null) {
-        await ctx.db.insert("seenCursors", {
-          userId,
-          labId: paper.labId,
-          paperId: args.paperId,
-          lastSeenAt: now,
-        });
-      } else {
-        await ctx.db.patch(existing._id, { lastSeenAt: now });
-      }
+      await advanceCursor(
+        ctx,
+        await paperCursor(ctx, userId, args.paperId),
+        at,
+        { userId, labId: paper.labId, paperId: args.paperId },
+      );
       return null;
     }
 
@@ -208,17 +268,12 @@ export const markSeen = mutation({
     if (session === null || membership === null) {
       throw new ConvexError(NO_SUCH_TARGET);
     }
-    const existing = await sessionCursor(ctx, userId, sessionId);
-    if (existing === null) {
-      await ctx.db.insert("seenCursors", {
-        userId,
-        labId: session.labId,
-        sessionId,
-        lastSeenAt: now,
-      });
-    } else {
-      await ctx.db.patch(existing._id, { lastSeenAt: now });
-    }
+    await advanceCursor(
+      ctx,
+      await sessionCursor(ctx, userId, sessionId),
+      at,
+      { userId, labId: session.labId, sessionId },
+    );
     return null;
   },
 });
@@ -451,7 +506,7 @@ export const markDigestSeen = mutation({
     const userId = await requireUserId(ctx);
     const digest = await ctx.db.get(args.digestId);
     if (digest === null || digest.userId !== userId) {
-      throw new ConvexError("That digest isn't in your inbox.");
+      throw new ConvexError(NOT_YOUR_DIGEST);
     }
     const now = Date.now();
     await ctx.db.patch(args.digestId, {

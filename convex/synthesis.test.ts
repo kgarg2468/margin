@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { Id } from "./_generated/dataModel";
 import {
+  WITHDRAWN_ITEM_TEXT,
   annotationRefs,
+  applyWithdrawals,
   buildUserPrompt,
   extractJson,
   fence,
+  isStillShared,
   nameIndex,
   sanitizeSections,
 } from "./synthesis";
@@ -15,6 +18,11 @@ import {
  * annotation from being read as an instruction, the ref check that decides
  * what may be stored, and the derivation that decides whose name goes on it.
  * These tests are the guarantee, since nothing downstream re-checks any of it.
+ *
+ * And the read back out: a stored write-up is a snapshot of a margin that
+ * keeps moving, so `isStillShared` and `applyWithdrawals` decide what a
+ * synthesis is still allowed to say once the notes behind it have been
+ * withdrawn or made private.
  */
 
 const id = (n: number) => `annotation_${n}` as Id<"annotations">;
@@ -262,6 +270,143 @@ describe("sanitizeSections", () => {
     expect(itemsIn(result, "summary").map((item) => item.text)).toEqual([
       "First.",
       "Second.",
+    ]);
+  });
+});
+
+describe("isStillShared", () => {
+  const labId = "lab_1" as Id<"labs">;
+  const shared = { labId, visibility: "lab" as const, deletedAt: undefined };
+
+  it("keeps a note that is still there and still lab-visible", () => {
+    expect(isStillShared(shared, labId)).toBe(true);
+  });
+
+  it("treats a withdrawn note as gone", () => {
+    expect(isStillShared({ ...shared, deletedAt: 1 }, labId)).toBe(false);
+  });
+
+  it("treats a note flipped back to private exactly like a withdrawn one", () => {
+    expect(isStillShared({ ...shared, visibility: "private" }, labId)).toBe(
+      false,
+    );
+  });
+
+  it("treats a row that no longer exists as gone", () => {
+    expect(isStillShared(null, labId)).toBe(false);
+  });
+
+  it("refuses a citation that points outside the reader's lab", () => {
+    expect(isStillShared(shared, "lab_2" as Id<"labs">)).toBe(false);
+  });
+});
+
+describe("applyWithdrawals", () => {
+  /** One section, so each test only has to say which notes are still shared. */
+  const sectionsOf = (
+    ...items: { text: string; attribution: string[]; annotationIds: number[] }[]
+  ) => [
+    {
+      key: "open-questions" as const,
+      heading: "Open questions",
+      items: items.map((item) => ({
+        text: item.text,
+        attribution: item.attribution,
+        annotationIds: item.annotationIds.map(id),
+      })),
+    },
+  ];
+
+  const item = {
+    text: "Does the ablation hold at scale?",
+    attribution: ["Ana Ruiz", "Ben Okafor"],
+    annotationIds: [1, 2],
+  };
+
+  const live = (...ns: number[]) => new Set(ns.map(id));
+
+  it("leaves an item alone while every note behind it is still shared", () => {
+    const sections = sectionsOf(item);
+    const result = applyWithdrawals(sections, live(1, 2));
+    expect(result[0]?.items).toEqual(sections[0]?.items);
+  });
+
+  it("replaces the text when every note behind it has been withdrawn", () => {
+    // The sentence itself is a paraphrase of writing this reader may no longer
+    // read, so it must not cross the wire at all — redacted here, not hidden
+    // by the client after the fact.
+    const result = applyWithdrawals(sectionsOf(item), live());
+    expect(result[0]?.items).toEqual([
+      {
+        text: WITHDRAWN_ITEM_TEXT,
+        attribution: [],
+        // The ids stay: they are how the reader reaches the same verdict about
+        // what it can see, and how it knows to draw this as a redaction.
+        annotationIds: [id(1), id(2)],
+      },
+    ]);
+    expect(result[0]?.items[0]?.text).not.toContain("ablation");
+  });
+
+  it("treats a note flipped to private the same as one withdrawn", () => {
+    // `isStillShared` is what decides membership of the set; from here the two
+    // are indistinguishable, which is the point.
+    const result = applyWithdrawals(sectionsOf(item), live());
+    expect(result[0]?.items[0]?.text).toBe(WITHDRAWN_ITEM_TEXT);
+  });
+
+  it("keeps the text but drops the attribution on a partial withdrawal", () => {
+    // Names are the union of the cited notes' authors and can't be mapped back
+    // to individual ids, so with one note gone no particular name is still
+    // provably owed — the same rule the reader applies.
+    const result = applyWithdrawals(sectionsOf(item), live(1));
+    expect(result[0]?.items).toEqual([
+      {
+        text: "Does the ablation hold at scale?",
+        attribution: [],
+        annotationIds: [id(1), id(2)],
+      },
+    ]);
+  });
+
+  it("redacts one item without touching its neighbours", () => {
+    const result = applyWithdrawals(
+      sectionsOf(item, {
+        text: "A separate point.",
+        attribution: ["Ben Okafor"],
+        annotationIds: [3],
+      }),
+      live(3),
+    );
+    expect(result[0]?.items.map((one) => one.text)).toEqual([
+      WITHDRAWN_ITEM_TEXT,
+      "A separate point.",
+    ]);
+    expect(result[0]?.items[1]?.attribution).toEqual(["Ben Okafor"]);
+  });
+
+  it("leaves an item citing nothing alone rather than redacting it", () => {
+    // `sanitizeSections` never stores one, and the reader draws it as ordinary
+    // prose; server and client have to agree even on the case that can't
+    // happen.
+    const result = applyWithdrawals(
+      sectionsOf({ text: "Uncited.", attribution: [], annotationIds: [] }),
+      live(),
+    );
+    expect(result[0]?.items[0]?.text).toBe("Uncited.");
+  });
+
+  it("carries every section through, redacted or not", () => {
+    const result = applyWithdrawals(
+      [
+        ...sectionsOf(item),
+        { key: "summary" as const, heading: "What the discussion covered", items: [] },
+      ],
+      live(),
+    );
+    expect(result.map((section) => section.key)).toEqual([
+      "open-questions",
+      "summary",
     ]);
   });
 });
