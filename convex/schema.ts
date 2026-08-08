@@ -54,6 +54,21 @@ export const sessionStatus = v.union(
 );
 
 /**
+ * The five sections a synthesis is allowed to have.
+ *
+ * Fixed rather than model-chosen: the shape of the write-up is a product
+ * decision, and pinning it is also what lets the parser reject anything the
+ * model invents outside it.
+ */
+export const synthesisSectionKey = v.union(
+  v.literal("summary"),
+  v.literal("open-questions"),
+  v.literal("critiques-and-methods"),
+  v.literal("connections"),
+  v.literal("next-reading"),
+);
+
+/**
  * Where a paper is on its way to being readable:
  *
  * - `needs-pdf` — metadata only. A DOI lookup found the record but no
@@ -470,6 +485,11 @@ export default defineSchema({
     generatedAt: v.number(),
     deliveredAt: v.optional(v.number()),
     acknowledgedAt: v.optional(v.number()),
+    /**
+     * How many items the hard cap cut, so the reader can say "and 4 more"
+     * instead of silently pretending five was all there was.
+     */
+    droppedCount: v.optional(v.number()),
     items: v.array(
       v.object({
         kind: v.union(v.literal("collision"), v.literal("coalesced")),
@@ -485,4 +505,42 @@ export default defineSchema({
     .index("by_user", ["userId"])
     .index("by_user_and_lab", ["userId", "labId"])
     .index("by_session", ["sessionId"]),
+
+  /**
+   * The post-meeting synthesis: what the lab worked out, assembled from what
+   * the lab actually wrote.
+   *
+   * Stored as structured sections rather than one blob of prose because the
+   * constraint that makes it trustworthy is per-item: every item carries the
+   * names it is attributed to, so a reader can check any line against the
+   * annotation it came from. A model that cannot cite is a model that made it
+   * up.
+   *
+   * One row per session — re-generating replaces it. The generated text is
+   * never the last word: the session's own `synthesis` field is where an
+   * approved, human-edited version lands.
+   */
+  syntheses: defineTable({
+    sessionId: v.id("sessions"),
+    labId: v.id("labs"),
+    sections: v.array(
+      v.object({
+        key: synthesisSectionKey,
+        heading: v.string(),
+        items: v.array(
+          v.object({
+            text: v.string(),
+            /** Display names of the members whose annotations back this item. */
+            attribution: v.array(v.string()),
+          }),
+        ),
+      }),
+    ),
+    /** The exact model id that produced this, for provenance. */
+    model: v.string(),
+    generatedAt: v.number(),
+    generatedBy: v.id("users"),
+  })
+    .index("by_session", ["sessionId"])
+    .index("by_lab", ["labId"]),
 });
