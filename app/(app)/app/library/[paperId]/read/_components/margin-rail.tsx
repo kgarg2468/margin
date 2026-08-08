@@ -3,13 +3,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnnotationCard } from "./annotation-card";
 import { eyebrowClass } from "@/lib/ui";
-import type { AnnotationId, AnnotationView } from "./types";
+import type { AnchorState, AnnotationId, AnnotationView } from "./types";
 
 export type RailCard = {
   annotation: AnnotationView;
   replies: AnnotationView[];
   /** Where the passage is, in the reader's content coordinates. */
   top: number;
+  /** How its passage was found again, when the page it is on has resolved. */
+  state?: AnchorState;
 };
 
 /** Breathing room between two cards that want the same line. */
@@ -32,6 +34,8 @@ const GAP = 10;
 export function MarginRail({
   cards,
   unanchored,
+  loading,
+  truncated,
   aligned,
   originTop,
   height,
@@ -41,6 +45,10 @@ export function MarginRail({
 }: {
   cards: RailCard[];
   unanchored: RailCard[];
+  /** The margin has not arrived yet, which is not the same as it being empty. */
+  loading: boolean;
+  /** The query hit its ceiling: this is some of the margin, not all of it. */
+  truncated: boolean;
   /** Wide enough to place cards against passages. Narrow screens get a list. */
   aligned: boolean;
   /** The y the reader's page column starts at, which is the rail's own origin. */
@@ -115,6 +123,7 @@ export function MarginRail({
   function card(entry: RailCard) {
     return (
       <div
+        className="relative"
         onClick={(event) => {
           if (
             (event.target as HTMLElement).closest("button, textarea, a") === null
@@ -123,9 +132,21 @@ export function MarginRail({
           }
         }}
       >
+        {/* Clicking anywhere on a card jumps to its passage, which is the
+            right affordance for a pointer and reachable by nothing else. The
+            same action as a real control, out of the way until it is tabbed
+            to — a card is full of buttons already and cannot become one. */}
+        <button
+          type="button"
+          onClick={() => onFocusPassage(entry.annotation)}
+          className="sr-only focus:not-sr-only focus:absolute focus:right-1 focus:top-1 focus:z-10 focus:rounded-sm focus:border focus:border-rule focus:bg-surface focus:px-1.5 focus:py-0.5 focus:font-sans focus:text-[10px] focus:uppercase focus:tracking-[0.12em] focus:text-accent"
+        >
+          Go to passage
+        </button>
         <AnnotationCard
           annotation={entry.annotation}
           replies={entry.replies}
+          anchorState={entry.state}
           active={activeId === entry.annotation._id}
           onActivate={onActivate}
           registerElement={register}
@@ -176,6 +197,7 @@ export function MarginRail({
               <AnnotationCard
                 annotation={entry.annotation}
                 replies={entry.replies}
+                orphaned
                 active={activeId === entry.annotation._id}
                 onActivate={onActivate}
               />
@@ -184,11 +206,30 @@ export function MarginRail({
         </section>
       )}
 
-      {cards.length === 0 && unanchored.length === 0 && (
-        <p className="max-w-prose font-serif text-sm leading-relaxed text-ink-faint">
-          Nothing in the margin yet. Select a passage to write the first thing.
+      {truncated && (
+        <p className="mt-4 max-w-prose font-sans text-xs leading-relaxed text-ink-faint">
+          This paper has more notes on it than the margin will show at once.
+          These are the ones it could fetch.
         </p>
       )}
+
+      {cards.length === 0 &&
+        unanchored.length === 0 &&
+        // "Nothing in the margin yet" while the margin is still on its way is
+        // the wrong sentence, and it is the one a reader would believe.
+        (loading ? (
+          <p
+            aria-live="polite"
+            className="max-w-prose font-sans text-xs leading-relaxed text-ink-faint"
+          >
+            Reading the margin…
+          </p>
+        ) : (
+          <p className="max-w-prose font-serif text-sm leading-relaxed text-ink-faint">
+            Nothing in the margin yet. Select a passage to write the first
+            thing.
+          </p>
+        ))}
     </div>
   );
 }

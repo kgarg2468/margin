@@ -12,12 +12,9 @@ import type { Doc } from "@/convex/_generated/dataModel";
  * carries two: an ink for the card and the badge, and a lighter wash for the
  * passage itself.
  *
- * `definition` is the odd one out. The token set in globals.css ships five
- * typed inks — hypothesis, method, critique, connection, question — for six
- * typed values, so a definition is written in plain ink over a neutral wash.
- * That is a defensible reading (a definition is the paper's own words being
- * pinned, not a position taken) but it is a gap in the palette rather than a
- * decision, and it wants a sixth hue in the design pass.
+ * All six typed values have their own hue. `definition` was the last to get
+ * one — it stood in plain ink over a neutral wash while the palette was five
+ * hues wide — and `--note-definition` closes that gap.
  */
 export type AnnotationType = Doc<"annotations">["type"];
 
@@ -58,8 +55,8 @@ export const ANNOTATION_TYPES: readonly TypeStyle[] = [
   {
     value: "definition",
     label: "Definition",
-    ink: "var(--ink-strong)",
-    wash: "color-mix(in oklab, var(--ink-faint) 26%, transparent)",
+    ink: "var(--note-definition)",
+    wash: "var(--note-definition-wash)",
   },
   {
     value: "connection-to-own-work",

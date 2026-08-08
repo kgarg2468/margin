@@ -243,7 +243,9 @@ export function Reader({
     [],
   );
 
-  const rows = useMemo(() => annotations ?? [], [annotations]);
+  /** Still in flight, as distinct from "there are none". */
+  const loading = annotations === undefined;
+  const rows = useMemo(() => annotations?.annotations ?? [], [annotations]);
 
   const repliesByParent = useMemo(() => {
     const map = new Map<AnnotationId, AnnotationView[]>();
@@ -276,9 +278,16 @@ export function Reader({
     [rows, filter],
   );
 
+  // A withdrawn note keeps its card, because the thread hanging off it is
+  // other people's writing — but it does not keep its highlight. Its body is
+  // gone; it no longer says anything about the passage, and leaving the
+  // passage marked would claim otherwise.
   const byPage = useMemo(() => {
     const map = new Map<number, AnnotationView[]>();
     for (const row of visible) {
+      if (row.deleted) {
+        continue;
+      }
       const list = map.get(row.anchor.pageIndex);
       if (list === undefined) {
         map.set(row.anchor.pageIndex, [row]);
@@ -293,14 +302,15 @@ export function Reader({
     const anchored: RailCard[] = [];
     const lost: RailCard[] = [];
     for (const annotation of visible) {
+      const page = annotation.anchor.pageIndex;
+      const resolution = resolutions.get(page);
+      const element = pageElements.current.get(page);
       const entry = {
         annotation,
         replies: repliesByParent.get(annotation._id) ?? [],
         top: 0,
+        state: resolution?.states.get(annotation._id),
       };
-      const page = annotation.anchor.pageIndex;
-      const resolution = resolutions.get(page);
-      const element = pageElements.current.get(page);
 
       if (resolution !== undefined && resolution.orphaned.includes(annotation._id)) {
         lost.push(entry);
@@ -407,7 +417,11 @@ export function Reader({
               <button
                 key={style.value}
                 type="button"
-                aria-pressed={filter.has(style.value)}
+                // The effective state, not the set membership: with no filter
+                // at all every chip is on, and a row of "off" chips over a
+                // margin showing everything is a lie a screen reader has no
+                // way to see through.
+                aria-pressed={on}
                 onClick={() => toggleFilter(style.value)}
                 style={{ color: on ? style.ink : undefined }}
                 className={
@@ -466,6 +480,7 @@ export function Reader({
                   active={window_.has(index)}
                   annotations={byPage.get(index) ?? EMPTY}
                   activeId={activeId}
+                  composing={draft?.anchor.pageIndex === index}
                   onActivate={setActiveId}
                   onResolved={handleResolved}
                   onDraft={setDraft}
@@ -478,6 +493,8 @@ export function Reader({
           <MarginRail
             cards={cards}
             unanchored={unanchored}
+            loading={loading}
+            truncated={annotations?.truncated ?? false}
             aligned={aligned}
             originTop={originTop}
             height={columnHeight}

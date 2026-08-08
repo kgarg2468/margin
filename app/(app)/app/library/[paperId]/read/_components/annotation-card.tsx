@@ -8,8 +8,32 @@ import { useState } from "react";
 import type { AnnotationType } from "./ontology";
 import { typeStyle } from "./ontology";
 import { TypeChips } from "./type-chips";
-import type { AnnotationId, AnnotationView } from "./types";
+import type { AnchorState, AnnotationId, AnnotationView } from "./types";
 import { VisibilityToggle } from "./visibility-toggle";
+
+/**
+ * What a card says about how sure the reader is that this is the passage.
+ *
+ * Nothing at all in the ordinary case, which is almost every case: a note that
+ * landed on its recorded offsets, or on the one copy of its quote, is simply
+ * anchored and saying so would be noise. The three states worth a word are the
+ * ones where the answer was reasoned rather than read.
+ */
+function anchorNote(
+  state: AnchorState | undefined,
+  orphaned: boolean,
+): string | null {
+  if (orphaned) {
+    return "Unanchored";
+  }
+  if (state === undefined || state.method === "position" || state.method === "quote") {
+    return null;
+  }
+  if (state.ambiguous) {
+    return "Uncertain";
+  }
+  return "Drifted";
+}
 
 /** Short, and pinned to one locale so the server and the client agree. */
 function when(ms: number): string {
@@ -42,17 +66,24 @@ function when(ms: number): string {
 export function AnnotationCard({
   annotation,
   replies,
+  anchorState,
+  orphaned = false,
   active,
   onActivate,
   registerElement,
 }: {
   annotation: AnnotationView;
   replies: AnnotationView[];
+  /** How the passage was found again, once its page has resolved. */
+  anchorState?: AnchorState;
+  /** Its passage is not in this file at all. */
+  orphaned?: boolean;
   active: boolean;
   onActivate: (id: AnnotationId | null) => void;
   registerElement?: (id: AnnotationId, element: HTMLElement | null) => void;
 }) {
   const style = typeStyle(annotation.type);
+  const anchoring = anchorNote(anchorState, orphaned);
   const updateBody = useMutation(api.annotations.updateBody);
   const setType = useMutation(api.annotations.setType);
   const setVisibility = useMutation(api.annotations.setVisibility);
@@ -84,7 +115,9 @@ export function AnnotationCard({
     annotation.replyCount > 0 &&
     annotation.parentId === undefined;
 
-  const showReplies = expanded || replies.length <= 2;
+  // Three replies is a conversation, not a pile: collapsing at that point costs
+  // a click to read something that would have fitted anyway.
+  const showReplies = expanded || replies.length <= 3;
   const visibleReplies = showReplies ? replies : replies.slice(0, 1);
 
   return (
@@ -118,10 +151,28 @@ export function AnnotationCard({
             Private
           </span>
         )}
+        {anchoring !== null && (
+          <span
+            title={
+              anchoring === "Unanchored"
+                ? "The passage this was written on is not in this file."
+                : anchoring === "Uncertain"
+                  ? "This passage appears more than once and the note could belong to either."
+                  : "The paper has changed since this was written; the passage was matched, not found."
+            }
+            className="rounded-sm border border-dashed border-rule px-1 font-sans text-[9px] uppercase tracking-[0.12em] text-ink-faint"
+          >
+            {anchoring}
+          </span>
+        )}
       </header>
 
       <blockquote className="mt-1.5 font-serif text-[13px] leading-snug text-ink-faint">
-        <span className="line-clamp-2 italic">{annotation.anchor.quote}</span>
+        <span
+          className={`line-clamp-2 italic ${anchoring === null ? "" : "underline decoration-dashed decoration-from-font underline-offset-2"}`}
+        >
+          {annotation.anchor.quote}
+        </span>
       </blockquote>
 
       {annotation.deleted ? (
