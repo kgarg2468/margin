@@ -1,0 +1,104 @@
+/*
+ * The pdf.js text layer, cut down to what a reader needs.
+ *
+ * pdf.js ships `web/pdf_viewer.css`, but that file is the whole viewer — its
+ * toolbar, its editors, its annotation layers — and importing 200 kB of it to
+ * position some invisible spans would also drag in a colour scheme that fights
+ * every token in `app/globals.css`. What is actually load-bearing is below: the
+ * layer covers the canvas, every span is absolutely positioned at the
+ * percentage offsets pdf.js computed, and font size scales with
+ * `--total-scale-factor`, which the page component sets from the render scale.
+ *
+ * The spans are `color: transparent`. They exist to be selected, not read; the
+ * words a member sees are pixels on the canvas underneath.
+ */
+
+.page {
+  position: relative;
+  /* `setLayerDimensions` sizes the layer with `round(down, ..., var(--scale-round-x))`. */
+  --scale-round-x: 1px;
+  --scale-round-y: 1px;
+}
+
+.canvas {
+  display: block;
+}
+
+/*
+ * Highlights sit above the canvas and below the text layer. Both are z-index 0,
+ * so document order decides, which keeps the text layer selectable — a
+ * highlight that swallowed pointer events would make the passage it marks the
+ * one passage nobody could quote.
+ */
+.overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.textLayer {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: clip;
+  text-align: initial;
+  line-height: 1;
+  letter-spacing: normal;
+  word-spacing: normal;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  caret-color: CanvasText;
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+}
+
+.textLayer :global(span),
+.textLayer :global(br) {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+  user-select: text;
+}
+
+.textLayer > :global(:not(.markedContent)),
+.textLayer :global(.markedContent span:not(.markedContent)) {
+  z-index: 1;
+  --font-height: 0;
+  font-size: calc(var(--text-scale-factor) * var(--font-height));
+  --scale-x: 1;
+  --rotate: 0deg;
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x))
+    scale(var(--min-font-size-inv));
+}
+
+.textLayer :global(.markedContent) {
+  display: contents;
+}
+
+.textLayer :global(span[role="img"]) {
+  user-select: none;
+  cursor: default;
+}
+
+/* pdf.js's sentinel for "the selection ran past the last character". */
+.textLayer :global(.endOfContent) {
+  display: block;
+  position: absolute;
+  inset: 100% 0 0;
+  z-index: -1;
+  cursor: default;
+  user-select: none;
+}
+
+.textLayer :global(.endOfContent.active) {
+  top: 0;
+}
+
+.textLayer ::selection {
+  background-color: var(--highlight);
+}

@@ -98,24 +98,39 @@ function Library({ lab }: { lab: LabSummary }) {
           <ul className="flex flex-col divide-y divide-rule border-y border-rule">
             {papers.map((paper) => {
               const line = byline(paper);
+              // A ready paper is one whose text layer is in, which is the only
+              // state the margins can be written in — so the title opens the
+              // reader and the record moves to a second link. Anything else has
+              // something to fix first, and the record is where you fix it.
+              const readable = paper.ingestStatus === "ready" && paper.hasPdf;
               return (
-                <li key={paper._id}>
-                  <Link
-                    href={`/app/library/${paper._id}`}
-                    className="group flex flex-col gap-1 py-4"
-                  >
-                    <span className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                      <span className="font-serif text-xl leading-snug text-ink-strong underline-offset-4 group-hover:underline">
-                        {paper.title}
-                      </span>
-                      <StatusChip status={paper.ingestStatus} />
+                <li key={paper._id} className="flex flex-col gap-1 py-4">
+                  <span className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                    <Link
+                      href={
+                        readable
+                          ? `/app/library/${paper._id}/read`
+                          : `/app/library/${paper._id}`
+                      }
+                      className="font-serif text-xl leading-snug text-ink-strong underline-offset-4 hover:underline"
+                    >
+                      {paper.title}
+                    </Link>
+                    <StatusChip status={paper.ingestStatus} />
+                  </span>
+                  {line.length > 0 && (
+                    <span className="font-sans text-sm text-ink-muted">
+                      {line}
                     </span>
-                    {line.length > 0 && (
-                      <span className="font-sans text-sm text-ink-muted">
-                        {line}
-                      </span>
-                    )}
-                  </Link>
+                  )}
+                  {readable && (
+                    <Link
+                      href={`/app/library/${paper._id}`}
+                      className="self-start font-sans text-xs text-ink-faint underline-offset-4 hover:text-accent hover:underline"
+                    >
+                      Record
+                    </Link>
+                  )}
                 </li>
               );
             })}

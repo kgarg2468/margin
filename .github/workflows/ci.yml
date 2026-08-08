@@ -27,5 +27,9 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
+      # Unit tests for lib/anchoring — the one module whose bugs are silent.
+      - name: Test
+        run: npm test
+
       - name: Build
         run: npm run build
