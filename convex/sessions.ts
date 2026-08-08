@@ -15,13 +15,14 @@ import { annotationType, ingestStatus, sessionStatus } from "./schema";
  * here refuses the ones that aren't — a session cannot be started twice, ended
  * before it starts, or cancelled after it has happened.
  *
- * Scheduling a session also arms the product's only delivery boundary. The
- * architecture decision puts digests at T−2h before the meeting and nowhere
- * else, so `createSession` queues `digests.buildSessionPrep` for that instant
- * and keeps the job handle on the session row: rescheduling re-aims it,
- * cancelling calls it off, and starting the meeting throws it away. The digest
- * itself is a stub until its own PR (see `convex/digests.ts`); the boundary is
- * real from today, which is the part the session lifecycle owns.
+ * Scheduling a session also arms the product's delivery boundaries. The
+ * architecture decision puts digests at T−2h before the meeting and at the
+ * moment it starts, and nowhere else. So `createSession` queues
+ * `digests.buildSessionPrep` for T−2h and keeps the job handle on the session
+ * row — rescheduling re-aims it, cancelling calls it off — and `startSession`
+ * throws that handle away and fires the start boundary instead. The digest
+ * itself is a stub until its own PR (see `convex/digests.ts`); the boundaries
+ * are real from today, which is the part the session lifecycle owns.
  *
  * Who may do what: any member can put a session on the calendar, and after
  * that only the presenter or the lab's PI can move, run, or cancel it.
@@ -273,6 +274,11 @@ async function schedulePrepDigest(
   const runAt = Math.max(boundary, Date.now() + MIN_SCHEDULE_DELAY_MS);
   return await ctx.scheduler.runAt(runAt, internal.digests.buildSessionPrep, {
     sessionId,
+    boundary: "session-prep",
+    // What the job was armed for. Cancellation races a job that has already
+    // begun, so the digest re-reads the session and refuses to deliver prep
+    // for a meeting that has since moved (see `convex/digests.ts`).
+    expectedScheduledAt: scheduledAt,
   });
 }
 
@@ -419,14 +425,21 @@ export const updateSession = mutation({
       const scheduledAt = cleanScheduledAt(args.scheduledAt);
       if (scheduledAt !== session.scheduledAt) {
         // The digest boundary moved with the meeting. Cancel the job aimed at
-        // the old time before queueing its replacement, or the lab gets a prep
+        // the old time before deciding on a replacement, or the lab gets a prep
         // digest for a session that is no longer two hours away.
         await cancelPrepDigest(ctx, session);
-        patch.prepDigestJobId = await schedulePrepDigest(
-          ctx,
-          session._id,
-          scheduledAt,
-        );
+
+        // Inside the two-hour window there is no boundary left to arm. The
+        // session's original prep digest has very likely already gone out —
+        // the lab is moving a meeting it was about to hold — and
+        // `schedulePrepDigest` would answer a boundary in the past by running
+        // the job a minute from now, which is a second prep digest for the
+        // same session. Whoever is late gets the session-start refresh
+        // instead, which is the boundary that still lies ahead.
+        const boundaryPassed = Date.now() > scheduledAt - PREP_LEAD_MS;
+        patch.prepDigestJobId = boundaryPassed
+          ? undefined
+          : await schedulePrepDigest(ctx, session._id, scheduledAt);
         patch.scheduledAt = scheduledAt;
         rescheduledTo = scheduledAt;
       }
@@ -484,9 +497,7 @@ export const startSession = mutation({
 
     // A meeting that has begun is past its prep boundary. If the job is still
     // queued — an early start, or a session put on the calendar minutes ago —
-    // it has nothing left to prepare for. The session-start refresh the
-    // architecture decision calls for is a different boundary and lands with
-    // the digest itself.
+    // it has nothing left to prepare for.
     await cancelPrepDigest(ctx, session);
 
     await ctx.db.patch(session._id, {
@@ -494,6 +505,20 @@ export const startSession = mutation({
       startedAt: Date.now(),
       prepDigestJobId: undefined,
     });
+
+    // The second of the architecture decision's two session boundaries: a
+    // refresh at the moment the meeting starts, catching everything written in
+    // the two hours the prep digest could not see. Queued rather than run
+    // inline so the start button does not wait on it, and after the patch so
+    // the job re-reads a session that is already `live` — which is exactly the
+    // condition it checks before delivering. No handle is kept: this one runs
+    // immediately and there is no later edit that could want it called off.
+    await ctx.scheduler.runAfter(0, internal.digests.buildSessionPrep, {
+      sessionId: session._id,
+      boundary: "session-start",
+      expectedScheduledAt: session.scheduledAt,
+    });
+
     await recordEvent(ctx, {
       labId: session.labId,
       type: "session.started",
