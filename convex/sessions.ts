@@ -44,11 +44,25 @@ const MIN_SCHEDULE_DELAY_MS = 60 * 1000;
 const CLOCK_SKEW_GRACE_MS = 5 * 60 * 1000;
 /** Nobody schedules a journal club two years out; a date this far away is a typo or a bad epoch. */
 const MAX_SCHEDULE_AHEAD_MS = 2 * 365 * 24 * 60 * 60 * 1000;
+/**
+ * How far ahead of its scheduled time a session may be started. Generous on
+ * purpose — labs move a meeting forward a day without touching the calendar —
+ * but a session started a fortnight early is the wrong row, clicked in a list.
+ */
+const MAX_EARLY_START_MS = 24 * 60 * 60 * 1000;
 const MAX_TITLE_LENGTH = 200;
 /** Presenter notes are prep, not a manuscript — and they get read into one long-context synthesis call. */
 const MAX_NOTES_LENGTH = 20_000;
 /** A ceiling on the calendar, not a page. A lab meeting weekly for two years fits. */
 const MAX_SESSIONS = 100;
+/**
+ * How many meetings a lab may have on the books at once. Fifty is a year of
+ * weekly journal club still ahead of you; a lab that wants a fifty-first has
+ * either stopped cancelling the ones it isn't holding, or is being scripted at.
+ * Sessions that ran, or were called off, don't count — the ceiling is on the
+ * future, and on the number of prep-digest jobs one lab can have queued.
+ */
+const MAX_SCHEDULED_SESSIONS = 50;
 /**
  * How many of a session's annotations `getSessionContext` will count. Well past
  * a real meeting (25 people writing 40 notes each), and the response says when
@@ -247,9 +261,20 @@ function cleanTitle(input: string | undefined): string | undefined {
   return title.length > 0 ? title : undefined;
 }
 
-/** Notes keep their line breaks — they are an outline, not a headline. */
+/**
+ * Notes keep their line breaks — they are an outline, not a headline.
+ *
+ * Too long is refused rather than trimmed. A silent `slice` hands back a
+ * success to a presenter whose last two thousand words have just been thrown
+ * away, and they find out at the meeting.
+ */
 function cleanNotes(input: string): string | undefined {
-  const notes = input.trim().slice(0, MAX_NOTES_LENGTH);
+  const notes = input.trim();
+  if (notes.length > MAX_NOTES_LENGTH) {
+    throw new ConvexError(
+      `Those notes are ${notes.length} characters. Presenter notes stop at ${MAX_NOTES_LENGTH} — they are prep for a meeting, and they get read into one synthesis call.`,
+    );
+  }
   return notes.length > 0 ? notes : undefined;
 }
 
@@ -271,6 +296,18 @@ function cleanScheduledAt(input: number): number {
     throw new ConvexError("Sessions can be scheduled up to two years ahead.");
   }
   return at;
+}
+
+/**
+ * "in about 3 days" — enough for a refusal to be actionable without pulling in
+ * a date library or guessing at the reader's timezone.
+ */
+function untilProse(ms: number): string {
+  const hours = Math.round(ms / (60 * 60 * 1000));
+  if (hours < 48) {
+    return `in about ${hours} hours`;
+  }
+  return `in about ${Math.round(hours / 24)} days`;
 }
 
 /** Somebody has to be in the lab to present to it. */
@@ -359,6 +396,20 @@ export const createSession = mutation({
       throw new ConvexError("That paper isn't in this lab's library.");
     }
 
+    // One past the cap, so the check reads the same whether the lab has just
+    // reached the ceiling or was already over it.
+    const outstanding = await ctx.db
+      .query("sessions")
+      .withIndex("by_lab_and_status", (q) =>
+        q.eq("labId", args.labId).eq("status", "scheduled"),
+      )
+      .take(MAX_SCHEDULED_SESSIONS + 1);
+    if (outstanding.length >= MAX_SCHEDULED_SESSIONS) {
+      throw new ConvexError(
+        `This lab already has ${MAX_SCHEDULED_SESSIONS} sessions on the calendar. Hold or cancel one before scheduling another.`,
+      );
+    }
+
     const scheduledAt = cleanScheduledAt(args.scheduledAt);
     const presenterId = args.presenterId ?? membership.userId;
     if (presenterId !== membership.userId) {
@@ -403,8 +454,9 @@ export const createSession = mutation({
  * The three edits have different windows, because they mean different things.
  * A time can only move while the meeting is still ahead of the lab. A presenter
  * can be swapped right up to and during the meeting — people get sick. Notes
- * stay editable for as long as the session exists, since they are what the
- * synthesis reads afterwards. A cancelled session is closed to all three.
+ * stay editable through `ended`, since they are what the synthesis reads
+ * afterwards, and close once that synthesis exists. A cancelled session is
+ * closed to all three.
  */
 export const updateSession = mutation({
   args: {
@@ -435,6 +487,14 @@ export const updateSession = mutation({
       patch.title = cleanTitle(args.title);
     }
     if (args.presenterNotes !== undefined) {
+      // Notes are an input to the synthesis, not a comment on it. Once the
+      // write-up exists it was written from a particular set of notes, and
+      // editing them afterwards leaves the pair quietly disagreeing with no
+      // record of which came first. Editable right through `ended`, which is
+      // the window where a presenter is still adding what came up in the room.
+      if (session.status === "synthesized") {
+        refuse(session, "given new presenter notes");
+      }
       patch.presenterNotes = cleanNotes(args.presenterNotes);
     }
 
@@ -512,7 +572,9 @@ export const updateSession = mutation({
  * Deliberately no check that `scheduledAt` has arrived. Labs run late, rooms
  * get double-booked, and a session that starts forty minutes after the calendar
  * said it would is a normal Tuesday — refusing that would only teach people to
- * reschedule before they can press the button.
+ * reschedule before they can press the button. The clock is consulted in one
+ * direction only: a session more than a day *ahead* of its time is a misclick,
+ * and starting one is not undoable.
  */
 export const startSession = mutation({
   args: { sessionId: v.id("sessions") },
@@ -525,6 +587,17 @@ export const startSession = mutation({
     requireManage(session, membership);
     if (session.status !== "scheduled") {
       refuse(session, "started");
+    }
+
+    // Late is fine and always was. A day early is not: starting a session is
+    // irreversible — it burns the prep boundary, fires the start digest, and
+    // there is no transition back to `scheduled` — so the one case worth
+    // refusing is the one that is obviously a misclick in a list of meetings.
+    const early = session.scheduledAt - Date.now();
+    if (early > MAX_EARLY_START_MS) {
+      throw new ConvexError(
+        `That session isn't until ${untilProse(early)}. Start it closer to the time, or reschedule it if the meeting really has moved.`,
+      );
     }
 
     // A meeting that has begun is past its prep boundary. If the job is still
