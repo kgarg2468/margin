@@ -2,7 +2,7 @@
 
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { eyebrowClass } from "@/lib/ui";
+import { eyebrowClass, primaryButtonClass } from "@/lib/ui";
 import { useQuery } from "convex/react";
 import Link from "next/link";
 import { use } from "react";
@@ -113,7 +113,7 @@ export default function PaperPage({
         ingestError={paper.ingestError}
       />
 
-      <ReaderPlaceholder ready={paper.hasPdf && paper.hasText} />
+      <Reading paperId={paper._id} ready={paper.hasPdf && paper.hasText} />
     </div>
   );
 }
@@ -130,25 +130,37 @@ function BackLink() {
 }
 
 /**
- * Where the reader goes. It is drawn as an empty page with a margin rule
- * rather than a grey box, because that is the shape of the thing that lands
- * here next — the text on the left, the lab's annotations down the right.
+ * The way in. Drawn as an empty page with a margin rule rather than a button on
+ * a grey box, because that is the shape of the thing on the other side of it —
+ * the paper on the left, the lab's annotations down the right.
+ *
+ * A paper with no text layer gets no door. Annotations anchor to passages of
+ * extracted text, so opening a scan would be opening a reader whose margins
+ * cannot be written in, and saying why is more use than letting someone find
+ * out.
  */
-function ReaderPlaceholder({ ready }: { ready: boolean }) {
+function Reading({ paperId, ready }: { paperId: Id<"papers">; ready: boolean }) {
   return (
     <section className="flex flex-col gap-4">
       <h2 className={eyebrowClass}>Reading</h2>
-      <div className="flex min-h-56 flex-col justify-center gap-3 rounded-md border border-rule bg-surface p-8 md:pr-40">
+      <div className="flex min-h-56 flex-col justify-center gap-4 rounded-md border border-rule bg-surface p-8 md:pr-40">
         <p className="max-w-prose font-serif text-lg leading-relaxed text-ink-muted">
-          The reader lands here: the paper on the left, the lab&rsquo;s
-          annotations in the margin beside it, typed with a tap and threaded
-          where people answer each other.
+          The paper on the left, the lab&rsquo;s annotations in the margin beside
+          it, typed with a tap and threaded where people answer each other.
         </p>
-        <p className="font-sans text-sm text-ink-faint">
-          {ready
-            ? "This paper is ready for it — text extracted, anchors resolvable."
-            : "It needs the PDF and its text layer first."}
-        </p>
+        {ready ? (
+          <Link
+            href={`/app/library/${paperId}/read`}
+            className={`${primaryButtonClass} self-start`}
+          >
+            Read
+          </Link>
+        ) : (
+          <p className="font-sans text-sm text-ink-faint">
+            It needs the PDF and its text layer first — annotations anchor to
+            passages of extracted text.
+          </p>
+        )}
       </div>
     </section>
   );

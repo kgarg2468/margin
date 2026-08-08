@@ -43,3 +43,6 @@ next-env.d.ts
 
 # local agent/workspace context
 .context/
+
+# playwright MCP browser artifacts
+.playwright-mcp/
