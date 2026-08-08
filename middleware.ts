@@ -1,0 +1,36 @@
+import {
+  convexAuthNextjsMiddleware,
+  createRouteMatcher,
+  nextjsMiddlewareRedirect,
+} from "@convex-dev/auth/nextjs/server";
+
+const isSignInPage = createRouteMatcher(["/signin"]);
+const isProtectedRoute = createRouteMatcher(["/app(.*)"]);
+
+/**
+ * Everything under `/app` requires a session; `/signin` is pointless once you
+ * have one. The Convex functions authorize independently — this is only here
+ * so an unauthenticated visitor gets a redirect instead of an empty shell.
+ */
+export default convexAuthNextjsMiddleware(
+  async (request, { convexAuth }) => {
+    if (isSignInPage(request) && (await convexAuth.isAuthenticated())) {
+      return nextjsMiddlewareRedirect(request, "/app");
+    }
+    if (isProtectedRoute(request) && !(await convexAuth.isAuthenticated())) {
+      return nextjsMiddlewareRedirect(request, "/signin");
+    }
+  },
+  {
+    // Without this the auth cookie is a session cookie, so closing the browser
+    // signs you out. A journal club runs on a weekly rhythm; being asked to
+    // sign in every morning is friction with nothing to show for it. Thirty
+    // days, and the refresh token behind it is still rotated on every use.
+    cookieConfig: { maxAge: 60 * 60 * 24 * 30 },
+  },
+);
+
+export const config = {
+  // Run on every route except static assets and Next internals.
+  matcher: ["/((?!.*\\..*|_next).*)", "/", "/(api|trpc)(.*)"],
+};

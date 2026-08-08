@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 const swatches = [
   { name: "page", chip: "bg-page", note: "warm sand paper" },
   { name: "surface", chip: "bg-surface", note: "cards, editor sheets" },
@@ -27,6 +29,12 @@ export default function Home() {
             </mark>{" "}
             kept in the margins, where the next person can find it.
           </p>
+          <Link
+            href="/signin"
+            className="self-start font-sans text-sm text-accent underline-offset-4 hover:underline"
+          >
+            Sign in &rarr;
+          </Link>
         </header>
 
         <section className="flex flex-col gap-5">
