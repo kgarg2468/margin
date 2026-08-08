@@ -3,7 +3,7 @@
  * `CONVEX_SITE_URL` is provided by Convex; `JWT_PRIVATE_KEY` / `JWKS` are set
  * on the deployment by `npx @convex-dev/auth` (see README).
  */
-export default {
+const authConfig = {
   providers: [
     {
       domain: process.env.CONVEX_SITE_URL,
@@ -11,3 +11,5 @@ export default {
     },
   ],
 };
+
+export default authConfig;

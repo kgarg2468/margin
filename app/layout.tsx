@@ -1,5 +1,7 @@
+import { ConvexAuthNextjsServerProvider } from "@convex-dev/auth/nextjs/server";
 import type { Metadata, Viewport } from "next";
 import { Inter, Source_Serif_4 } from "next/font/google";
+import { ConvexClientProvider } from "./convex-client-provider";
 import "./globals.css";
 
 const sourceSerif = Source_Serif_4({
@@ -46,14 +48,21 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    // The font variables live on <html> so `--font-serif` (declared on :root
-    // in globals.css) can resolve them; on <body> they would be out of scope.
-    <html
-      lang="en"
-      className={`${sourceSerif.variable} ${inter.variable}`}
-      suppressHydrationWarning
-    >
-      <body className="antialiased">{children}</body>
-    </html>
+    // ConvexAuthNextjsServerProvider reads the auth cookie on the server so
+    // the client starts up already knowing whether there is a session.
+    <ConvexAuthNextjsServerProvider>
+      {/* The font variables live on <html> so `--font-serif` (declared on
+          :root in globals.css) can resolve them; on <body> they would be out
+          of scope. */}
+      <html
+        lang="en"
+        className={`${sourceSerif.variable} ${inter.variable}`}
+        suppressHydrationWarning
+      >
+        <body className="antialiased">
+          <ConvexClientProvider>{children}</ConvexClientProvider>
+        </body>
+      </html>
+    </ConvexAuthNextjsServerProvider>
   );
 }
