@@ -25,7 +25,8 @@ import { annotationType, ingestStatus, sessionStatus } from "./schema";
  * are real from today, which is the part the session lifecycle owns.
  *
  * Who may do what: any member can put a session on the calendar, and after
- * that only the presenter or the lab's PI can move, run, or cancel it.
+ * that only the presenter, whoever scheduled it, or the lab's PI can move,
+ * run, or cancel it.
  */
 
 /** The digest boundary from the architecture decision: two hours before the meeting. */
@@ -111,7 +112,10 @@ const sessionDetail = v.object({
   synthesis: v.optional(v.string()),
   synthesisApprovedAt: v.optional(v.number()),
   createdAt: v.number(),
-  /** Whether the caller may move, run, or cancel this session (presenter or PI). */
+  /**
+   * Whether the caller may move, run, or cancel this session — the presenter,
+   * whoever scheduled it, or the PI.
+   */
   canManage: v.boolean(),
 });
 
@@ -162,27 +166,55 @@ function toDetail(
  * ---------------------------------------------------------------------- */
 
 /**
+ * The one answer to every session a caller may not have. Deliberately the same
+ * words whether the id was never real, was deleted, or belongs to a lab the
+ * caller has nothing to do with — an outsider holding a session id learns
+ * nothing from asking about it. This is the posture `requireMembership` takes
+ * in `lib/authz.ts`, where "no such lab" and "not a member" are also one
+ * message.
+ */
+const NO_SUCH_SESSION = "That session is no longer on the calendar.";
+
+/**
  * A session the caller is allowed to touch, plus the membership that allowed
- * it — same shape, and same reasoning, as `requirePaperAccess` in `papers.ts`.
+ * it — same shape as `requirePaperAccess` in `papers.ts`.
+ *
+ * The membership lookup is done by hand rather than through
+ * `requireMembership` because that helper throws its own message, and a
+ * distinct "you are not a member of this lab" reply would confirm that the
+ * session exists to someone who is only guessing.
  */
 async function requireSessionAccess(
   ctx: QueryCtx | MutationCtx,
   sessionId: Id<"sessions">,
 ): Promise<{ session: Doc<"sessions">; membership: Doc<"memberships"> }> {
+  const userId = await requireUserId(ctx);
   const session = await ctx.db.get(sessionId);
-  if (session === null) {
-    throw new ConvexError("That session is no longer on the calendar.");
+  const membership =
+    session === null ? null : await getMembership(ctx, session.labId, userId);
+  if (session === null || membership === null) {
+    throw new ConvexError(NO_SUCH_SESSION);
   }
-  const membership = await requireMembership(ctx, session.labId);
   return { session, membership };
 }
 
-/** The presenter runs their own session; the PI runs anyone's. */
+/**
+ * The presenter runs their own session; the PI runs anyone's; and so does
+ * whoever put it on the calendar. That last one is the common case in a lab
+ * where an admin or a rotating organiser schedules the term's meetings on
+ * other people's behalf — leaving them unable to fix the time they typed
+ * wrong, or to cancel a meeting the presenter is off sick for, makes the PI a
+ * bottleneck for clerical work.
+ */
 function canManage(
   session: Doc<"sessions">,
   membership: Doc<"memberships">,
 ): boolean {
-  return membership.role === "pi" || session.presenterId === membership.userId;
+  return (
+    membership.role === "pi" ||
+    session.presenterId === membership.userId ||
+    session.createdBy === membership.userId
+  );
 }
 
 function requireManage(
@@ -191,7 +223,7 @@ function requireManage(
 ): void {
   if (!canManage(session, membership)) {
     throw new ConvexError(
-      "Only the presenter or the lab's PI can change this session.",
+      "Only the presenter, whoever scheduled this session, or the lab's PI can change it.",
     );
   }
 }
@@ -366,7 +398,7 @@ export const createSession = mutation({
 });
 
 /**
- * Move, re-cast, or annotate a scheduled session. Presenter or PI.
+ * Move, re-cast, or annotate a scheduled session. Presenter, scheduler, or PI.
  *
  * The three edits have different windows, because they mean different things.
  * A time can only move while the meeting is still ahead of the lab. A presenter
@@ -475,7 +507,7 @@ export const updateSession = mutation({
 });
 
 /**
- * Start the meeting. Presenter or PI.
+ * Start the meeting. Presenter, scheduler, or PI.
  *
  * Deliberately no check that `scheduledAt` has arrived. Labs run late, rooms
  * get double-booked, and a session that starts forty minutes after the calendar
@@ -531,7 +563,7 @@ export const startSession = mutation({
 });
 
 /**
- * End the meeting. Presenter or PI.
+ * End the meeting. Presenter, scheduler, or PI.
  *
  * `ended` is where synthesis becomes possible; the transition to `synthesized`
  * belongs to the synthesis action, not here.
@@ -565,7 +597,7 @@ export const endSession = mutation({
 });
 
 /**
- * Call off a meeting that hasn't happened. Presenter or PI.
+ * Call off a meeting that hasn't happened. Presenter, scheduler, or PI.
  *
  * Only from `scheduled`: a session that ran is history, and history is ended,
  * not cancelled. The row stays either way — prep annotations point at it, and
