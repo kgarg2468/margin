@@ -47,6 +47,14 @@ const MAX_ANNOTATIONS_PER_PAPER = 1_000;
 const MAX_QUOTE_LENGTH = 400;
 const MAX_CONTEXT_LENGTH = 64;
 
+/**
+ * Mirrors `MIN_QUOTE_CHARS` in `lib/anchoring/anchor.ts`, counted the same way
+ * (whitespace does not count). A quote shorter than this cannot be
+ * re-anchored — it occurs everywhere — so `createAnchor` refuses to build one
+ * and this refuses to store one built by anything else.
+ */
+const MIN_QUOTE_CHARS = 4;
+
 const annotationView = v.object({
   _id: v.id("annotations"),
   paperId: v.id("papers"),
@@ -97,8 +105,10 @@ type Anchor = Doc<"annotations">["anchor"];
  * row that is supposed to hold a sentence.
  */
 function validateAnchor(candidate: Anchor, pageCount: number | undefined): void {
-  if (candidate.quote.trim().length === 0) {
-    throw new ConvexError("Select some text to annotate.");
+  if (candidate.quote.replace(/\s/g, "").length < MIN_QUOTE_CHARS) {
+    throw new ConvexError(
+      "Select a few more characters — a note needs enough of a passage to find its way back to it.",
+    );
   }
   if (
     candidate.quote.length > MAX_QUOTE_LENGTH ||
@@ -325,20 +335,29 @@ export const reply = mutation({
  * against a line of the PDF, which means it needs the top-level notes in
  * document order and the replies indexed by parent. Building a tree here would
  * only make the client take it apart again.
+ *
+ * `truncated` says the ceiling was reached and the margin the reader is looking
+ * at is not the whole margin. It is a wrapper object rather than a bare array
+ * for exactly that: a query that silently returns 1 000 of 1 400 notes is a
+ * query that lies, and the rail says so in one quiet line.
  */
 export const listForPaper = query({
   args: { paperId: v.id("papers") },
-  returns: v.array(annotationView),
+  returns: v.object({
+    annotations: v.array(annotationView),
+    /** The cap was hit: there are notes on this paper that are not in here. */
+    truncated: v.boolean(),
+  }),
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
     const paper = await ctx.db.get(args.paperId);
     if (paper === null) {
-      return [];
+      return { annotations: [], truncated: false };
     }
     // A stale link renders an empty margin rather than an error, and the answer
     // is the same whether the paper is missing or forbidden.
     if ((await getMembership(ctx, paper.labId, userId)) === null) {
-      return [];
+      return { annotations: [], truncated: false };
     }
 
     const shared = await ctx.db
@@ -384,23 +403,30 @@ export const listForPaper = query({
       }
     }
 
-    return annotations.map((annotation) => ({
-      _id: annotation._id,
-      paperId: annotation.paperId,
-      sessionId: annotation.sessionId,
-      memberId: annotation.memberId,
-      authorName: authors.get(annotation.memberId) ?? "A lab member",
-      mine: annotation.memberId === userId,
-      anchor: annotation.anchor,
-      type: annotation.type,
-      body: annotation.body,
-      visibility: annotation.visibility,
-      parentId: annotation.parentId,
-      createdAt: annotation._creationTime,
-      editedAt: annotation.editedAt,
-      deleted: annotation.deletedAt !== undefined,
-      replyCount: replyCounts.get(annotation._id) ?? 0,
-    }));
+    const truncated =
+      shared.length >= MAX_ANNOTATIONS_PER_PAPER ||
+      own.length >= MAX_ANNOTATIONS_PER_PAPER;
+
+    return {
+      truncated,
+      annotations: annotations.map((annotation) => ({
+        _id: annotation._id,
+        paperId: annotation.paperId,
+        sessionId: annotation.sessionId,
+        memberId: annotation.memberId,
+        authorName: authors.get(annotation.memberId) ?? "A lab member",
+        mine: annotation.memberId === userId,
+        anchor: annotation.anchor,
+        type: annotation.type,
+        body: annotation.body,
+        visibility: annotation.visibility,
+        parentId: annotation.parentId,
+        createdAt: annotation._creationTime,
+        editedAt: annotation.editedAt,
+        deleted: annotation.deletedAt !== undefined,
+        replyCount: replyCounts.get(annotation._id) ?? 0,
+      })),
+    };
   },
 });
 
@@ -501,6 +527,18 @@ export const setVisibility = mutation({
       // would be lab-visible replies to a note nobody else can see.
       for (const own of replies) {
         await ctx.db.patch(own._id, { visibility: "private" });
+      }
+    } else {
+      // And come back when it does. Those replies were written to the lab and
+      // were only hidden because their parent was; leaving them private would
+      // make un-sharing a one-way door that quietly swallowed half a thread.
+      // Only the author's own, and only ever as the mirror of the patch above:
+      // a reply by anyone else is not this mutation's to touch, and there
+      // cannot be one, because the branch above refuses to hide it.
+      for (const own of await repliesTo(ctx, annotation._id)) {
+        if (own.memberId === userId && own.visibility !== "lab") {
+          await ctx.db.patch(own._id, { visibility: "lab" });
+        }
       }
     }
 
