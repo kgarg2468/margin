@@ -4,7 +4,7 @@ import { readableError } from "@/app/(app)/app/_components/errors";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import type { PdfExtraction } from "@/lib/pdf/extract";
-import { extractPdfFile } from "@/lib/pdf/extract";
+import { describePdfOpenError, extractPdfFile } from "@/lib/pdf/extract";
 import {
   errorClass,
   inputClass,
@@ -313,10 +313,11 @@ function UploadTab({ labId }: { labId: Id<"labs"> }) {
           setPhase({ kind: "reading", pagesDone, pageCount }),
       });
       setPhase({ kind: "read", file, extraction });
-    } catch {
+    } catch (caught) {
       setPhase({ kind: "empty" });
       setError(
-        "Margin couldn't read that PDF. If it opens elsewhere, it may be encrypted — try re-saving it and dropping it in again.",
+        describePdfOpenError(caught) ??
+          "Margin couldn't read that PDF. If it opens elsewhere, it may be encrypted — try re-saving it and dropping it in again.",
       );
     }
   }

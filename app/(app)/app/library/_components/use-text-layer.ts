@@ -3,7 +3,7 @@
 import { readableError } from "@/app/(app)/app/_components/errors";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { extractPdf } from "@/lib/pdf/extract";
+import { describePdfOpenError, extractPdf } from "@/lib/pdf/extract";
 import { useConvex, useMutation } from "convex/react";
 import { useCallback, useRef, useState } from "react";
 
@@ -96,7 +96,13 @@ export function useTextLayer() {
         setPhase(paperId, { kind: "done" });
         return true;
       } catch (caught) {
-        const message = readableError(caught, "That PDF wouldn't open.");
+        // A stored file can be password-protected or damaged too — every
+        // open-access copy fetched by DOI lands here unread. Same order as the
+        // attach flows: the pdf.js classifier speaks for the failures it
+        // recognises, and everything else keeps the fallback.
+        const message =
+          describePdfOpenError(caught) ??
+          readableError(caught, "That PDF wouldn't open.");
         setPhase(paperId, { kind: "failed", message });
         try {
           // Otherwise it sits at "text pending" forever, indistinguishable
