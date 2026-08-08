@@ -72,7 +72,7 @@ describe("openAlexPdfCandidates", () => {
     ).toEqual(["https://example.org/same.pdf", "https://example.org/other.pdf"]);
   });
 
-  it("refuses anything that is not http(s)", () => {
+  it("keeps https only, because the fetcher these feed takes nothing else", () => {
     expect(
       openAlexPdfCandidates(
         work({
@@ -81,11 +81,15 @@ describe("openAlexPdfCandidates", () => {
           open_access: { oa_url: "data:application/pdf;base64,AAAA" },
           locations: [
             { pdf_url: "ftp://example.org/paper.pdf" },
+            // Parses fine, and is still worth dropping here: the fetcher
+            // refuses http before it opens a socket, so this would spend one
+            // of the four attempts a DOI walk gets on a certain failure.
             { pdf_url: "http://example.org/paper.pdf" },
+            { pdf_url: "https://example.org/paper.pdf" },
           ],
         }),
       ),
-    ).toEqual(["http://example.org/paper.pdf"]);
+    ).toEqual(["https://example.org/paper.pdf"]);
   });
 
   it("stops at six candidates", () => {

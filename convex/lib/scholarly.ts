@@ -363,6 +363,25 @@ function openAlexVenue(work: Record<string, unknown>): string | undefined {
 }
 
 /**
+ * `readHttpUrl`, minus plaintext.
+ *
+ * The distinction earns its keep in exactly one place. `sourceUrl` is a link
+ * a human clicks, and http is an unfortunate but real answer for one. A PDF
+ * candidate is handed to a fetcher that refuses anything but https before it
+ * opens a socket — so an `http://` entry is not a weaker candidate, it is a
+ * guaranteed dead attempt, and the DOI walk only gets four of those before it
+ * gives up on the paper. Better it never occupies a slot.
+ */
+function readHttpsUrl(value: unknown): string | undefined {
+  const url = readHttpUrl(value);
+  if (url === undefined) {
+    return undefined;
+  }
+  // `readHttpUrl` parsed it already, so this cannot throw.
+  return new URL(url).protocol === "https:" ? url : undefined;
+}
+
+/**
  * Every PDF an OpenAlex work record points at, best first, no duplicates.
  *
  * Margin used to read exactly one field — `best_oa_location.pdf_url` — and
@@ -374,7 +393,7 @@ function openAlexVenue(work: Record<string, unknown>): string | undefined {
  *
  * The order is confidence, not preference: the curated pick first, the
  * publisher's own copy next, then the OA landing link, then the long tail of
- * repository mirrors. Each URL goes through `readHttpUrl` because these come
+ * repository mirrors. Every URL goes through `readHttpsUrl` because these come
  * from a third party and end up in `fetch`, and duplicates are dropped because
  * the same file is usually listed two or three ways and the caller pays a
  * request per entry.
@@ -405,7 +424,7 @@ export function openAlexPdfCandidates(work: unknown): string[] {
 
   const candidates: string[] = [];
   for (const value of ordered) {
-    const url = readHttpUrl(value);
+    const url = readHttpsUrl(value);
     if (url === undefined || candidates.includes(url)) {
       continue;
     }

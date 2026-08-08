@@ -129,10 +129,16 @@ export function PdfPanel({
       setFreeCopyUrl("");
       setStatus(null);
       // A file Margin fetched itself has never been near a browser that could
-      // read it, and pdf.js only runs in one. `force`, because the automatic
-      // read has already had its one attempt at this paper — back when there
-      // was no PDF to read.
-      void textLayer.read(paperId, true);
+      // read it, and pdf.js only runs in one.
+      //
+      // Unforced, deliberately. Nothing has spent this paper's one attempt —
+      // the effect below only fires once there is a PDF, and until a moment
+      // ago there wasn't — so there is nothing to force past. What there is,
+      // is a race: `hasPdf` may well flip and start that effect before this
+      // line runs. The hook's guard makes whichever of the two arrives second
+      // a no-op, and forcing would opt out of precisely the guard keeping
+      // this to one download, one extraction, and one phase to report.
+      void textLayer.read(paperId);
     } catch (caught) {
       setStatus(null);
       setError(readableError(caught, "Margin couldn't fetch that link."));

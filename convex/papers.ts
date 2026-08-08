@@ -932,17 +932,25 @@ export const paperFileState = internalQuery({
  * in. Their file is the file — losing an upload someone made by hand to a
  * link someone else pasted would be the wrong way round — so this one goes
  * back to storage rather than orphaning there.
+ *
+ * It reports that race as a value instead of throwing it, and the reason is
+ * the reason `insertFromDoi` has always been written this way. A mutation is
+ * a transaction: a handler that throws rolls back every write it made, and
+ * `ctx.storage.delete` is one of those writes — while the `ctx.storage.store`
+ * the action ran before calling us committed outside the transaction and
+ * survives regardless. Deleting and then throwing therefore leaked the blob
+ * on every single race, which is precisely what the delete was there to
+ * prevent. So the delete commits, the outcome comes back as a value, and the
+ * throwing moves up into the action, which has nothing left to roll back.
  */
 export const attachFetchedPdf = internalMutation({
   args: { paperId: v.id("papers"), storageId: v.id("_storage") },
-  returns: v.null(),
+  returns: v.union(v.literal("attached"), v.literal("already-has-pdf")),
   handler: async (ctx, args) => {
     const { paper } = await requirePaperAccess(ctx, args.paperId);
     if (paper.storageId !== undefined) {
       await ctx.storage.delete(args.storageId);
-      throw new ConvexError(
-        "This paper already has a PDF — someone attached one while Margin was fetching yours.",
-      );
+      return "already-has-pdf";
     }
 
     await ctx.db.patch(paper._id, {
@@ -956,7 +964,7 @@ export const attachFetchedPdf = internalMutation({
     // `saveExtractedText` records `paper.ingested` once a browser has actually
     // read the file — exactly as on the DOI path. A row between the two would
     // be announcing a paper that still can't be annotated.
-    return null;
+    return "attached";
   },
 });
 
@@ -1089,10 +1097,19 @@ export const fetchPdfFromUrl = action({
     }
 
     const storageId = await ctx.storage.store(pdf);
-    await ctx.runMutation(internal.papers.attachFetchedPdf, {
-      paperId: args.paperId,
-      storageId,
-    });
+    // Annotated for the same reason `findByDoi`'s result is: this action calls
+    // a function in its own module, and the inferred type would refer to
+    // itself through `internal.papers`.
+    const outcome: "attached" | "already-has-pdf" = await ctx.runMutation(
+      internal.papers.attachFetchedPdf,
+      { paperId: args.paperId, storageId },
+    );
+    if (outcome === "already-has-pdf") {
+      // The mutation has already put our blob back; nothing to clean up here.
+      throw new ConvexError(
+        "This paper already has a PDF — someone attached one while Margin was fetching yours.",
+      );
+    }
     return null;
   },
 });
