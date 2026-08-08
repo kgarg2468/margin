@@ -10,6 +10,7 @@ import {
 import { getMembership, requireMembership, requireUserId } from "./lib/authz";
 import {
   assembleDigest,
+  detectCollisions,
   type DigestAnnotation,
 } from "../lib/digest/engine";
 
@@ -322,17 +323,32 @@ export const buildSessionPrep = internalMutation({
         createdAt: a._creationTime,
       }));
 
-    // What this session has already told each member. Two boundaries an hour
-    // apart must not deliver the same collision twice, and a member who never
-    // opened the paper in between has no cursor movement to say so.
-    const alreadyTold = new Map<Id<"users">, number>();
+    // One detection pass for the whole lab. It is quadratic in the pool and
+    // does not depend on the recipient — `assembleDigest` does the
+    // recipient-relative filtering against this set — so running it per member
+    // was the same answer computed a dozen times.
+    const collisions = detectCollisions(pool);
+
+    // What this session has already *delivered* to each member, annotation by
+    // annotation. Two boundaries an hour apart must not repeat themselves, and
+    // a member who never opened the paper in between has no cursor movement to
+    // say so — but the rule has to be "don't repeat", not "start from the last
+    // digest". The cap withholds real gold, and flooring the window at the
+    // previous `generatedAt` threw away everything it withheld: an annotation
+    // that lost the cap at T−2h could never win it at session start. So the
+    // window stays wide (the member's own cursor) and the exclusion is exact.
+    const delivered = new Map<Id<"users">, Set<Id<"annotations">>>();
     for (const previous of await ctx.db
       .query("digests")
       .withIndex("by_session", (q) => q.eq("sessionId", args.sessionId))
       .collect()) {
-      const seen = alreadyTold.get(previous.userId) ?? 0;
-      if (previous.generatedAt > seen) {
-        alreadyTold.set(previous.userId, previous.generatedAt);
+      let seen = delivered.get(previous.userId);
+      if (seen === undefined) {
+        seen = new Set<Id<"annotations">>();
+        delivered.set(previous.userId, seen);
+      }
+      for (const item of previous.items) {
+        for (const annotationId of item.annotationIds) seen.add(annotationId);
       }
     }
 
@@ -343,13 +359,16 @@ export const buildSessionPrep = internalMutation({
 
     for (const membership of memberships) {
       const cursor = await paperCursor(ctx, membership.userId, session.paperId);
-      const floor =
+      const since =
         cursor?.lastSeenAt ??
         Math.max(membership.joinedAt, now - NO_CURSOR_LOOKBACK_MS);
-      const since = Math.max(floor, alreadyTold.get(membership.userId) ?? 0);
+      const seen = delivered.get(membership.userId);
 
       const delta = pool.filter(
-        (a) => a.memberId !== membership.userId && a.createdAt > since,
+        (a) =>
+          a.memberId !== membership.userId &&
+          a.createdAt > since &&
+          seen?.has(a.id) !== true,
       );
       if (delta.length === 0) {
         continue;
@@ -360,6 +379,7 @@ export const buildSessionPrep = internalMutation({
         pool,
         delta,
         paperTitles,
+        collisions,
       });
       if (items.length === 0) {
         continue;
