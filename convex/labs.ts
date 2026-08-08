@@ -31,6 +31,7 @@ export const createLab = mutation({
       name,
       ...(institution ? { institution } : {}),
       createdBy: userId,
+      memberCount: 1,
     });
 
     await ctx.db.insert("memberships", {
@@ -59,7 +60,11 @@ export const createLab = mutation({
   },
 });
 
-/** Every lab the caller belongs to, oldest membership first. Drives the sidebar switcher. */
+/**
+ * Every lab the caller belongs to, oldest membership first. Drives the sidebar
+ * switcher, so it reads the denormalized `memberCount` rather than counting
+ * memberships per lab — that was one extra query per lab on every render.
+ */
 export const getMyLabs = query({
   args: {},
   returns: v.array(
@@ -86,16 +91,12 @@ export const getMyLabs = query({
       if (lab === null) {
         continue;
       }
-      const members = await ctx.db
-        .query("memberships")
-        .withIndex("by_lab", (q) => q.eq("labId", lab._id))
-        .collect();
       labs.push({
         _id: lab._id,
         name: lab.name,
         institution: lab.institution,
         role: membership.role,
-        memberCount: members.length,
+        memberCount: lab.memberCount,
         joinedAt: membership.joinedAt,
       });
     }
@@ -133,18 +134,13 @@ export const getLab = query({
     if (lab === null) {
       return null;
     }
-    const members = await ctx.db
-      .query("memberships")
-      .withIndex("by_lab", (q) => q.eq("labId", lab._id))
-      .collect();
-
     return {
       _id: lab._id,
       name: lab.name,
       institution: lab.institution,
       createdAt: lab._creationTime,
       role: membership.role,
-      memberCount: members.length,
+      memberCount: lab.memberCount,
     };
   },
 });

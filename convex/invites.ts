@@ -194,7 +194,7 @@ export const redeemInvite = mutation({
       role: "member",
       joinedAt: Date.now(),
     });
-
+    await ctx.db.patch(lab._id, { memberCount: lab.memberCount + 1 });
     await ctx.db.patch(invite._id, { useCount: invite.useCount + 1 });
 
     await recordEvent(ctx, {

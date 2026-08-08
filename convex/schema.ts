@@ -196,6 +196,14 @@ export default defineSchema({
     name: v.string(),
     institution: v.optional(v.string()),
     createdBy: v.id("users"),
+    /**
+     * Denormalized count of rows in `memberships` for this lab. It is here
+     * because the sidebar renders it for every lab you belong to, and reading
+     * it by counting memberships made that a query per lab. Every mutation
+     * that adds or removes a membership must move this in the same
+     * transaction — Convex mutations are atomic, so it cannot drift.
+     */
+    memberCount: v.number(),
   }).index("by_creator", ["createdBy"]),
 
   /** Join table between users and labs; the single source of truth for authorization. */
