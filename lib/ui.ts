@@ -9,15 +9,13 @@
  * Two grammars run through all of it, both inherited from the landing page:
  * shadows come from the elevation tokens (`--shadow-card` / `-lift` /
  * `-sheet`) and never from literals, and anything pressable acknowledges the
- * press — colours ease over 200ms and the control gives a hair under the
- * finger. Both are motion-safe; reduced motion keeps the colour changes and
- * loses the movement.
+ * press — colours ease over `--dur-hover` and the control gives a hair under
+ * the finger over `--dur-press`. The movement is motion-safe; reduced motion
+ * keeps the colour changes and loses it.
  */
 
-/** The press grammar every button shares. */
-const pressable =
-  "motion-safe:transition-[color,background-color,border-color,transform] " +
-  "motion-safe:duration-200 motion-safe:active:scale-[0.98] transition-colors";
+/** The press grammar every control shares — see `@utility pressable`. */
+const pressable = "pressable";
 
 export const labelClass =
   "font-sans text-xs uppercase tracking-[0.14em] text-ink-faint";
@@ -82,6 +80,9 @@ export const errorClass =
 export const chipClass =
   "inline-flex items-center rounded-sm border border-rule px-1.5 py-0.5 " +
   "font-sans text-[10px] uppercase tracking-[0.14em] text-ink-faint";
+
+/** A chip that is a real control (filter chips, type toggles). */
+export const chipButtonClass = `${chipClass} ${pressable} hover:border-ink-faint hover:text-ink-muted`;
 
 export const eyebrowClass =
   "font-sans text-xs font-medium uppercase tracking-[0.18em] text-ink-faint";

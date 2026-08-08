@@ -183,6 +183,18 @@
   --shadow-lift: 0 8px 24px -16px var(--shadow-ink);
   --shadow-sheet: 0 16px 44px -20px var(--shadow-ink-strong);
 
+  /* --- motion budget ------------------------------------------
+   * See docs/superpowers/specs/2026-08-08-product-feel-overhaul-design.md.
+   * press 60 / hover 150 / enter 180 / exit 120. Compositor properties
+   * only; the press must render at native refresh regardless of what
+   * the main thread is doing.
+   */
+  --dur-press: 60ms;
+  --dur-hover: 150ms;
+  --dur-enter: 180ms;
+  --dur-exit: 120ms;
+  --ease-settle: cubic-bezier(0.16, 1, 0.3, 1);
+
   /* follow the system by default; the classes below force a mode */
   color-scheme: light dark;
 }
@@ -246,6 +258,59 @@
   /* Serif leads (reading + headings); sans is for UI chrome only. */
   --font-serif: var(--font-source-serif), ui-serif, Georgia, serif;
   --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+}
+
+/*
+ * Tailwind v4 preflight leaves buttons with the UA's default cursor — the
+ * browser's own answer for a <button> is `default`, which is the same arrow a
+ * paragraph gets. A control that doesn't answer the pointer reads as broken,
+ * so the affordance is restored once, here, rather than remembered per
+ * component. In the base layer: any utility (`disabled:cursor-not-allowed`,
+ * `cursor-text`) still wins without a fight.
+ */
+@layer base {
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  select:not(:disabled),
+  summary,
+  label[for] {
+    cursor: pointer;
+  }
+
+  button:disabled,
+  select:disabled {
+    cursor: not-allowed;
+  }
+}
+
+/*
+ * The press grammar: colours ease at hover speed, the control gives under the
+ * finger at press speed. Two different clocks on purpose — a colour that
+ * changed in 60ms flickers, and a shape that took 150ms to move has already
+ * lost the argument about whether the tap registered.
+ *
+ * The properties are listed one by one rather than as `all`: `scale` and
+ * `opacity` are composited, so the dip keeps rendering at the display's
+ * refresh rate whatever the main thread is doing, and `all` would quietly
+ * enlist layout properties into the same transition and put it back on the
+ * main thread. `scale` (not `transform`) so a component can still translate
+ * itself without clobbering the press.
+ */
+@utility pressable {
+  cursor: pointer;
+  user-select: none;
+  transition:
+    color var(--dur-hover) ease-out,
+    background-color var(--dur-hover) ease-out,
+    border-color var(--dur-hover) ease-out,
+    opacity var(--dur-hover) ease-out,
+    scale var(--dur-press) ease-out;
+
+  @media (prefers-reduced-motion: no-preference) {
+    &:active:not(:disabled) {
+      scale: 0.98;
+    }
+  }
 }
 
 /*
