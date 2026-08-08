@@ -18,7 +18,12 @@ import { SessionStatusChip } from "../_components/session-row";
 import { LiveSession } from "./_components/live-session";
 import type { SessionDetail } from "./_components/manage";
 import { ManageSession, PresenterNotes } from "./_components/manage";
-import { FloorColumns, PassageBoard, SessionSpine } from "./_components/session-board";
+import {
+  FloorColumns,
+  MarginElsewhere,
+  PassageBoard,
+  SessionSpine,
+} from "./_components/session-board";
 import { groupSessionNotes } from "./_components/session-notes";
 import { SessionSynthesis } from "./_components/synthesis";
 
@@ -141,7 +146,13 @@ function Record({
           <time dateTime={isoAt(session.scheduledAt)}>
             {formatWhen(session.scheduledAt)}
           </time>
-          {cancelled ? "" : ` · ${relativeWhen(session.scheduledAt)}`}
+          {/* "in 20 minutes" belongs to a meeting that hasn't happened. A
+              session started ahead of its slot still has a scheduled time in
+              the future, and counting down to it after the room has emptied
+              is the clock contradicting the page. */}
+          {session.status === "scheduled"
+            ? ` · ${relativeWhen(session.scheduledAt)}`
+            : ""}
           {ran !== null ? ` · ran ${ran}` : ""}
         </p>
 
@@ -219,24 +230,33 @@ function Record({
 
       {!cancelled && <PresenterNotes session={session} />}
 
-      {!cancelled && notes.total > 0 && (
+      {!cancelled && (
         <section className="flex flex-col gap-6 border-t border-rule pt-8">
           <div className="flex flex-col gap-4">
             <h2 className={eyebrowClass}>
               {held ? "What the room left" : "What the lab has flagged"}
             </h2>
-            <SessionSpine notes={notes} />
+            {notes.total > 0 && <SessionSpine notes={notes} />}
           </div>
 
-          <PassageBoard notes={notes} readHref={readHref} />
-
-          <div className="border-t border-rule pt-6">
-            <FloorColumns
-              notes={notes}
-              presenterNotes={session.presenterNotes}
-              presenterName={session.presenterName}
-            />
-          </div>
+          {notes.total > 0 ? (
+            <>
+              <PassageBoard notes={notes} readHref={readHref} />
+              <MarginElsewhere count={notes.elsewhere} readHref={readHref} />
+              <div className="border-t border-rule pt-6">
+                <FloorColumns notes={notes} showPresenter={false} />
+              </div>
+            </>
+          ) : (
+            <>
+              <p className="max-w-prose font-serif text-base leading-relaxed text-ink-muted">
+                {held
+                  ? "Nobody wrote in the margin under this session."
+                  : "Nothing flagged for this meeting yet. Notes written from here carry the session with them, and the ones the lab writes appear on this board."}
+              </p>
+              <MarginElsewhere count={notes.elsewhere} readHref={readHref} />
+            </>
+          )}
         </section>
       )}
 

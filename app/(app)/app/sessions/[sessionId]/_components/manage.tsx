@@ -118,7 +118,11 @@ export function ManageSession({ session }: { session: SessionDetail }) {
     }
   }
 
-  if (session.status === "cancelled" || session.status === "synthesized") {
+  // Only `scheduled` and `live` have anything left to run. A session that has
+  // ended, been written up, or been called off would otherwise render a
+  // "Running it" heading over an empty box — the presenter's remaining move is
+  // the write-up, and that has its own section.
+  if (session.status !== "scheduled" && session.status !== "live") {
     return null;
   }
 

@@ -8,7 +8,12 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { readableError } from "../../../_components/errors";
 import type { SessionDetail } from "./manage";
-import { FloorColumns, PassageBoard, SessionSpine } from "./session-board";
+import {
+  FloorColumns,
+  MarginElsewhere,
+  PassageBoard,
+  SessionSpine,
+} from "./session-board";
 import type { SessionNotes } from "./session-notes";
 
 /**
@@ -137,6 +142,7 @@ export function LiveSession({
               >
                 Open the paper
               </Link>
+              <MarginElsewhere count={notes.elsewhere} readHref={readHref} />
             </div>
           ) : (
             <>
@@ -145,12 +151,7 @@ export function LiveSession({
               <section className="flex flex-col gap-5">
                 <h2 className={eyebrowClass}>Where the lab stopped</h2>
                 <PassageBoard notes={notes} readHref={readHref} />
-                {notes.elsewhere > 0 && (
-                  <p className="font-sans text-xs text-ink-faint tabular-nums">
-                    {notes.elsewhere} more lab {notes.elsewhere === 1 ? "note" : "notes"}{" "}
-                    on this paper were written outside this session.
-                  </p>
-                )}
+                <MarginElsewhere count={notes.elsewhere} readHref={readHref} />
               </section>
 
               <section className="flex flex-col gap-5 border-t border-rule pt-8">

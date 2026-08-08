@@ -141,7 +141,10 @@ export function PassageBoard({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="grid gap-x-8 gap-y-6 md:grid-cols-2 xl:grid-cols-3">
+      {/* `items-start`, not the grid's default stretch: a card's rule is the
+          length of what the lab wrote on that passage, and a two-line note
+          under a six-line one should not be given four lines of empty ink. */}
+      <div className="grid items-start gap-x-8 gap-y-6 md:grid-cols-2 xl:grid-cols-3">
         {shown.map((passage) => (
           <PassageCard key={passage.key} passage={passage} />
         ))}
@@ -159,6 +162,38 @@ export function PassageBoard({
         </p>
       )}
     </div>
+  );
+}
+
+/**
+ * The rest of the paper's margin.
+ *
+ * The board is scoped to notes written *in this session*, which is what makes
+ * it a record of a meeting rather than of a paper. But a member who opened the
+ * paper from the library rather than from the session link writes notes with no
+ * session on them, and they are just as much the lab's thinking — so the count
+ * is always on the screen with a way through to it. Never invisible, never
+ * silently mixed in.
+ */
+export function MarginElsewhere({
+  count,
+  readHref,
+}: {
+  count: number;
+  readHref: string;
+}) {
+  if (count === 0) {
+    return null;
+  }
+  return (
+    <p className="font-sans text-xs text-ink-faint tabular-nums">
+      {count} more lab {count === 1 ? "note" : "notes"} on this paper{" "}
+      {count === 1 ? "was" : "were"} written outside this session —{" "}
+      <a href={readHref} className="text-accent underline-offset-4 hover:underline">
+        read them in the margin
+      </a>
+      .
+    </p>
   );
 }
 
@@ -234,28 +269,42 @@ export function FloorColumns({
   notes,
   presenterNotes,
   presenterName,
+  showPresenter = true,
 }: {
   notes: SessionNotes;
   presenterNotes?: string;
   presenterName?: string;
+  /**
+   * Off on the session page, where the outline already has a section of its
+   * own — an editable one. On the projector it is on, because the presenter's
+   * plan belongs beside the discussion it is trying to run.
+   */
+  showPresenter?: boolean;
 }) {
   return (
-    <div className="grid gap-x-8 gap-y-8 md:grid-cols-2 xl:grid-cols-4">
-      <section className="flex flex-col gap-3">
-        <h3 className={eyebrowClass}>
-          Presenter&rsquo;s notes
-          {presenterName !== undefined ? ` · ${presenterName}` : ""}
-        </h3>
-        {presenterNotes === undefined || presenterNotes.length === 0 ? (
-          <p className="font-serif text-sm leading-relaxed text-ink-faint">
-            The presenter hasn&rsquo;t written an outline.
-          </p>
-        ) : (
-          <p className="whitespace-pre-wrap font-serif text-[15px] leading-relaxed text-ink">
-            {presenterNotes}
-          </p>
-        )}
-      </section>
+    <div
+      className={
+        "grid gap-x-8 gap-y-8 md:grid-cols-2 " +
+        (showPresenter ? "xl:grid-cols-4" : "xl:grid-cols-3")
+      }
+    >
+      {showPresenter && (
+        <section className="flex flex-col gap-3">
+          <h3 className={eyebrowClass}>
+            Presenter&rsquo;s notes
+            {presenterName !== undefined ? ` · ${presenterName}` : ""}
+          </h3>
+          {presenterNotes === undefined || presenterNotes.length === 0 ? (
+            <p className="font-serif text-sm leading-relaxed text-ink-faint">
+              The presenter hasn&rsquo;t written an outline.
+            </p>
+          ) : (
+            <p className="whitespace-pre-wrap font-serif text-[15px] leading-relaxed text-ink">
+              {presenterNotes}
+            </p>
+          )}
+        </section>
+      )}
 
       {FLOOR.map((column) => {
         const rows = ofType(notes.inSession, column.type);
