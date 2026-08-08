@@ -2,10 +2,12 @@
 
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import { formatWhen, isUpcoming, isoAt, relativeWhen } from "@/lib/sessions-ui";
 import { eyebrowClass, primaryButtonClass } from "@/lib/ui";
 import { useQuery } from "convex/react";
 import Link from "next/link";
 import { use } from "react";
+import { SessionStatusChip } from "../../sessions/_components/session-row";
 import { StatusChip, byline } from "../_components/paper-meta";
 import { PdfPanel } from "../_components/pdf-panel";
 
@@ -114,7 +116,77 @@ export default function PaperPage({
       />
 
       <Reading paperId={paper._id} ready={paper.hasPdf && paper.hasText} />
+
+      <Sessions paperId={paper._id} labId={paper.labId} />
     </div>
+  );
+}
+
+/**
+ * The meetings this paper is on the calendar for.
+ *
+ * A paper and a session point at each other, and this is the half that was
+ * missing: the record says when the lab is discussing it, and hands off to the
+ * schedule form with the paper already chosen.
+ *
+ * Past meetings are deliberately not listed here. They belong to the calendar,
+ * and a record that accumulates every session it was ever read in turns into a
+ * changelog nobody asked the paper for.
+ */
+function Sessions({
+  paperId,
+  labId,
+}: {
+  paperId: Id<"papers">;
+  labId: Id<"labs">;
+}) {
+  const sessions = useQuery(api.sessions.listSessions, { labId });
+  const upcoming = (sessions ?? [])
+    .filter(
+      (session) => session.paperId === paperId && isUpcoming(session.status),
+    )
+    .slice()
+    .reverse();
+
+  return (
+    <section className="flex flex-col gap-4">
+      <h2 className={eyebrowClass}>Sessions</h2>
+
+      {upcoming.length === 0 ? (
+        <p className="max-w-prose font-serif text-base leading-relaxed text-ink-muted">
+          No meeting on the calendar for this paper.
+        </p>
+      ) : (
+        <ul className="flex flex-col divide-y divide-rule border-y border-rule">
+          {upcoming.map((session) => (
+            <li key={session._id} className="flex flex-col gap-0.5 py-3">
+              <span className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                <Link
+                  href={`/app/sessions/${session._id}`}
+                  className="font-serif text-lg leading-snug text-ink-strong underline-offset-4 hover:underline"
+                >
+                  <time dateTime={isoAt(session.scheduledAt)}>
+                    {formatWhen(session.scheduledAt)}
+                  </time>
+                </Link>
+                <SessionStatusChip status={session.status} />
+              </span>
+              <span className="font-sans text-xs text-ink-faint">
+                {session.presenterName ?? "No presenter"} ·{" "}
+                {relativeWhen(session.scheduledAt)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <Link
+        href={`/app/sessions?paper=${paperId}`}
+        className="self-start font-sans text-sm text-accent underline-offset-4 hover:underline"
+      >
+        Schedule a session
+      </Link>
+    </section>
   );
 }
 

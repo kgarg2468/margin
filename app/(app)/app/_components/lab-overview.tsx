@@ -2,14 +2,13 @@
 
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import {
-  cardClass,
-  errorClass,
-  eyebrowClass,
-  secondaryButtonClass,
-} from "@/lib/ui";
+import { formatWhen, isUpcoming, isoAt, relativeWhen } from "@/lib/sessions-ui";
+import { errorClass, eyebrowClass, secondaryButtonClass } from "@/lib/ui";
 import { useMutation, useQuery } from "convex/react";
+import Link from "next/link";
 import { useState } from "react";
+import { SessionStatusChip } from "../sessions/_components/session-row";
+import { DigestInbox } from "./digest";
 import { readableError } from "./errors";
 import type { LabSummary } from "./lab-provider";
 import { JoinLabCard } from "./onboarding";
@@ -48,22 +47,11 @@ export function LabOverview({ lab }: { lab: LabSummary }) {
         </p>
       </header>
 
+      <NextSession lab={lab} />
+      <DigestInbox labId={lab._id} />
+
       <Members lab={lab} />
       {lab.role === "pi" && <Invites lab={lab} />}
-
-      <section className="flex flex-col gap-5">
-        <h2 className={eyebrowClass}>Coming next</h2>
-        <div className="grid gap-6 md:grid-cols-2">
-          <EmptyState
-            title="Library"
-            body="Papers your lab is reading. Upload a PDF or paste a DOI and Margin pulls the metadata, extracts the text, and puts it in front of the group."
-          />
-          <EmptyState
-            title="Sessions"
-            body="Journal club meetings. Schedule one against a paper, prep in the margins beforehand, and run the live view of what the group flagged."
-          />
-        </div>
-      </section>
 
       <section className="flex flex-col gap-4 border-t border-rule pt-8">
         <details className="group flex flex-col gap-4">
@@ -342,18 +330,71 @@ function LeaveLab({ lab }: { lab: LabSummary }) {
   );
 }
 
-function EmptyState({ title, body }: { title: string; body: string }) {
+/**
+ * The next meeting, and nothing else about the calendar.
+ *
+ * A lab home page answers one scheduling question — "when are we next, and on
+ * what" — and every further row is the calendar's job. A live session takes the
+ * slot over, because a member landing here while the lab is meeting should be
+ * one click from the room.
+ */
+function NextSession({ lab }: { lab: LabSummary }) {
+  const sessions = useQuery(api.sessions.listSessions, { labId: lab._id });
+
+  // `listSessions` is furthest-future first, so the soonest meeting still ahead
+  // is the last one in the upcoming run.
+  const upcoming = (sessions ?? []).filter((session) =>
+    isUpcoming(session.status),
+  );
+  const next = upcoming[upcoming.length - 1];
+  const live = upcoming.find((session) => session.status === "live") ?? next;
+
   return (
-    <div className={`${cardClass} flex flex-col gap-3`}>
-      <span className="flex items-baseline gap-2">
-        <h3 className="font-serif text-xl text-ink-strong">{title}</h3>
-        <span className="font-sans text-[10px] uppercase tracking-[0.16em] text-ink-faint">
-          Soon
-        </span>
-      </span>
-      <p className="font-serif text-base leading-relaxed text-ink-muted">
-        {body}
-      </p>
-    </div>
+    <section className="flex flex-col gap-4">
+      <h2 className={eyebrowClass}>Next session</h2>
+
+      {sessions === undefined ? (
+        <p className="font-sans text-sm text-ink-faint">Loading…</p>
+      ) : live === undefined ? (
+        <>
+          <p className="max-w-prose font-serif text-base leading-relaxed text-ink-muted">
+            Nothing on the calendar. A journal club session is a paper, a time,
+            and whoever is presenting — the lab reads into the margin
+            beforehand, and the meeting runs off what it flagged.
+          </p>
+          <Link
+            href="/app/sessions"
+            className="self-start font-sans text-sm text-accent underline-offset-4 hover:underline"
+          >
+            Schedule a session
+          </Link>
+        </>
+      ) : (
+        <div className="flex flex-col gap-1 border-l border-rule pl-5">
+          <span className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            <Link
+              href={`/app/sessions/${live._id}`}
+              className="font-serif text-2xl leading-snug text-ink-strong underline-offset-4 hover:underline"
+            >
+              {live.title ?? live.paperTitle ?? "A session"}
+            </Link>
+            <SessionStatusChip status={live.status} />
+          </span>
+          <span className="font-sans text-sm text-ink-muted">
+            <time dateTime={isoAt(live.scheduledAt)}>
+              {formatWhen(live.scheduledAt)}
+            </time>
+            {" · "}
+            {relativeWhen(live.scheduledAt)}
+          </span>
+          <span className="font-sans text-xs text-ink-faint">
+            {live.presenterName ?? "No presenter"}
+            {live.title !== undefined && live.paperTitle !== undefined
+              ? ` · ${live.paperTitle}`
+              : ""}
+          </span>
+        </div>
+      )}
+    </section>
   );
 }

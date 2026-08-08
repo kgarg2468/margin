@@ -394,10 +394,17 @@ export function Reader({
         <h1 className="min-w-0 flex-1 truncate font-serif text-lg leading-tight text-ink-strong">
           {paper.title}
         </h1>
+        {/* The chip is the way back to the meeting this reading is for, not
+            just a badge: somebody who followed "Read the paper" out of a
+            session needs one click to return to it. */}
         {sessionId !== undefined && (
-          <span className="rounded-sm border border-rule px-1.5 py-0.5 font-sans text-[10px] uppercase tracking-[0.14em] text-ink-faint">
-            Session
-          </span>
+          <Link
+            href={`/app/sessions/${sessionId}`}
+            aria-label="Back to the session"
+            className="rounded-sm border border-rule px-1.5 py-0.5 font-sans text-[10px] uppercase tracking-[0.14em] text-ink-faint transition-colors hover:border-ink-faint hover:text-accent"
+          >
+            In session
+          </Link>
         )}
         <span className="font-sans text-xs tabular-nums text-ink-faint">
           {pageCount > 0 ? `Page ${currentPage + 1} of ${pageCount}` : "…"}

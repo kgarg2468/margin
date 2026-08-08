@@ -9,16 +9,11 @@ import { usePathname, useRouter } from "next/navigation";
 import type { LabSummary } from "./lab-provider";
 import { useLabs } from "./lab-provider";
 
-/**
- * Sections that exist, and sections that don't yet. The unbuilt ones are
- * listed rather than hidden because the shape of the product should be legible
- * from the first screen — but they are inert, not links to a 404.
- */
+/** The product, in two rooms: what the lab is reading, and when it meets. */
 const sections = [
   { label: "Library", href: "/app/library", note: "Papers the lab is reading" },
+  { label: "Sessions", href: "/app/sessions", note: "Journal club meetings" },
 ];
-
-const upcoming = [{ label: "Sessions", note: "Journal club meetings" }];
 
 export function Sidebar() {
   const { labs, currentLab, selectLab } = useLabs();
@@ -87,21 +82,6 @@ export function Sidebar() {
               </li>
             );
           })}
-          {upcoming.map((item) => (
-            <li key={item.label} className="flex flex-col gap-0.5">
-              <span className="flex items-baseline gap-2">
-                <span className="font-sans text-sm text-ink-muted">
-                  {item.label}
-                </span>
-                <span className="font-sans text-[10px] uppercase tracking-[0.14em] text-ink-faint">
-                  Soon
-                </span>
-              </span>
-              <span className="font-sans text-xs text-ink-faint">
-                {item.note}
-              </span>
-            </li>
-          ))}
         </ul>
       </nav>
 
