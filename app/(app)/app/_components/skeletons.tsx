@@ -5,7 +5,7 @@ import { skeletonClass } from "@/lib/ui";
  *
  * Every list in the app is the same typographic object — a serif title line
  * over a sans meta line, ruled apart — so one ghost fits all of them. The
- * blocks breathe (see `margin-breathe`) with a small stagger down the page,
+ * blocks take a sheen (see `skeleton-shimmer`) with a stagger down the page,
  * and the whole thing is one `status` region so a screen reader hears
  * "Loading" once, not a shape at a time. `standalone` is how `PageSkeleton`
  * composes it without nesting a second status region inside its own.
