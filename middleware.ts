@@ -39,5 +39,9 @@ export const config = {
   // Nothing is lost by dropping `/`: the middleware only reads the session to
   // pick a redirect, and `/` has no redirect to pick.
   // (`:path*` is zero-or-more, so this covers `/app` itself.)
-  matcher: ["/signin", "/app/:path*"],
+  //
+  // `/api/auth` is NOT optional: Convex Auth has no route file — the sign-in
+  // proxy endpoint is served by this middleware, so the matcher must include
+  // it or every sign-in/sign-up 404s (broke production on first deploy).
+  matcher: ["/signin", "/app/:path*", "/api/auth"],
 };
