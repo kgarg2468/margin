@@ -1,6 +1,22 @@
 @import "tailwindcss";
 
 /*
+ * `dark:` utilities resolve the same way the tokens below do: the system
+ * preference wins unless an ancestor explicitly opts in (`.dark`) or out
+ * (`.light`), so a future theme toggle only has to set a class on <html>.
+ */
+@custom-variant dark {
+  @media (prefers-color-scheme: dark) {
+    &:where(:not(.light, .light *)) {
+      @slot;
+    }
+  }
+  &:where(.dark, .dark *) {
+    @slot;
+  }
+}
+
+/*
  * Margin design tokens
  * ---------------------------------------------------------------
  * The product should feel like a well-kept lab notebook: warm sand
@@ -23,7 +39,9 @@
   --espresso-900: #2a211d;
   --espresso-800: #3b2f2a;
   --espresso-600: #6b5b52;
-  --espresso-400: #94847a;
+  /* 4.65:1 on --page, 4.98:1 on --surface — AA for the small caps and
+   * captions this token is used for. */
+  --espresso-400: #7a6a5e;
 
   --wedgwood-700: #2f4f80;
   --wedgwood-500: #4068a0;
@@ -32,74 +50,44 @@
   --violet-600: #5c4b8a;
   --violet-400: #a796d8;
 
-  /* --- semantic tokens (light) ------------------------------- */
-  --page: var(--sand-100);
-  --surface: var(--sand-50);
-  --surface-sunken: var(--sand-200);
-  --rule: var(--sand-300);
+  /* --- semantic tokens ---------------------------------------
+   * light-dark(light, dark). Dark mode is a deep, warm brown-black page
+   * with sand-toned ink. Which branch applies is decided by the used
+   * `color-scheme` below, so there is exactly one definition per token.
+   */
+  --page: light-dark(var(--sand-100), #16110e);
+  --surface: light-dark(var(--sand-50), #1e1815);
+  --surface-sunken: light-dark(var(--sand-200), #251e1a);
+  --rule: light-dark(var(--sand-300), #362c26);
 
-  --ink: var(--espresso-800);
-  --ink-strong: var(--espresso-900);
-  --ink-muted: var(--espresso-600);
-  --ink-faint: var(--espresso-400);
+  --ink: light-dark(var(--espresso-800), #ece2d2);
+  --ink-strong: light-dark(var(--espresso-900), #f7f2e9);
+  --ink-muted: light-dark(var(--espresso-600), #b6a795);
+  --ink-faint: light-dark(var(--espresso-400), #8a7a6c);
 
-  --accent: var(--wedgwood-500);
-  --accent-strong: var(--wedgwood-700);
-  --accent-contrast: var(--sand-50);
-  --secondary: var(--violet-600);
+  --accent: light-dark(var(--wedgwood-500), var(--wedgwood-300));
+  --accent-strong: light-dark(var(--wedgwood-700), #a3bfe8);
+  --accent-contrast: light-dark(var(--sand-50), #16110e);
+  --secondary: light-dark(var(--violet-600), var(--violet-400));
+
+  /* keyboard focus, always the accent so it reads as "interactive" */
+  --ring: var(--accent);
 
   /* a highlighter pass over a passage of text */
-  --highlight: color-mix(in oklab, var(--wedgwood-500) 16%, transparent);
+  --highlight: light-dark(
+    color-mix(in oklab, var(--wedgwood-500) 16%, transparent),
+    color-mix(in oklab, var(--wedgwood-300) 22%, transparent)
+  );
 
+  /* follow the system by default; the classes below force a mode */
+  color-scheme: light dark;
+}
+
+.light {
   color-scheme: light;
 }
 
-/*
- * Dark mode: a deep, warm brown-black page with sand-toned ink.
- * Follows the system by default; adding `.dark` to <html> lets us wire
- * an explicit toggle later without touching a single component.
- */
-@media (prefers-color-scheme: dark) {
-  :root {
-    --page: #16110e;
-    --surface: #1e1815;
-    --surface-sunken: #251e1a;
-    --rule: #362c26;
-
-    --ink: #ece2d2;
-    --ink-strong: #f7f2e9;
-    --ink-muted: #b6a795;
-    --ink-faint: #8a7a6c;
-
-    --accent: var(--wedgwood-300);
-    --accent-strong: #a3bfe8;
-    --accent-contrast: #16110e;
-    --secondary: var(--violet-400);
-
-    --highlight: color-mix(in oklab, var(--wedgwood-300) 22%, transparent);
-
-    color-scheme: dark;
-  }
-}
-
 .dark {
-  --page: #16110e;
-  --surface: #1e1815;
-  --surface-sunken: #251e1a;
-  --rule: #362c26;
-
-  --ink: #ece2d2;
-  --ink-strong: #f7f2e9;
-  --ink-muted: #b6a795;
-  --ink-faint: #8a7a6c;
-
-  --accent: var(--wedgwood-300);
-  --accent-strong: #a3bfe8;
-  --accent-contrast: #16110e;
-  --secondary: var(--violet-400);
-
-  --highlight: color-mix(in oklab, var(--wedgwood-300) 22%, transparent);
-
   color-scheme: dark;
 }
 
@@ -120,6 +108,7 @@
   --color-accent-contrast: var(--accent-contrast);
   --color-secondary: var(--secondary);
   --color-highlight: var(--highlight);
+  --color-ring: var(--ring);
 
   /* Serif leads (reading + headings); sans is for UI chrome only. */
   --font-serif: var(--font-source-serif), ui-serif, Georgia, serif;
@@ -129,9 +118,13 @@
 body {
   background-color: var(--page);
   color: var(--ink);
-  font-family: var(--font-source-serif), ui-serif, Georgia, serif;
-  -webkit-font-smoothing: antialiased;
+  font-family: var(--font-serif);
   text-rendering: optimizeLegibility;
+}
+
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
 
 ::selection {

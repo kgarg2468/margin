@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Inter, Source_Serif_4 } from "next/font/google";
 import "./globals.css";
 
@@ -14,10 +14,30 @@ const inter = Inter({
   display: "swap",
 });
 
+const title = "margin — the collective intelligence layer for research groups";
+const description =
+  "Margin is a collaborative journal club and annotation workspace where research groups read papers together and keep what they learn.";
+
 export const metadata: Metadata = {
-  title: "margin — the collective intelligence layer for research groups",
-  description:
-    "Margin is a collaborative journal club and annotation workspace where research groups read papers together and keep what they learn.",
+  // TODO: swap for the production domain once it exists.
+  metadataBase: new URL("https://margin.vercel.app"),
+  title,
+  description,
+  openGraph: {
+    type: "website",
+    siteName: "margin",
+    url: "/",
+    title,
+    description,
+    locale: "en_US",
+  },
+};
+
+export const viewport: Viewport = {
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#f7f2e9" },
+    { media: "(prefers-color-scheme: dark)", color: "#16110e" },
+  ],
 };
 
 export default function RootLayout({
@@ -26,10 +46,14 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
-      <body className={`${sourceSerif.variable} ${inter.variable} antialiased`}>
-        {children}
-      </body>
+    // The font variables live on <html> so `--font-serif` (declared on :root
+    // in globals.css) can resolve them; on <body> they would be out of scope.
+    <html
+      lang="en"
+      className={`${sourceSerif.variable} ${inter.variable}`}
+      suppressHydrationWarning
+    >
+      <body className="antialiased">{children}</body>
     </html>
   );
 }
