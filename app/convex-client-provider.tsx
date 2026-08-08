@@ -5,14 +5,18 @@ import { ConvexReactClient } from "convex/react";
 import type { ReactNode } from "react";
 
 /**
- * The client is constructed at module scope, which means `next build` runs it
- * during prerender — and CI builds without a provisioned deployment. Falling
- * back to a placeholder origin keeps the build green; at runtime a missing
- * `NEXT_PUBLIC_CONVEX_URL` simply leaves every query in its loading state
- * instead of crashing the page.
+ * Convex Auth also reads `NEXT_PUBLIC_CONVEX_URL` directly (it namespaces
+ * token storage by deployment), so there is no useful degraded mode without
+ * it — better to say so plainly than to fail three layers down. Every route
+ * in this app is dynamic, so this never runs at build time.
  */
-const convexUrl =
-  process.env.NEXT_PUBLIC_CONVEX_URL ?? "https://not-configured.convex.cloud";
+const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
+
+if (!convexUrl) {
+  throw new Error(
+    "Missing NEXT_PUBLIC_CONVEX_URL. Run `npx convex dev` to create a deployment; it writes .env.local for you.",
+  );
+}
 
 const convex = new ConvexReactClient(convexUrl);
 
