@@ -1,5 +1,6 @@
 "use client";
 
+import { ConfirmAction } from "@/app/(app)/app/_components/confirm-action";
 import { readableError } from "@/app/(app)/app/_components/errors";
 import { api } from "@/convex/_generated/api";
 import { errorClass } from "@/lib/ui";
@@ -110,6 +111,11 @@ export function AnnotationCard({
     }
   }
 
+  // A note with replies cannot be taken away without taking the answers with
+  // it, so it is withdrawn — body gone, tombstone and thread left standing.
+  // One without them is simply deleted.
+  const threaded = annotation.replyCount > 0;
+
   const lockedPublic =
     annotation.visibility === "lab" &&
     annotation.replyCount > 0 &&
@@ -211,7 +217,7 @@ export function AnnotationCard({
                   setEditing(false);
                 }, "That edit didn't save.")
               }
-              className="font-sans text-xs text-accent underline-offset-4 hover:underline disabled:opacity-50"
+              className="tap-target font-sans text-xs text-accent underline-offset-4 hover:underline disabled:opacity-50"
             >
               Save
             </button>
@@ -221,7 +227,7 @@ export function AnnotationCard({
                 setDraftBody(annotation.body);
                 setEditing(false);
               }}
-              className="font-sans text-xs text-ink-faint underline-offset-4 hover:underline"
+              className="tap-target font-sans text-xs text-ink-faint underline-offset-4 hover:underline"
             >
               Cancel
             </button>
@@ -243,19 +249,31 @@ export function AnnotationCard({
               }
             />
           )}
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() =>
-              void run(async () => {
-                await remove({ annotationId: annotation._id });
-                setEditing(false);
-              }, "That didn't withdraw.")
-            }
-            className="self-start font-sans text-xs text-ink-faint underline-offset-4 hover:text-ink-muted hover:underline disabled:opacity-50"
-          >
-            {annotation.replyCount > 0 ? "Withdraw note" : "Delete note"}
-          </button>
+          {/* The only destructive action in Margin that used to fire on one
+              click, sitting among compact edit controls where the click was
+              easy to make by accident and impossible to take back.
+              `confirmLabel` says which of the two things is about to happen,
+              because they are genuinely different: a note with replies leaves
+              the thread and a tombstone standing, and a note without them
+              leaves nothing at all. */}
+          <span className="self-start">
+            <ConfirmAction
+              tone="faint"
+              disabled={busy}
+              label={threaded ? "Withdraw note" : "Delete note"}
+              confirmLabel={
+                threaded
+                  ? "Withdraw — the replies stay"
+                  : "Delete — nothing is kept"
+              }
+              run={() =>
+                run(async () => {
+                  await remove({ annotationId: annotation._id });
+                  setEditing(false);
+                }, "That didn't withdraw.")
+              }
+            />
+          </span>
         </div>
       ) : (
         annotation.body.length > 0 && (
@@ -288,7 +306,7 @@ export function AnnotationCard({
         <button
           type="button"
           onClick={() => setExpanded(true)}
-          className="mt-1.5 font-sans text-xs text-accent underline-offset-4 hover:underline"
+          className="tap-target mt-1.5 font-sans text-xs text-accent underline-offset-4 hover:underline"
         >
           {replies.length - 1} more{" "}
           {replies.length - 1 === 1 ? "reply" : "replies"}
@@ -317,26 +335,28 @@ export function AnnotationCard({
                   setExpanded(true);
                 }, "That reply didn't send.")
               }
-              className="font-sans text-xs text-accent underline-offset-4 hover:underline disabled:opacity-50"
+              className="tap-target font-sans text-xs text-accent underline-offset-4 hover:underline disabled:opacity-50"
             >
               Reply
             </button>
             <button
               type="button"
               onClick={() => setReplying(false)}
-              className="font-sans text-xs text-ink-faint underline-offset-4 hover:underline"
+              className="tap-target font-sans text-xs text-ink-faint underline-offset-4 hover:underline"
             >
               Cancel
             </button>
           </div>
         </div>
       ) : (
-        <div className="mt-1.5 flex flex-wrap items-baseline gap-x-3">
+        // gap-x-5: `Reply` and `Edit` are 32px and 21px wide, so their 44px
+        // hit boxes would otherwise reach well into each other.
+        <div className="mt-1.5 flex flex-wrap items-baseline gap-x-5">
           {annotation.visibility === "lab" && !annotation.deleted && (
             <button
               type="button"
               onClick={() => setReplying(true)}
-              className="font-sans text-xs text-ink-faint underline-offset-4 hover:text-accent hover:underline"
+              className="tap-target font-sans text-xs text-ink-faint underline-offset-4 hover:text-accent hover:underline"
             >
               Reply
             </button>
@@ -348,7 +368,7 @@ export function AnnotationCard({
                 setDraftBody(annotation.body);
                 setEditing(true);
               }}
-              className="font-sans text-xs text-ink-faint underline-offset-4 hover:text-accent hover:underline"
+              className="tap-target font-sans text-xs text-ink-faint underline-offset-4 hover:text-accent hover:underline"
             >
               Edit
             </button>

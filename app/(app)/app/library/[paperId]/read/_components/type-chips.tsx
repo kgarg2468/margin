@@ -21,7 +21,12 @@ export function TypeChips({
   size?: "regular" | "small";
 }) {
   return (
-    <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label="Note type">
+    <div
+      // Room between the rows for hit boxes that are taller than the chips.
+      className="flex flex-wrap gap-x-1.5 gap-y-2"
+      role="radiogroup"
+      aria-label="Note type"
+    >
       {ANNOTATION_TYPES.map((style) => {
         const selected = style.value === value;
         return (
@@ -37,10 +42,10 @@ export function TypeChips({
               background: selected ? style.wash : undefined,
             }}
             className={
-              "rounded-sm border px-1.5 font-sans uppercase tracking-[0.1em] transition-colors " +
+              "tap-target rounded-sm border px-1.5 font-sans uppercase tracking-[0.1em] transition-colors " +
               (size === "small"
-                ? "py-0.5 text-[9px] "
-                : "py-1 text-[10px] ") +
+                ? "py-1 text-[9px] "
+                : "py-1.5 text-[10px] ") +
               (selected
                 ? "border-current"
                 : "border-rule text-ink-faint hover:border-ink-faint hover:text-ink-muted")
