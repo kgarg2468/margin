@@ -3,16 +3,32 @@
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { formatWhen, isUpcoming, isoAt, relativeWhen } from "@/lib/sessions-ui";
-import { errorClass, eyebrowClass, secondaryButtonClass, skeletonClass } from "@/lib/ui";
-import { useMutation, useQuery } from "convex/react";
+import {
+  errorClass,
+  eyebrowClass,
+  labelClass,
+  secondaryButtonClass,
+  skeletonClass,
+  textareaClass,
+} from "@/lib/ui";
+import { useAction, useMutation, useQuery } from "convex/react";
 import Link from "next/link";
 import { useState } from "react";
 import { SessionStatusChip } from "../sessions/_components/session-row";
 import { ConfirmAction } from "./confirm-action";
 import { DigestInbox } from "./digest";
 import { readableError } from "./errors";
+import { InviteNotice } from "./lab-provider";
 import type { LabSummary } from "./lab-provider";
 import { JoinLabCard } from "./onboarding";
+
+/**
+ * Emailing an invitation needs a Resend key on the Convex deployment, which
+ * the browser cannot see. Set `NEXT_PUBLIC_AUTH_EMAIL=1` alongside it and the
+ * form appears; leave it unset and this section is the code list it has
+ * always been.
+ */
+const EMAIL_ENABLED = process.env.NEXT_PUBLIC_AUTH_EMAIL === "1";
 
 function formatDate(ms: number): string {
   return new Date(ms).toLocaleDateString(undefined, {
@@ -25,6 +41,8 @@ function formatDate(ms: number): string {
 export function LabOverview({ lab }: { lab: LabSummary }) {
   return (
     <div className="flex flex-col gap-12">
+      <InviteNotice />
+
       <header className="flex flex-col gap-3 border-l border-rule pl-6">
         <h1 className="font-serif text-4xl tracking-tight text-ink-strong">
           {lab.name}
@@ -208,7 +226,99 @@ function Invites({ lab }: { lab: LabSummary }) {
       >
         {pending ? "Generating…" : "New invite code"}
       </button>
+
+      {EMAIL_ENABLED && <InviteByEmail lab={lab} />}
     </section>
+  );
+}
+
+/**
+ * The same code, delivered instead of dictated.
+ *
+ * A PI reading a code out in a lab meeting is fine; a PI trying to onboard a
+ * new postdoc who is not in the room is not. This mints a code sized to the
+ * batch and mails each address the link that carries it, so the recipient's
+ * first move is clicking, not typing. The code then appears in the list above
+ * like any other and can be revoked the same way.
+ *
+ * Margin does not keep the addresses. Who was invited is not a fact the
+ * product needs; who joined is, and the ledger already has it.
+ */
+function InviteByEmail({ lab }: { lab: LabSummary }) {
+  const inviteByEmail = useAction(api.invites.inviteByEmail);
+  const [error, setError] = useState<string | null>(null);
+  const [sent, setSent] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+
+  return (
+    <form
+      className="flex flex-col gap-3 border-t border-rule pt-6"
+      onSubmit={async (event) => {
+        event.preventDefault();
+        const formData = new FormData(event.currentTarget);
+        const form = event.currentTarget;
+        setError(null);
+        setSent(null);
+        setPending(true);
+        try {
+          const result = await inviteByEmail({
+            labId: lab._id,
+            emails: [String(formData.get("emails") ?? "")],
+          });
+          form.reset();
+          setSent(
+            result.failed === 0
+              ? `Sent to ${result.sent} ${result.sent === 1 ? "person" : "people"}. The code is in the list above.`
+              : `Sent to ${result.sent}; ${result.failed} didn't go through. Try those addresses again.`,
+          );
+        } catch (caught) {
+          setError(
+            readableError(caught, "We couldn't send those invitations."),
+          );
+        } finally {
+          setPending(false);
+        }
+      }}
+    >
+      <label htmlFor="invite-emails" className={labelClass}>
+        Or send it by email
+      </label>
+      <textarea
+        id="invite-emails"
+        name="emails"
+        rows={2}
+        required
+        spellCheck={false}
+        placeholder="ada@university.edu, chen@university.edu"
+        className={`${textareaClass} font-sans`}
+      />
+      <p className="font-sans text-xs leading-relaxed text-ink-faint">
+        Commas, spaces or new lines. Each person gets a link that signs them in
+        and drops them straight into {lab.name}.
+      </p>
+
+      {error !== null && (
+        <p role="alert" className={`${errorClass} pop-in`}>
+          {error}
+        </p>
+      )}
+      {sent !== null && (
+        <p
+          role="status"
+          className="pop-in border-l-2 border-accent pl-3 font-sans text-sm text-ink"
+        >
+          {sent}
+        </p>
+      )}
+
+      <button
+        type="submit"
+        disabled={pending}
+        className={`${secondaryButtonClass} self-start`}
+      >
+        {pending ? "Sending…" : "Send invitations"}
+      </button>
+    </form>
   );
 }
 

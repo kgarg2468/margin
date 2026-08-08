@@ -3,9 +3,31 @@ import {
   createRouteMatcher,
   nextjsMiddlewareRedirect,
 } from "@convex-dev/auth/nextjs/server";
+import type { NextRequest } from "next/server";
 
 const isSignInPage = createRouteMatcher(["/signin"]);
 const isProtectedRoute = createRouteMatcher(["/app(.*)"]);
+
+/**
+ * The one query param that survives a redirect.
+ *
+ * An emailed invitation links to `/app?invite=CODE`, and whoever clicks it is
+ * usually signed out — so the code has to ride along to `/signin` and back
+ * again, or the recipient lands in an empty app holding nothing. Everything
+ * else is dropped, because `nextjsMiddlewareRedirect` rebuilds the query from
+ * the route string and forwarding the rest would be a way to smuggle params
+ * onto pages that never asked for them.
+ *
+ * Narrowed to the shape `convex/invites.ts` mints — eight of an unambiguous
+ * alphabet — so nothing longer or stranger can be bounced off this redirect.
+ */
+function inviteSuffix(request: NextRequest): string {
+  const invite = request.nextUrl.searchParams.get("invite");
+  if (invite === null || !/^[A-Za-z0-9]{1,16}$/.test(invite)) {
+    return "";
+  }
+  return `?invite=${encodeURIComponent(invite)}`;
+}
 
 /**
  * Everything under `/app` requires a session; `/signin` is pointless once you
@@ -15,10 +37,13 @@ const isProtectedRoute = createRouteMatcher(["/app(.*)"]);
 export default convexAuthNextjsMiddleware(
   async (request, { convexAuth }) => {
     if (isSignInPage(request) && (await convexAuth.isAuthenticated())) {
-      return nextjsMiddlewareRedirect(request, "/app");
+      return nextjsMiddlewareRedirect(request, `/app${inviteSuffix(request)}`);
     }
     if (isProtectedRoute(request) && !(await convexAuth.isAuthenticated())) {
-      return nextjsMiddlewareRedirect(request, "/signin");
+      return nextjsMiddlewareRedirect(
+        request,
+        `/signin${inviteSuffix(request)}`,
+      );
     }
   },
   {

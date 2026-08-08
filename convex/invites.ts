@@ -1,7 +1,9 @@
 import { ConvexError, v } from "convex/values";
+import { api } from "./_generated/api";
 import type { Doc } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
-import { mutation, query } from "./_generated/server";
+import { action, mutation, query } from "./_generated/server";
+import { emailIsConfigured, renderEmail, sendEmail } from "./auth";
 import { getMembership, requirePi, requireUserId } from "./lib/authz";
 import { recordEvent } from "./lib/ledger";
 
@@ -18,6 +20,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 /** A lab is a research group, not a mailing list — 25 covers the big ones. */
 const DEFAULT_MAX_USES = 25;
 const MAX_MAX_USES = 200;
+/** One batch of emailed invitations. Same ceiling as a lab, for the same reason. */
+const MAX_EMAIL_RECIPIENTS = 25;
 
 function randomCode(): string {
   const bytes = new Uint8Array(CODE_LENGTH);
@@ -68,9 +72,15 @@ export const createInvite = mutation({
     code: v.string(),
     expiresAt: v.number(),
     maxUses: v.number(),
+    /** For composing the invitation email, which has to name the lab it is for. */
+    labName: v.string(),
   }),
   handler: async (ctx, args) => {
     const membership = await requirePi(ctx, args.labId);
+    const lab = await ctx.db.get(args.labId);
+    if (lab === null) {
+      throw new ConvexError("That lab no longer exists.");
+    }
 
     const ttlDays = args.ttlDays ?? DEFAULT_TTL_DAYS;
     if (!Number.isFinite(ttlDays) || ttlDays <= 0 || ttlDays > MAX_TTL_DAYS) {
@@ -109,7 +119,148 @@ export const createInvite = mutation({
       inviteId,
     });
 
-    return { code, expiresAt, maxUses };
+    return { code, expiresAt, maxUses, labName: lab.name };
+  },
+});
+
+/** Codes are typed by hand as often as they are pasted, so be generous about what an address looks like and strict about what is sent. */
+function normalizeEmail(input: string): string {
+  return input.trim().toLowerCase();
+}
+
+const EMAIL_SHAPE = /^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/;
+
+/**
+ * Split whatever the PI pasted into addresses.
+ *
+ * A roster arrives from a spreadsheet column, a Slack message or a mail
+ * client's "to" line, so commas, semicolons and newlines all mean the same
+ * thing. Duplicates collapse: mailing the same postdoc twice would also spend
+ * two of the code's uses.
+ */
+export function parseRecipients(input: readonly string[]): string[] {
+  const seen = new Set<string>();
+  for (const chunk of input) {
+    for (const piece of chunk.split(/[\s,;]+/)) {
+      const email = normalizeEmail(piece);
+      if (email.length > 0) {
+        seen.add(email);
+      }
+    }
+  }
+  return [...seen];
+}
+
+/**
+ * Mint a code and mail it to people, instead of reading it out in a meeting.
+ *
+ * The code is the credential either way — this is a delivery channel, not a
+ * second kind of invitation. One code covers the batch rather than one per
+ * address: a per-address code would fill the PI's list with rows nobody reads,
+ * and the ledger already records who actually joined. `maxUses` is set to the
+ * number of recipients, so the code cannot outlive the batch it was minted for,
+ * and revoking it calls the whole batch off.
+ *
+ * Nothing about the recipients is stored. Who was invited is not a fact Margin
+ * needs; who joined is, and that is already a `member.joined` event.
+ *
+ * An action rather than a mutation because sending mail is a network call.
+ * `runMutation` carries the caller's identity, so `createInvite` still does the
+ * PI check — this function adds no authorization of its own.
+ */
+export const inviteByEmail = action({
+  args: {
+    labId: v.id("labs"),
+    /** Free text: one address, a comma-separated line, or a pasted column. */
+    emails: v.array(v.string()),
+  },
+  returns: v.object({
+    code: v.string(),
+    sent: v.number(),
+    failed: v.number(),
+  }),
+  // The return type is spelled out because this action calls `createInvite`
+  // through `api.invites`, i.e. through the type of the module it is declared
+  // in. Left to infer, that is a cycle, and TypeScript resolves it by making
+  // the whole generated `api` implicitly `any` — which silently unpicks the
+  // types of every `useQuery` in the app, not just this one function.
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{ code: string; sent: number; failed: number }> => {
+    // Checked before anything is minted: a code created for a batch that could
+    // never be delivered is just litter in the PI's list.
+    if (!emailIsConfigured()) {
+      throw new ConvexError(
+        "Email isn't set up on this deployment. Share the code instead.",
+      );
+    }
+
+    const recipients = parseRecipients(args.emails);
+    if (recipients.length === 0) {
+      throw new ConvexError("Enter at least one email address.");
+    }
+    if (recipients.length > MAX_EMAIL_RECIPIENTS) {
+      throw new ConvexError(
+        `You can invite up to ${MAX_EMAIL_RECIPIENTS} people at a time.`,
+      );
+    }
+    const malformed = recipients.find((email) => !EMAIL_SHAPE.test(email));
+    if (malformed !== undefined) {
+      throw new ConvexError(`${malformed} doesn't look like an email address.`);
+    }
+
+    const invite = await ctx.runMutation(api.invites.createInvite, {
+      labId: args.labId,
+      maxUses: recipients.length,
+    });
+    const viewer = await ctx.runQuery(api.users.viewer, {});
+    const inviter = viewer?.name ?? viewer?.email ?? "Someone";
+
+    // `SITE_URL` is the same origin Convex Auth already sends its sign-in
+    // links to, so the invitation and the sign-in it triggers agree about
+    // where Margin lives. `/app` carries the code through the middleware:
+    // signed out it becomes `/signin?invite=…` and comes back after auth.
+    const siteUrl = (process.env.SITE_URL ?? "").replace(/\/$/, "");
+    const url = `${siteUrl}/app?invite=${encodeURIComponent(invite.code)}`;
+    const expires = new Date(invite.expiresAt).toISOString().slice(0, 10);
+
+    const results = await Promise.allSettled(
+      recipients.map((to) =>
+        sendEmail({
+          to,
+          subject: `${inviter} invited you to ${invite.labName} on Margin`,
+          text: [
+            `${inviter} invited you to ${invite.labName} on Margin.`,
+            "",
+            "Margin is where a lab reads papers together: everyone annotates in the same margin, and the journal club runs off what the group flagged.",
+            "",
+            "Open the invitation:",
+            url,
+            "",
+            `Or join with the code ${invite.code}. It expires on ${expires}.`,
+            "",
+            "Margin",
+          ].join("\n"),
+          html: renderEmail({
+            heading: `${inviter} invited you to ${invite.labName}`,
+            paragraphs: [
+              "Margin is where a lab reads papers together: everyone annotates in the same margin, and the journal club runs off what the group flagged.",
+              "The link opens Margin and takes you straight into the lab.",
+            ],
+            action: { label: "Join the lab", url },
+            footnotes: [
+              `Or join with the code ${invite.code}, which expires on ${expires}.`,
+            ],
+          }),
+        }),
+      ),
+    );
+
+    const failed = results.filter(
+      (result) => result.status === "rejected",
+    ).length;
+    return { code: invite.code, sent: recipients.length - failed, failed };
   },
 });
 
