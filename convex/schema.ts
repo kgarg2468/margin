@@ -399,6 +399,18 @@ export default defineSchema({
     presenterNotes: v.optional(v.string()),
     synthesis: v.optional(v.string()),
     synthesisApprovedAt: v.optional(v.number()),
+    /**
+     * When a synthesis run claimed this session, if one currently has it.
+     *
+     * Generation is an action: it leaves the transaction, spends up to two
+     * minutes and several thousand tokens at the Anthropic API, and comes back
+     * to overwrite one row. Two people pressing the button — or one person
+     * pressing it twice — would pay for that twice and race over the result.
+     * The marker is a timestamp rather than a flag because an action that dies
+     * mid-flight cannot clear anything, and a lease that never expires is a
+     * session that can never be synthesized again.
+     */
+    synthesisGeneratingAt: v.optional(v.number()),
     startedAt: v.optional(v.number()),
     endedAt: v.optional(v.number()),
     cancelledAt: v.optional(v.number()),
@@ -532,6 +544,15 @@ export default defineSchema({
             text: v.string(),
             /** Display names of the members whose annotations back this item. */
             attribution: v.array(v.string()),
+            /**
+             * The annotations this item was drawn from, by id.
+             *
+             * A name is an attribution; an id is a citation. The model is made
+             * to cite the `[A#]` labels it used and they are resolved back to
+             * rows here, so a reader can open the annotation behind any line
+             * and an item that cited nothing real never reaches this table.
+             */
+            annotationIds: v.array(v.id("annotations")),
           }),
         ),
       }),
