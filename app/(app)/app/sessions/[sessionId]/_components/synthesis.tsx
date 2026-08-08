@@ -31,9 +31,21 @@ type Section = Synthesis["sections"][number];
  * those ids were resolved when the write-up was generated. The margin has moved
  * since: notes get withdrawn, and a member can flip a note from lab-visible
  * back to private. So an item's citations are re-checked against the
- * annotations this client can *currently* see, and an item whose evidence has
- * gone says so rather than quietly keeping a name attached to a note the reader
- * is no longer allowed to read.
+ * annotations this client can *currently* see, on two thresholds:
+ *
+ * - **No citation still visible** — the sentence is redacted, not just
+ *   unlinked. A synthesis item is derived from the notes it cites; if every
+ *   one of them has been withdrawn, the item is a paraphrase of writing the
+ *   reader is no longer allowed to read, and leaving it on the page would make
+ *   the write-up a way around `visibility: "private"`.
+ * - **Some citation withdrawn** — the sentence stands, because at least one
+ *   note behind it is still shared, but the attribution line goes. Names come
+ *   from the union of the cited notes and can't be mapped back to individual
+ *   ids, so a partial withdrawal means we can no longer prove any particular
+ *   name is still owed.
+ *
+ * Both thresholds are read from live annotation data, never from what the
+ * write-up stored at generation time.
  */
 
 /** Canonical order and a heading for a section whose own is missing. */
@@ -187,34 +199,48 @@ function SynthesisSection({
           );
           const withdrawn =
             item.annotationIds.length > 0 && cited.length === 0;
+          const partial = cited.length < item.annotationIds.length;
           return (
             <li
               key={`${section.key}-${index}`}
               style={{ borderLeftColor: "var(--secondary)" }}
               className="border-l-2 pl-3.5"
             >
-              <p className="max-w-prose font-serif text-base leading-relaxed text-ink">
-                {item.text}
-              </p>
-              <p className="mt-1.5 flex flex-wrap items-baseline gap-x-3 gap-y-1 font-sans text-xs text-ink-faint">
-                {item.attribution.length > 0 && (
-                  <span>{item.attribution.join(", ")}</span>
-                )}
-                {cited.map((id, position) => (
-                  <a
-                    key={id}
-                    href={`#${annotationAnchorId(id)}`}
-                    className="text-accent underline-offset-4 hover:underline"
-                  >
-                    Note {position + 1}
-                  </a>
-                ))}
-                {withdrawn && (
-                  <span className="italic">
-                    The notes behind this are no longer shared.
-                  </span>
-                )}
-              </p>
+              {withdrawn ? (
+                // The line itself is redacted, not merely unlinked: it was
+                // written out of notes that are no longer shared with this
+                // reader. Saying a line was here keeps the record honest —
+                // silently dropping it would make the write-up look shorter
+                // than the meeting was.
+                <p className="max-w-prose font-serif text-base italic leading-relaxed text-ink-faint">
+                  A line here rested on notes that are no longer shared.
+                </p>
+              ) : (
+                <>
+                  <p className="max-w-prose font-serif text-base leading-relaxed text-ink">
+                    {item.text}
+                  </p>
+                  <p className="mt-1.5 flex flex-wrap items-baseline gap-x-3 gap-y-1 font-sans text-xs text-ink-faint">
+                    {!partial && item.attribution.length > 0 && (
+                      <span>{item.attribution.join(", ")}</span>
+                    )}
+                    {cited.map((id, position) => (
+                      <a
+                        key={id}
+                        href={`#${annotationAnchorId(id)}`}
+                        className="text-accent underline-offset-4 hover:underline"
+                      >
+                        Note {position + 1}
+                      </a>
+                    ))}
+                    {partial && (
+                      <span className="italic">
+                        Some of the notes behind this are no longer shared.
+                      </span>
+                    )}
+                  </p>
+                </>
+              )}
             </li>
           );
         })}

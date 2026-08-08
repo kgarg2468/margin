@@ -163,6 +163,13 @@ function DigestCard({ digest }: { digest: Digest }) {
               await markDigestSeen({ digestId: digest._id });
               // Advance the cursors this digest was written against, so the
               // next one starts where this one stopped.
+              //
+              // `digests.markSeen` stamps the cursor with the server's clock,
+              // so anything written between `digest.generatedAt` and this
+              // click lands behind the cursor and won't appear in the next
+              // digest. Closing that gap needs the mutation to accept the
+              // digest's boundary instead of `now` — a backend change, and
+              // out of scope here. Flagged rather than papered over.
               const papers = [...new Set(digest.items.map((i) => i.paperId))];
               for (const paperId of papers) {
                 await markSeen({ paperId });
