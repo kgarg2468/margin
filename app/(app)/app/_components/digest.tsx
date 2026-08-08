@@ -162,20 +162,20 @@ function DigestCard({ digest }: { digest: Digest }) {
             try {
               await markDigestSeen({ digestId: digest._id });
               // Advance the cursors this digest was written against, so the
-              // next one starts where this one stopped.
-              //
-              // `digests.markSeen` stamps the cursor with the server's clock,
-              // so anything written between `digest.generatedAt` and this
-              // click lands behind the cursor and won't appear in the next
-              // digest. Closing that gap needs the mutation to accept the
-              // digest's boundary instead of `now` — a backend change, and
-              // out of scope here. Flagged rather than papered over.
+              // next one starts where this one stopped. Passing `digestId`
+              // is what makes that true: the mutation stamps the cursor with
+              // the digest's own boundary rather than the clock at the moment
+              // of the click, so anything written between the two still shows
+              // up in the next digest instead of falling behind the cursor.
               const papers = [...new Set(digest.items.map((i) => i.paperId))];
               for (const paperId of papers) {
-                await markSeen({ paperId });
+                await markSeen({ paperId, digestId: digest._id });
               }
               if (digest.sessionId !== undefined) {
-                await markSeen({ sessionId: digest.sessionId });
+                await markSeen({
+                  sessionId: digest.sessionId,
+                  digestId: digest._id,
+                });
               }
             } catch (caught) {
               setError(readableError(caught, "That didn't go through."));
