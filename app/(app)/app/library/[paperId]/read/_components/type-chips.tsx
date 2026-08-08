@@ -42,7 +42,8 @@ export function TypeChips({
               background: selected ? style.wash : undefined,
             }}
             className={
-              "tap-target rounded-sm border px-1.5 font-sans uppercase tracking-[0.1em] transition-colors " +
+              "tap-target rounded-full border px-2 font-sans uppercase tracking-[0.1em] " +
+              "motion-safe:transition-[color,background-color,border-color,transform] motion-safe:duration-200 active:scale-[0.96] " +
               (size === "small"
                 ? "py-1 text-[9px] "
                 : "py-1.5 text-[10px] ") +

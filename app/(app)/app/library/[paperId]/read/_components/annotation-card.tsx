@@ -133,9 +133,15 @@ export function AnnotationCard({
       onMouseLeave={() => onActivate(null)}
       onFocus={() => onActivate(annotation._id)}
       style={{ borderLeftColor: style.ink }}
+      // A card, not a slab: rounded, hairline-bordered, resting on the page
+      // with a whisper of shadow — the Fig. 1 grammar. The type's ink keeps
+      // the left rule; activation lifts the card rather than boxing it.
       className={
-        "border-l-2 bg-surface py-2 pl-3 pr-2 transition-shadow " +
-        (active ? "shadow-[0_0_0_1px_var(--rule)]" : "")
+        "rounded-md border border-rule border-l-2 bg-surface py-2.5 pl-3 pr-2.5 " +
+        "motion-safe:transition-[box-shadow,translate] motion-safe:duration-200 " +
+        (active
+          ? "shadow-[0_0_0_1px_var(--rule),0_8px_24px_-16px_rgba(42,33,29,0.5)] motion-safe:-translate-y-px"
+          : "shadow-[0_1px_3px_-2px_rgba(42,33,29,0.25)]")
       }
     >
       <header className="flex flex-wrap items-baseline gap-x-2 gap-y-1">

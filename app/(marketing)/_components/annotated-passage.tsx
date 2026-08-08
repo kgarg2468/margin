@@ -1,4 +1,8 @@
+"use client";
+
 import type { ReactNode } from "react";
+import { createContext, useContext } from "react";
+import styles from "./showcase.module.css";
 
 /**
  * The centrepiece: one paragraph of one paper, as a group would leave it.
@@ -9,8 +13,18 @@ import type { ReactNode } from "react";
  * and the apparatus read as one thing. On a narrow screen the notes fall
  * inline, which is what a margin does when there is no margin.
  *
+ * The figure can be rendered finished (`activeNotes` omitted) or mid-session:
+ * the showcase wrapper feeds it a count from scroll position and the notes
+ * arrive one at a time, which is the product demo — a session leaving its
+ * trace — performed by the artifact itself.
+ *
  * The paper and the notes are invented; the figcaption says so.
  */
+
+export const TOTAL_NOTES = 5;
+
+/** How many notes are switched on. The server renders the figure finished. */
+const ActiveNotes = createContext(TOTAL_NOTES);
 
 type NoteType =
   | "hypothesis"
@@ -72,19 +86,25 @@ function Mark({
   children: ReactNode;
 }) {
   const note = NOTE[type];
+  const active = n <= useContext(ActiveNotes);
   return (
     <>
       <mark
-        className="box-decoration-clone rounded-[0.15em] px-[0.12em] text-ink"
-        style={{
-          backgroundColor: note.wash,
-          boxShadow: `inset 0 -0.09em 0 0 ${note.ink}`,
-        }}
+        data-active={active}
+        className={`${styles.mark} box-decoration-clone rounded-[0.15em] px-[0.12em] text-ink`}
+        style={
+          {
+            backgroundColor: "transparent",
+            backgroundImage: `linear-gradient(${note.wash}, ${note.wash})`,
+            "--mark-ink": note.ink,
+          } as React.CSSProperties
+        }
       >
         {children}
       </mark>
       <sup
-        className="ml-[0.15em] font-sans text-[0.55em] font-medium"
+        data-active={active}
+        className={`${styles.marker} ml-[0.15em] font-sans text-[0.55em] font-medium`}
         style={{ color: note.ink }}
       >
         <span className="sr-only"> (note {n})</span>
@@ -204,10 +224,13 @@ const ROWS: Row[] = [
 
 function MarginNote({ note }: { note: Note }) {
   const meta = NOTE[note.type];
+  const active = note.n <= useContext(ActiveNotes);
   return (
     <li
-      className="border-l-2 pl-3 md:border-l-0 md:pl-0"
+      data-active={active}
+      className={`${styles.note} border-l-2 pl-3 md:border-l-0 md:pl-0`}
       style={{ borderColor: meta.ink }}
+      aria-hidden={!active}
     >
       <p className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <span
@@ -239,92 +262,98 @@ function MarginNote({ note }: { note: Note }) {
   );
 }
 
-export function AnnotatedPassage() {
+export function AnnotatedPassage({
+  activeNotes = TOTAL_NOTES,
+}: {
+  activeNotes?: number;
+}) {
   return (
-    <figure className="m-0">
-      <div className="overflow-hidden rounded-md border border-rule bg-surface">
-        <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1 border-b border-rule bg-surface-sunken px-5 py-3 font-sans text-[0.7rem] tracking-[0.06em] text-ink-muted">
-          <span>Reyes Lab &middot; Thursday journal club</span>
-          <span className="text-ink-faint">
-            Session 12 &middot; 14 annotations &middot; 3 open questions
-          </span>
-        </div>
+    <ActiveNotes.Provider value={activeNotes}>
+      <figure className="m-0">
+        <div className="overflow-hidden rounded-md border border-rule bg-surface shadow-[0_24px_60px_-44px_rgba(42,33,29,0.55)]">
+          <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1 border-b border-rule bg-surface-sunken px-5 py-3 font-sans text-[0.7rem] tracking-[0.06em] text-ink-muted">
+            <span>Reyes Lab &middot; Thursday journal club</span>
+            <span className="text-ink-faint">
+              Session 12 &middot; 14 annotations &middot; 3 open questions
+            </span>
+          </div>
 
-        <div className="px-5 py-6 sm:px-8 sm:py-8">
-          <h3 className="max-w-[36rem] font-serif text-lg leading-snug text-ink-strong sm:text-xl">
-            Hippocampal replay density predicts overnight consolidation of
-            spatial memory
-          </h3>
-          <p className="mt-2 font-sans text-xs text-ink-faint">
-            Okonkwo, Feld, Ram&iacute;rez &amp; Chaudhry &middot; bioRxiv
-            2025.04.11.648302
-          </p>
+          <div className="px-5 py-6 sm:px-8 sm:py-8">
+            <h3 className="max-w-[36rem] font-serif text-lg leading-snug text-ink-strong sm:text-xl">
+              Hippocampal replay density predicts overnight consolidation of
+              spatial memory
+            </h3>
+            <p className="mt-2 font-sans text-xs text-ink-faint">
+              Okonkwo, Feld, Ram&iacute;rez &amp; Chaudhry &middot; bioRxiv
+              2025.04.11.648302
+            </p>
 
-          <div className="relative mt-8 flex flex-col gap-8">
-            {/* The margin rule itself: one unbroken hairline down the whole
-                apparatus rather than a stub beside each row. Sits in the
-                middle of the 2rem gutter — 16rem of notes plus half of it. */}
-            <span
-              aria-hidden
-              className="absolute inset-y-0 right-[17rem] hidden w-px bg-rule md:block"
-            />
-            {ROWS.map((row) => (
-              <div
-                key={row.locator}
-                className="grid gap-x-8 gap-y-4 md:grid-cols-[minmax(0,1fr)_16rem]"
-              >
-                <div>
-                  <p className="font-sans text-[0.65rem] uppercase tracking-[0.16em] text-ink-faint">
-                    {row.locator}
-                  </p>
-                  <p className="mt-2 font-serif text-[1.0625rem] leading-[1.75] text-ink">
-                    {row.passage}
-                  </p>
+            <div className="relative mt-8 flex flex-col gap-8">
+              {/* The margin rule itself: one unbroken hairline down the whole
+                  apparatus rather than a stub beside each row. Sits in the
+                  middle of the 2rem gutter — 16rem of notes plus half of it. */}
+              <span
+                aria-hidden
+                className="absolute inset-y-0 right-[17rem] hidden w-px bg-rule md:block"
+              />
+              {ROWS.map((row) => (
+                <div
+                  key={row.locator}
+                  className="grid gap-x-8 gap-y-4 md:grid-cols-[minmax(0,1fr)_16rem]"
+                >
+                  <div>
+                    <p className="font-sans text-[0.65rem] uppercase tracking-[0.16em] text-ink-faint">
+                      {row.locator}
+                    </p>
+                    <p className="mt-2 font-serif text-[1.0625rem] leading-[1.75] text-ink">
+                      {row.passage}
+                    </p>
+                  </div>
+                  <ul className="flex flex-col gap-5">
+                    {row.notes.map((note) => (
+                      <MarginNote key={note.n} note={note} />
+                    ))}
+                  </ul>
                 </div>
-                <ul className="flex flex-col gap-5">
-                  {row.notes.map((note) => (
-                    <MarginNote key={note.n} note={note} />
-                  ))}
-                </ul>
-              </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-rule bg-surface-sunken px-5 py-3">
+            <span className="font-sans text-[0.65rem] uppercase tracking-[0.16em] text-ink-faint">
+              Annotation types
+            </span>
+            {TYPE_ORDER.map((type) => (
+              <span
+                key={type}
+                className="inline-flex items-center gap-1.5 font-sans text-[0.7rem] text-ink-muted"
+              >
+                <span
+                  aria-hidden
+                  className="h-2 w-2 rounded-full"
+                  style={{ backgroundColor: NOTE[type].ink }}
+                />
+                {NOTE[type].label}
+              </span>
             ))}
+            {/* The ontology has a sixth type, and nothing in this excerpt is one.
+                A hollow swatch and a reason keeps the legend one coherent line
+                instead of trailing off into a fragment. */}
+            <span className="inline-flex items-center gap-1.5 font-sans text-[0.7rem] text-ink-faint">
+              <span
+                aria-hidden
+                className="h-2 w-2 rounded-full border border-current"
+              />
+              definition &mdash; none in this excerpt
+            </span>
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-rule bg-surface-sunken px-5 py-3">
-          <span className="font-sans text-[0.65rem] uppercase tracking-[0.16em] text-ink-faint">
-            Annotation types
-          </span>
-          {TYPE_ORDER.map((type) => (
-            <span
-              key={type}
-              className="inline-flex items-center gap-1.5 font-sans text-[0.7rem] text-ink-muted"
-            >
-              <span
-                aria-hidden
-                className="h-2 w-2 rounded-full"
-                style={{ backgroundColor: NOTE[type].ink }}
-              />
-              {NOTE[type].label}
-            </span>
-          ))}
-          {/* The ontology has a sixth type, and nothing in this excerpt is one.
-              A hollow swatch and a reason keeps the legend one coherent line
-              instead of trailing off into a fragment. */}
-          <span className="inline-flex items-center gap-1.5 font-sans text-[0.7rem] text-ink-faint">
-            <span
-              aria-hidden
-              className="h-2 w-2 rounded-full border border-current"
-            />
-            definition &mdash; none in this excerpt
-          </span>
-        </div>
-      </div>
-
-      <figcaption className="mt-3 font-sans text-xs leading-relaxed text-ink-faint">
-        Fig. 1 &mdash; Illustrative. The paper and the notes on it are invented;
-        the structure is not.
-      </figcaption>
-    </figure>
+        <figcaption className="mt-3 font-sans text-xs leading-relaxed text-ink-faint">
+          Fig. 1 &mdash; Illustrative. The paper and the notes on it are
+          invented; the structure is not.
+        </figcaption>
+      </figure>
+    </ActiveNotes.Provider>
   );
 }

@@ -52,9 +52,16 @@ test.describe("/ — the landing page", () => {
     // account, and without it `/signin` opens on "Pick up where your lab left
     // off" and a sign-in form — the returning-user state, contradicting the
     // button that was just pressed.
-    await expect(
-      hero.getByRole("link", { name: "Start a journal club" }),
-    ).toHaveAttribute("href", "/signin?flow=signup");
+    //
+    // The page repeats the CTA on purpose — same label, same destination, top
+    // and bottom — so this asserts over every instance rather than picking
+    // one: a second button that drifted to a different href is exactly the
+    // inconsistency worth failing on.
+    const ctas = hero.getByRole("link", { name: "Start a journal club" });
+    expect(await ctas.count()).toBeGreaterThanOrEqual(1);
+    for (const cta of await ctas.all()) {
+      await expect(cta).toHaveAttribute("href", "/signin?flow=signup");
+    }
 
     // The landing page lives in the `(marketing)` route group precisely so it
     // mounts no Convex provider and prerenders to a static file. If this
