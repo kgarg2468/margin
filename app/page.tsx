@@ -1,103 +1,99 @@
-import Image from "next/image";
+const swatches = [
+  { name: "page", chip: "bg-page", note: "warm sand paper" },
+  { name: "surface", chip: "bg-surface", note: "cards, editor sheets" },
+  { name: "surface-sunken", chip: "bg-surface-sunken", note: "wells, gutters" },
+  { name: "rule", chip: "bg-rule", note: "hairlines, borders" },
+  { name: "ink", chip: "bg-ink", note: "espresso body text" },
+  { name: "ink-muted", chip: "bg-ink-muted", note: "metadata, captions" },
+  { name: "accent", chip: "bg-accent", note: "Wedgwood — links, actions" },
+  { name: "secondary", chip: "bg-secondary", note: "muted violet — synthesis" },
+];
 
 export default function Home() {
   return (
-    <div className="font-sans grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20">
-      <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="font-mono list-inside list-decimal text-sm/6 text-center sm:text-left">
-          <li className="mb-2 tracking-[-.01em]">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] font-mono font-semibold px-1 py-0.5 rounded">
-              app/page.tsx
-            </code>
-            .
-          </li>
-          <li className="tracking-[-.01em]">
-            Save and see your changes instantly.
-          </li>
-        </ol>
+    <div className="min-h-screen bg-page px-6 py-16 sm:px-10 sm:py-24">
+      <main className="mx-auto flex w-full max-w-2xl flex-col gap-16 border-l border-rule pl-6 sm:pl-10">
+        <header className="flex flex-col gap-5">
+          <h1 className="font-serif text-6xl lowercase tracking-tight text-ink-strong sm:text-7xl">
+            margin
+          </h1>
+          <p className="font-serif text-xl leading-relaxed text-ink sm:text-2xl">
+            The collective intelligence layer for research groups.
+          </p>
+          <p className="max-w-prose font-serif text-base leading-relaxed text-ink-muted">
+            A shared notebook for the papers your lab reads together — every{" "}
+            <mark className="bg-highlight px-0.5 text-ink">
+              highlight, question, and objection
+            </mark>{" "}
+            kept in the margins, where the next person can find it.
+          </p>
+        </header>
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 w-full sm:w-auto md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
-        </div>
+        <section className="flex flex-col gap-5">
+          <h2 className="font-sans text-xs font-medium uppercase tracking-[0.18em] text-ink-faint">
+            Palette
+          </h2>
+          <ul className="grid grid-cols-1 gap-x-8 gap-y-3 sm:grid-cols-2">
+            {swatches.map((swatch) => (
+              <li key={swatch.name} className="flex items-center gap-3">
+                <span
+                  aria-hidden
+                  className={`${swatch.chip} h-7 w-7 shrink-0 rounded-sm border border-rule`}
+                />
+                <span className="flex min-w-0 flex-col">
+                  <span className="font-sans text-sm text-ink">
+                    {swatch.name}
+                  </span>
+                  <span className="truncate font-sans text-xs text-ink-faint">
+                    {swatch.note}
+                  </span>
+                </span>
+              </li>
+            ))}
+          </ul>
+        </section>
+
+        <section className="flex flex-col gap-5">
+          <h2 className="font-sans text-xs font-medium uppercase tracking-[0.18em] text-ink-faint">
+            Type &amp; surfaces
+          </h2>
+          <div className="rounded-md border border-rule bg-surface p-6">
+            <p className="font-sans text-xs uppercase tracking-[0.14em] text-ink-faint">
+              Annotation
+            </p>
+            <p className="mt-3 font-serif text-lg leading-relaxed text-ink">
+              &ldquo;The ablation in §4.2 is doing a lot of work here — does it
+              hold once the retrieval corpus is deduplicated?&rdquo;
+            </p>
+            <p className="mt-4 font-sans text-sm text-ink-muted">
+              Serif for reading and writing. Sans for chrome, labels, and
+              controls.
+            </p>
+            <div className="mt-6 flex flex-wrap items-center gap-4">
+              <span className="rounded-sm bg-accent px-3 py-1.5 font-sans text-sm text-accent-contrast">
+                Primary action
+              </span>
+              <a
+                href="#"
+                className="font-sans text-sm text-accent underline-offset-4 hover:underline"
+              >
+                Secondary link
+              </a>
+              <span className="font-sans text-sm text-secondary">
+                Synthesis
+              </span>
+            </div>
+          </div>
+        </section>
+
+        <footer className="border-t border-rule pt-6 font-sans text-xs text-ink-faint">
+          Light and dark follow your system appearance. Design tokens live in{" "}
+          <code className="rounded-sm bg-surface-sunken px-1 py-0.5 text-ink-muted">
+            app/globals.css
+          </code>
+          .
+        </footer>
       </main>
-      <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
     </div>
   );
 }
