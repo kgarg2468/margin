@@ -112,7 +112,7 @@ export default function LandingPage() {
             </p>
             <Link
               href="/signin"
-              className="shrink-0 font-sans text-sm text-accent underline-offset-4 hover:underline"
+              className="tap-target shrink-0 font-sans text-sm text-accent underline-offset-4 hover:underline"
             >
               Sign in
             </Link>
@@ -182,7 +182,13 @@ export default function LandingPage() {
                 </p>
 
                 <div className="mt-10">
-                  <Link href="/signin" className={`group ${primaryButtonClass}`}>
+                  {/* Both acquisition CTAs promise an account, so both ask for
+                      the form that makes one. Landing on "Pick up where your
+                      lab left off" contradicts the button that was pressed. */}
+                  <Link
+                    href="/signin?flow=signup"
+                    className={`group tap-target ${primaryButtonClass}`}
+                  >
                     Start a journal club
                     <span
                       aria-hidden
@@ -378,7 +384,10 @@ export default function LandingPage() {
             Bring one paper. See what your group leaves in the margins.
           </p>
           <div className="mt-10 flex flex-wrap items-center gap-x-7 gap-y-4">
-            <Link href="/signin" className={`group ${primaryButtonClass}`}>
+            <Link
+              href="/signin?flow=signup"
+              className={`group tap-target ${primaryButtonClass}`}
+            >
               Create an account
               <span
                 aria-hidden
@@ -389,7 +398,7 @@ export default function LandingPage() {
             </Link>
             <Link
               href="/signin"
-              className="font-sans text-sm text-accent underline-offset-4 hover:underline"
+              className="tap-target font-sans text-sm text-accent underline-offset-4 hover:underline"
             >
               Sign in
             </Link>
@@ -411,7 +420,7 @@ export default function LandingPage() {
             <div className="flex flex-col gap-2 font-sans text-xs text-ink-faint sm:items-end">
               <Link
                 href="/signin"
-                className="text-sm text-accent underline-offset-4 hover:underline"
+                className="tap-target text-sm text-accent underline-offset-4 hover:underline"
               >
                 Sign in
               </Link>
