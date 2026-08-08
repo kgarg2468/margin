@@ -21,11 +21,14 @@ export type {
 export {
   CONTEXT_LENGTH,
   MAX_QUOTE_LENGTH,
+  MIN_QUOTE_CHARS,
+  POSITION_TRUST_CHARS,
   createAnchor,
   resolveAnchor,
+  significantLength,
 } from "./anchor";
 
-export type { FuzzyMatch, FuzzyOptions } from "./fuzzy";
+export type { FuzzyCandidate, FuzzyMatch, FuzzyOptions } from "./fuzzy";
 export { DEFAULT_MIN_SCORE, fuzzyFind } from "./fuzzy";
 
 export type { NormalizedText } from "./normalize";
@@ -42,6 +45,7 @@ export { indexSegments, offsetInText, pointInSegments } from "./segments";
 export type { TextLayerIndex } from "./text-layer";
 export {
   indexTextLayer,
+  layerMatchesExtraction,
   offsetsForRange,
   rangeForOffsets,
 } from "./text-layer";

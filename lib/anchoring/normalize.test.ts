@@ -79,6 +79,43 @@ describe("normalizeForMatch", () => {
     expect(normalizeForMatch("a -- b").text).toBe("a -- b");
   });
 
+  it("keeps a hyphen with a digit on either side, which is not typesetting", () => {
+    // Closing these up would make 10-20 and 1020 the same passage.
+    expect(normalizeForMatch("10-20 Hz").text).toBe("10-20 hz");
+    expect(normalizeForMatch("pp. 114-118").text).toBe("pp. 114-118");
+    expect(normalizeForMatch("10-20 Hz").text).not.toBe(
+      normalizeForMatch("1020 Hz").text,
+    );
+    // Still folded when it is a word broken across a line.
+    expect(normalizeForMatch("covid-19").text).toBe("covid-19");
+    expect(normalizeForMatch("neuro- transmitter").text).toBe("neurotransmitter");
+  });
+
+  it("walks code points, so an astral character cannot be cut in half", () => {
+    const input = "the 𝑥 axis";
+    const folded = normalizeForMatch(input);
+    assertMapIsSane(input, folded);
+    expect(folded.map).toHaveLength(folded.text.length);
+    // NFKD turns the mathematical italic into a plain x rather than leaving a
+    // pair of lone surrogates behind.
+    expect(folded.text).toBe("the x axis");
+    const at = folded.text.indexOf("x");
+    const range = sourceRange(folded, at, at + 1);
+    expect(input.slice(range?.start, range?.end)).toBe("𝑥");
+  });
+
+  it("widens a range that would end inside a surrogate pair", () => {
+    // A code point with no decomposition: it survives the fold as itself, two
+    // code units wide, and a range must cover both or neither.
+    const input = "see 𐊀 here";
+    const folded = normalizeForMatch(input);
+    assertMapIsSane(input, folded);
+    expect(folded.map).toHaveLength(folded.text.length);
+    const at = folded.text.indexOf("𐊀");
+    const range = sourceRange(folded, at, at + 1);
+    expect(input.slice(range?.start, range?.end)).toBe("𐊀");
+  });
+
   it("collapses whitespace and keeps the map monotonic", () => {
     const input = "  the   dorsal\nraphe  ";
     const folded = normalizeForMatch(input);

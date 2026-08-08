@@ -78,6 +78,31 @@ export function indexTextLayer(container: HTMLElement): TextLayerIndex {
   return { index: indexSegments(segments), nodes, segmentOf };
 }
 
+/**
+ * Whether a rendered layer reconstructs the page text an anchor's offsets
+ * were written against.
+ *
+ * `indexTextLayer` reads the DOM, and the DOM is not guaranteed to hold the
+ * text items extraction saw: a browser can merge or normalise a text node, an
+ * extension can inject one, a pdf.js release can change where it splits an
+ * item. When the two disagree, a `TextPositionSelector`'s offsets address a
+ * different string — and the position fast path in `resolveAnchor` would land
+ * on whatever happens to sit at that offset and call it certain. Comparing
+ * lengths is the cheap, conservative version of the check: equal lengths do
+ * not prove the strings are equal, but unequal lengths prove they are not,
+ * and that is the direction that costs something.
+ *
+ * A mismatch is not an error and nothing is logged. The quote and context
+ * selectors do not depend on offsets meaning anything, so the reader simply
+ * resolves without the fast path and the reader's user never finds out.
+ */
+export function layerMatchesExtraction(
+  layer: TextLayerIndex,
+  extractedLength: number,
+): boolean {
+  return layer.index.text.length === extractedLength;
+}
+
 type Point = { segment: number; charOffset: number };
 
 /**

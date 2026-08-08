@@ -69,15 +69,29 @@ describe("createAnchor", () => {
   });
 
   it("shortens context at the edges of the page instead of padding it", () => {
-    const anchor = createAnchor(PAGE, 0, 2, 0);
+    const anchor = createAnchor(PAGE, 0, 11, 0);
+    expect(anchor?.quote).toBe("We recorded");
     expect(anchor?.prefix).toBe("");
-    expect(createAnchor(PAGE, PAGE.length - 2, PAGE.length, 0)?.suffix).toBe("");
+    expect(
+      createAnchor(PAGE, PAGE.length - 10, PAGE.length, 0)?.suffix,
+    ).toBe("");
   });
 
   it("returns null for a selection with no text in it", () => {
     expect(createAnchor(PAGE, 10, 10, 0)).toBeNull();
     expect(createAnchor("alpha   beta", 5, 8, 0)).toBeNull();
     expect(createAnchor("", 0, 0, 0)).toBeNull();
+  });
+
+  it("refuses a selection too short to identify a passage", () => {
+    // Three characters is a mis-drag, and "the" is on the page eighty times.
+    expect(createAnchor("the dorsal raphe nucleus", 0, 3, 0)).toBeNull();
+    expect(createAnchor("the dorsal raphe nucleus", 4, 10, 0)?.quote).toBe(
+      "dorsal",
+    );
+    // Whitespace does not count toward the minimum.
+    expect(createAnchor("a b c d e", 0, 5, 0)).toBeNull();
+    expect(createAnchor("a b c d e", 0, 7, 0)?.quote).toBe("a b c d");
   });
 });
 
@@ -194,6 +208,95 @@ describe("resolveAnchor", () => {
     const resolved = resolveAnchor({ ...anchor, start: 0, end: 8 }, PAGE);
     expect(resolved?.method).not.toBe("position");
     expect(PAGE.slice(resolved?.start, resolved?.end)).toBe("foraging");
+  });
+
+  it("refuses to take a short quote's word for it at a stale offset", () => {
+    // The offsets say 0, and character 0 really is "beta" — but it is a
+    // different "beta", and nothing around it agrees with what was recorded.
+    // Believing the offset here would silently move the note to another
+    // sentence and report confidence 1 about it.
+    const written = "beta, gamma delta.";
+    const anchor = createAnchor(written, 0, 4, 0) as TextAnchor;
+    expect(anchor.quote).toBe("beta");
+    expect(anchor.prefix).toBe("");
+
+    const revised = "beta. Another sentence entirely, and then: beta, gamma delta.";
+    const resolved = resolveAnchor(anchor, revised);
+    expect(resolved?.method).not.toBe("position");
+    expect(resolved?.start).toBe(revised.lastIndexOf("beta"));
+    expect(revised.slice(resolved?.start, resolved?.end)).toBe("beta");
+  });
+
+  it("takes a short quote's recorded offset when the context corroborates it", () => {
+    const anchor = anchorOn(PAGE, "raphe");
+    expect(anchor.quote).toHaveLength(5);
+    expect(resolveAnchor(anchor, PAGE)).toMatchObject({
+      start: anchor.start,
+      method: "position",
+      confidence: 1,
+    });
+  });
+
+  it("takes a long quote's recorded offset without needing the context to agree", () => {
+    const written = "the dorsal raphe nucleus, which projects widely.";
+    const anchor = createAnchor(written, 0, 24, 0) as TextAnchor;
+    expect(anchor.quote).toBe("the dorsal raphe nucleus");
+    // Same offset, nothing around it in common: too specific to be a coincidence.
+    const revised = "the dorsal raphe nucleus; an entirely rewritten sentence.";
+    expect(resolveAnchor(anchor, revised)).toMatchObject({
+      start: 0,
+      method: "position",
+      confidence: 1,
+    });
+  });
+
+  it("skips the position selector when the caller says the offsets do not apply", () => {
+    const anchor = anchorOn(PAGE, "Serotonin release tracked patch value");
+    expect(resolveAnchor(anchor, PAGE)?.method).toBe("position");
+    expect(
+      resolveAnchor(anchor, PAGE, { trustPosition: false })?.method,
+    ).toBe("quote");
+  });
+
+  it("uses context to pick between two near-identical passages found fuzzily", () => {
+    // A caption that runs under every figure, and a publisher who re-set the
+    // dashes: no exact match anywhere, two folded matches at distance zero.
+    const caption = "Figure — mean firing rate across the session";
+    const preprint =
+      `Left panel. ${caption} for the control cohort. ` +
+      `Right panel. ${caption} for the lesioned cohort.`;
+    const anchor = anchorOn(preprint, caption, 1);
+    const published = preprint.replaceAll("—", "–");
+
+    const resolved = resolveAnchor(anchor, published);
+    expect(resolved?.method).toBe("fuzzy");
+    expect(resolved?.ambiguous).toBe(false);
+    // The second copy, the one it was written on — not the first.
+    expect(resolved?.start).toBeGreaterThan(published.indexOf("Right panel."));
+  });
+
+  it("admits ambiguity when a fuzzy match ties and the context cannot separate it", () => {
+    const unit = "Panel. Figure — mean firing rate across the session for the cohort. ";
+    const preprint = unit.repeat(4);
+    const anchor = anchorOn(preprint, "Figure — mean firing rate across the session", 1);
+    const published = preprint.replaceAll("—", "–");
+
+    const resolved = resolveAnchor(anchor, published);
+    expect(resolved?.method).toBe("fuzzy");
+    expect(resolved?.ambiguous).toBe(true);
+    expect(resolved?.confidence).toBeLessThanOrEqual(0.6);
+  });
+
+  it("admits ambiguity rather than picking among more copies than it looked at", () => {
+    // More occurrences than MAX_EXACT_CANDIDATES, none of them distinguishable:
+    // the honest answer is that the search, not the page, chose.
+    const unit = "The same sentence, over and over. ";
+    const page = unit.repeat(100);
+    const anchor = anchorOn(page, "The same sentence, over and over.", 50);
+    const shifted = `${"-".repeat(7)}${page}`;
+    const resolved = resolveAnchor(anchor, shifted);
+    expect(resolved?.method).toBe("context");
+    expect(resolved?.ambiguous).toBe(true);
   });
 
   it("handles a quote at the very start and the very end of a page", () => {

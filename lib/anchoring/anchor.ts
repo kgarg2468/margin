@@ -38,6 +38,36 @@ export const MAX_QUOTE_LENGTH = 300;
 /** Characters of context either side. Enough to separate repeated sentences. */
 export const CONTEXT_LENGTH = 32;
 
+/**
+ * Fewer characters than this and there is nothing to re-anchor with.
+ *
+ * "the" occurs eighty times on a page; an anchor holding it says almost
+ * nothing about which "the" was meant, and every layer below — exact search,
+ * context disambiguation, fuzzy alignment — degenerates into a coin toss. A
+ * selection this small is a mis-drag, so `createAnchor` refuses it and the
+ * server refuses it again.
+ */
+export const MIN_QUOTE_CHARS = 4;
+
+/**
+ * Above this length a quote is specific enough that finding it at its recorded
+ * offset is evidence in itself.
+ *
+ * Below it, the offsets need a second opinion: see `resolveAnchor`, step 1.
+ */
+export const POSITION_TRUST_CHARS = 12;
+
+/** Characters that are not whitespace — the only ones that carry identity. */
+export function significantLength(text: string): number {
+  let count = 0;
+  for (const char of text) {
+    if (!WHITESPACE.test(char)) {
+      count++;
+    }
+  }
+  return count;
+}
+
 /** The selector pair, exactly as `convex/schema.ts` stores it. */
 export type TextAnchor = {
   quote: string;
@@ -72,6 +102,16 @@ export type ResolvedAnchor = {
 export type ResolveOptions = {
   /** Similarity below which a fuzzy match is refused and the anchor orphaned. */
   minScore?: number;
+  /**
+   * Whether the recorded offsets address the same string this `pageText` is.
+   *
+   * Defaults to true. A caller that knows the text it holds was reconstructed
+   * differently from the one the anchor was written against — the reader
+   * comparing a rendered pdf.js text layer against the extracted page, say —
+   * passes `false`, and the position fast path is skipped in favour of the
+   * selectors that do not depend on offsets meaning anything.
+   */
+  trustPosition?: boolean;
 };
 
 /** A page's worth of occurrences is plenty; a quote that common is ambiguous anyway. */
@@ -82,9 +122,10 @@ const WHITESPACE = /\s/;
 /**
  * Build an anchor for the half-open selection `[start, end)` of `pageText`.
  *
- * Returns `null` for a selection with no text in it — a stray click, or a drag
- * that only crossed whitespace. Callers treat that as "nothing to annotate"
- * rather than as an error.
+ * Returns `null` for a selection with nothing to anchor to — a stray click, a
+ * drag that only crossed whitespace, or a handful of characters too short to
+ * identify a passage (`MIN_QUOTE_CHARS`). Callers treat that as "nothing to
+ * annotate" rather than as an error.
  */
 export function createAnchor(
   pageText: string,
@@ -109,6 +150,9 @@ export function createAnchor(
   }
   if (to - from > MAX_QUOTE_LENGTH) {
     to = from + MAX_QUOTE_LENGTH;
+  }
+  if (significantLength(pageText.slice(from, to)) < MIN_QUOTE_CHARS) {
+    return null;
   }
 
   return {
@@ -143,30 +187,49 @@ function sharedHead(a: string, b: string): number {
   return shared;
 }
 
-function exactOccurrences(pageText: string, quote: string): number[] {
+function exactOccurrences(
+  pageText: string,
+  quote: string,
+): { hits: number[]; truncated: boolean } {
   const hits: number[] = [];
   let at = pageText.indexOf(quote);
   while (at !== -1 && hits.length < MAX_EXACT_CANDIDATES) {
     hits.push(at);
     at = pageText.indexOf(quote, at + 1);
   }
-  return hits;
+  // There is at least one more copy than we looked at, so "the best of these"
+  // is not the same claim as "the best on the page".
+  return { hits, truncated: at !== -1 };
 }
 
 /**
- * How well the text around `at` matches the context the anchor recorded.
+ * How well the text around `[start, end)` matches a recorded context.
  * Counted in characters, so a longer agreement wins over a shorter one.
  */
+function contextScoreAt(
+  prefix: string,
+  suffix: string,
+  text: string,
+  start: number,
+  end: number,
+): number {
+  const before = text.slice(Math.max(0, start - prefix.length), start);
+  const after = text.slice(end, end + suffix.length);
+  return sharedTail(prefix, before) + sharedHead(suffix, after);
+}
+
+/** `contextScoreAt` for an occurrence of the anchor's own quote. */
 function contextScore(
   anchor: TextAnchor,
   pageText: string,
   at: number,
 ): number {
-  const before = pageText.slice(Math.max(0, at - anchor.prefix.length), at);
-  const afterFrom = at + anchor.quote.length;
-  const after = pageText.slice(afterFrom, afterFrom + anchor.suffix.length);
-  return (
-    sharedTail(anchor.prefix, before) + sharedHead(anchor.suffix, after)
+  return contextScoreAt(
+    anchor.prefix,
+    anchor.suffix,
+    pageText,
+    at,
+    at + anchor.quote.length,
   );
 }
 
@@ -189,7 +252,23 @@ export function resolveAnchor(
 
   // 1. The recorded offsets, verified against the recorded quote. The overwhelmingly
   //    common case — same file, same extraction — and it costs one comparison.
-  if (anchor.start >= 0 && pageText.startsWith(quote, anchor.start)) {
+  //
+  //    Finding the quote at its offset is not on its own proof that this is the
+  //    passage: a short quote occurs all over a page, and an offset that has
+  //    gone stale — a reflowed column, a re-extraction — can land on a copy of
+  //    the words in a different sentence and be believed at confidence 1. So
+  //    the offset has to be corroborated by something, either the context
+  //    either side agreeing at all, or the quote being long enough that its
+  //    presence at that exact offset is not a coincidence. Uncorroborated, the
+  //    fast path is skipped and the slower selectors decide, which they are
+  //    perfectly able to do.
+  if (
+    options.trustPosition !== false &&
+    anchor.start >= 0 &&
+    pageText.startsWith(quote, anchor.start) &&
+    (contextScore(anchor, pageText, anchor.start) > 0 ||
+      significantLength(quote) >= POSITION_TRUST_CHARS)
+  ) {
     return {
       start: anchor.start,
       end: anchor.start + quote.length,
@@ -200,7 +279,7 @@ export function resolveAnchor(
   }
 
   // 2. The text moved but is otherwise intact.
-  const hits = exactOccurrences(pageText, quote);
+  const { hits, truncated } = exactOccurrences(pageText, quote);
   if (hits.length === 1) {
     const at = hits[0] as number;
     return {
@@ -233,12 +312,17 @@ export function resolveAnchor(
         }
       }
     }
+    // A truncated candidate list is only safe to pick from when one copy
+    // actually won on context: "the best of the first 64" is otherwise a
+    // statement about the search, not about the page.
+    const decided = !tied && bestScore > 0;
+    const ambiguous = tied || (truncated && !decided);
     return {
       start: best,
       end: best + quote.length,
       method: "context",
-      confidence: tied ? 0.6 : bestScore > 0 ? 0.95 : 0.75,
-      ambiguous: tied,
+      confidence: ambiguous ? 0.6 : 0.95,
+      ambiguous,
     };
   }
 
@@ -258,10 +342,54 @@ export function resolveAnchor(
   if (match === null) {
     return null;
   }
-  const range = sourceRange(haystack, match.start, match.end);
+
+  // The alignment cost alone cannot separate two copies of the same sentence —
+  // a repeated definition, a caption running across every figure — and it is
+  // the reason the anchor carries prefix and suffix at all. Fold them the same
+  // way the page was folded and let them break the tie, exactly as step 3 does
+  // for exact matches.
+  //
+  // Folded as one string and then cut, rather than folded separately: the
+  // folding trims, so `normalizeForMatch(prefix)` loses the space between the
+  // context and the quote — the very character the comparison starts at.
+  const context = normalizeForMatch(
+    anchor.prefix + anchor.quote + anchor.suffix,
+  );
+  const prefix = context.text.slice(
+    0,
+    foldedOffset(context, anchor.prefix.length),
+  );
+  const suffix = context.text.slice(
+    foldedOffset(context, anchor.prefix.length + anchor.quote.length),
+  );
+  const scoreOf = (candidate: { start: number; end: number }) =>
+    contextScoreAt(prefix, suffix, haystack.text, candidate.start, candidate.end);
+
+  let chosen = match as { start: number; end: number; distance: number };
+  let chosenContext = scoreOf(match);
+  let separated = true;
+  for (const alternative of match.alternatives) {
+    const context = scoreOf(alternative);
+    if (context > chosenContext) {
+      chosen = alternative;
+      chosenContext = context;
+      separated = true;
+    } else if (context === chosenContext) {
+      separated = false;
+    }
+  }
+
+  // Near-tied on distance *and* unseparated by context is the honest
+  // definition of "could be either one".
+  const runnerUp = match.runnerUpDistance;
+  const ambiguous =
+    runnerUp !== null && runnerUp - match.distance <= 1 && !separated;
+
+  const range = sourceRange(haystack, chosen.start, chosen.end);
   if (range === null) {
     return null;
   }
+  const score = 1 - chosen.distance / needle.text.length;
 
   return {
     start: range.start,
@@ -269,7 +397,7 @@ export function resolveAnchor(
     method: "fuzzy",
     // Never 1: a fold matched, the characters did not. The reader uses the gap
     // to mark a note as having drifted.
-    confidence: Math.min(0.95, match.score),
-    ambiguous: false,
+    confidence: Math.min(ambiguous ? 0.6 : 0.95, Math.max(0, score)),
+    ambiguous,
   };
 }

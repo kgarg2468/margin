@@ -32,6 +32,16 @@ export type NormalizedText = {
   text: string;
   /** `map[i]` is the index in the input that `text[i]` was folded from. */
   map: number[];
+  /**
+   * `mapEnd[i]` is one past the last index in the input that `text[i]` was
+   * folded from — the whole source character, not its first code unit.
+   *
+   * It exists because a source character is not always one code unit wide. A
+   * range that ends inside an astral character (a mathematical italic, a rare
+   * CJK glyph) has to widen to cover it rather than slicing the surrogate pair
+   * in half, and `map` alone cannot say where it ends.
+   */
+  mapEnd: number[];
 };
 
 /**
@@ -69,8 +79,15 @@ const COMBINING = /\p{M}/gu;
 
 const WHITESPACE = /^\s+$/;
 
-/** Lowercased already by the time this is asked, so no need for A-Z. */
-const ALNUM = /^[a-z0-9]$/;
+/**
+ * Lowercased already by the time this is asked, so no need for A-Z.
+ *
+ * Letters only, deliberately. A hyphen between digits is arithmetic or a range
+ * — "10-20", "pp. 114-118", "1990-1994" — and closing it up would fold those
+ * into "1020", "114118", which collides with numbers that are genuinely
+ * different. Line-break hyphenation only ever happens inside a word.
+ */
+const LETTER = /^[a-z]$/;
 
 /**
  * One input character to its folded form — usually one character, sometimes
@@ -109,13 +126,18 @@ function foldChar(char: string): string {
  * lose the hyphen and close up. The cost is that this text no longer reads as
  * English, which is fine: nothing ever displays it, and it is only ever
  * compared against text folded the same way.
+ *
+ * A hyphen with a digit on either side is left alone, because there the hyphen
+ * is carrying meaning rather than typesetting: "10-20" and "1020" are two
+ * different numbers, and no line break ever put that hyphen there.
  */
-function dehyphenate({ text, map }: NormalizedText): NormalizedText {
+function dehyphenate({ text, map, mapEnd }: NormalizedText): NormalizedText {
   if (!text.includes("-")) {
-    return { text, map };
+    return { text, map, mapEnd };
   }
   const chars: string[] = [];
   const folded: number[] = [];
+  const foldedEnd: number[] = [];
   for (let i = 0; i < text.length; i++) {
     const char = text[i] as string;
     if (char === "-") {
@@ -132,13 +154,14 @@ function dehyphenate({ text, map }: NormalizedText): NormalizedText {
       const next = text[resumeAt];
       if (
         previous !== undefined &&
-        ALNUM.test(previous) &&
+        LETTER.test(previous) &&
         next !== undefined &&
-        ALNUM.test(next)
+        LETTER.test(next)
       ) {
         while (chars.length - 1 > back) {
           chars.pop();
           folded.pop();
+          foldedEnd.pop();
         }
         i = resumeAt - 1;
         continue;
@@ -146,8 +169,9 @@ function dehyphenate({ text, map }: NormalizedText): NormalizedText {
     }
     chars.push(char);
     folded.push(map[i] as number);
+    foldedEnd.push(mapEnd[i] as number);
   }
-  return { text: chars.join(""), map: folded };
+  return { text: chars.join(""), map: folded, mapEnd: foldedEnd };
 }
 
 /**
@@ -156,15 +180,27 @@ function dehyphenate({ text, map }: NormalizedText): NormalizedText {
  *
  * Whitespace is collapsed the same way extraction collapses it, so folding an
  * already-extracted page is idempotent on that axis.
+ *
+ * The walk is by code point rather than by code unit. A page that quotes a
+ * mathematical italic or an emoji is rare but not impossible, and stepping
+ * through it two bytes at a time would hand `foldChar` half a surrogate pair —
+ * which normalizes to nothing recognisable and, worse, would let `sourceRange`
+ * return an offset that splits the pair and slices a lone surrogate out of the
+ * page text.
  */
 export function normalizeForMatch(input: string): NormalizedText {
   const chars: string[] = [];
   const map: number[] = [];
+  const mapEnd: number[] = [];
   let pendingSpace = false;
   let lastSource = -1;
 
-  for (let i = 0; i < input.length; i++) {
-    const char = input[i] as string;
+  let i = 0;
+  for (const char of input) {
+    // `i` walks code units, because that is the coordinate system every offset
+    // in an anchor is written in; `char` is a whole code point.
+    const at = i;
+    i += char.length;
     if (INVISIBLE.test(char)) {
       continue;
     }
@@ -188,24 +224,29 @@ export function normalizeForMatch(input: string): NormalizedText {
       // increasing and makes `foldedOffset` a plain binary search.
       chars.push(" ");
       map.push(lastSource + 1);
+      mapEnd.push(lastSource + 2);
     }
     pendingSpace = false;
-    for (const foldedChar of folded) {
-      chars.push(foldedChar);
-      map.push(i);
+    // One entry per code unit of the fold, because `map` is indexed by code
+    // unit of `text`; every one of them points at the whole source character.
+    for (let unit = 0; unit < folded.length; unit++) {
+      chars.push(folded[unit] as string);
+      map.push(at);
+      mapEnd.push(at + char.length);
     }
-    lastSource = i;
+    lastSource = at + char.length - 1;
   }
 
-  return dehyphenate({ text: chars.join(""), map });
+  return dehyphenate({ text: chars.join(""), map, mapEnd });
 }
 
 /**
  * Translate a half-open range in folded coordinates back to the input's.
  *
- * The end is `map[end - 1] + 1` rather than `map[end]`: the last folded
+ * The end comes from `mapEnd[end - 1]` rather than `map[end]`: the last folded
  * character may be one of several that came from a single input character
- * (a ligature), and the range has to cover all of it.
+ * (a ligature, or one half of a surrogate pair), and the range has to cover
+ * all of it.
  */
 export function sourceRange(
   normalized: NormalizedText,
@@ -217,7 +258,7 @@ export function sourceRange(
   }
   return {
     start: normalized.map[start] as number,
-    end: (normalized.map[end - 1] as number) + 1,
+    end: normalized.mapEnd[end - 1] as number,
   };
 }
 

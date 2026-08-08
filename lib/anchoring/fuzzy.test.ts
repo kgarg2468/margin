@@ -54,6 +54,54 @@ describe("fuzzyFind", () => {
     expect(match?.start).toBe(15);
   });
 
+  it("reports no runner-up when the needle only fits in one place", () => {
+    const match = fuzzyFind("the dorsal raphe nucleus", "dorsal raphe");
+    expect(match?.runnerUpDistance).toBeNull();
+    expect(match?.alternatives).toEqual([]);
+  });
+
+  it("reports the runner-up when a second passage is just as good", () => {
+    const haystack = "beta gamma ... beta gamma";
+    const match = fuzzyFind(haystack, "beta gamma");
+    expect(match?.distance).toBe(0);
+    expect(match?.runnerUpDistance).toBe(0);
+    expect(match?.alternatives).toHaveLength(1);
+    expect(haystack.slice(match?.alternatives[0]?.start, match?.alternatives[0]?.end)).toBe(
+      "beta gamma",
+    );
+  });
+
+  it("does not count a one-character shift of itself as a rival", () => {
+    // Every column beside the winner is the same match moved over; only an
+    // alignment that shares no character with it is a second candidate.
+    const match = fuzzyFind("alpha beta gamma delta", "beta gamma");
+    expect(match?.runnerUpDistance).toBeNull();
+  });
+
+  it("keeps the runner-up's distance even when it is worse than the winner's", () => {
+    const haystack = "beta gamma ... beta gomma";
+    const match = fuzzyFind(haystack, "beta gamma");
+    expect(match?.start).toBe(0);
+    expect(match?.distance).toBe(0);
+    expect(match?.runnerUpDistance).toBe(1);
+  });
+
+  it("breaks cross-window ties toward the caller's expected position", () => {
+    const filler = "lorem ipsum dolor sit amet consectetur adipiscing elit. ";
+    const needle =
+      "serotonin release tracked patch value, not reward rate, in the raphe";
+    const haystack = `${filler.repeat(200)}${needle}${filler.repeat(200)}${needle}${filler.repeat(200)}`;
+    const second = haystack.lastIndexOf(needle);
+    // The seeded path finds both copies; without a preference it would return
+    // whichever window it happened to build first.
+    const match = fuzzyFind(haystack, needle, {
+      maxCells: 1000,
+      preferNear: second + needle.length,
+    });
+    expect(match?.start).toBe(second);
+    expect(match?.runnerUpDistance).toBe(0);
+  });
+
   it("returns null for degenerate inputs", () => {
     expect(fuzzyFind("", "abc")).toBeNull();
     expect(fuzzyFind("abc", "")).toBeNull();
