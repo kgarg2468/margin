@@ -9,8 +9,13 @@ import { use } from "react";
 import { StatusChip, byline } from "../_components/paper-meta";
 import { PdfPanel } from "../_components/pdf-panel";
 
+/**
+ * The locale is pinned rather than left to the browser. `undefined` means "ask
+ * the runtime", and the runtimes disagree: the server renders one string, the
+ * client another, and React calls that a hydration mismatch.
+ */
 function formatDate(ms: number): string {
-  return new Date(ms).toLocaleDateString(undefined, {
+  return new Date(ms).toLocaleDateString("en-US", {
     month: "short",
     day: "numeric",
     year: "numeric",
@@ -104,6 +109,8 @@ export default function PaperPage({
         hasPdf={paper.hasPdf}
         hasText={paper.hasText}
         pageCount={paper.pageCount}
+        ingestStatus={paper.ingestStatus}
+        ingestError={paper.ingestError}
       />
 
       <ReaderPlaceholder ready={paper.hasPdf && paper.hasText} />

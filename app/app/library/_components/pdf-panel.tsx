@@ -7,6 +7,7 @@ import { extractPdf, extractPdfFile } from "@/lib/pdf/extract";
 import { errorClass, eyebrowClass } from "@/lib/ui";
 import { useMutation, useQuery } from "convex/react";
 import { useState } from "react";
+import type { IngestStatus } from "./paper-meta";
 import { PdfDropzone } from "./pdf-dropzone";
 import { uploadPdf } from "./pdf-ingest";
 
@@ -26,12 +27,16 @@ export function PdfPanel({
   hasPdf,
   hasText,
   pageCount,
+  ingestStatus,
+  ingestError,
 }: {
   paperId: Id<"papers">;
   labId: Id<"labs">;
   hasPdf: boolean;
   hasText: boolean;
   pageCount?: number;
+  ingestStatus: IngestStatus;
+  ingestError?: string;
 }) {
   const pdfUrl = useQuery(
     api.papers.getPdfUrl,
@@ -40,12 +45,41 @@ export function PdfPanel({
   const generateUploadUrl = useMutation(api.papers.generateUploadUrl);
   const attachPdf = useMutation(api.papers.attachPdf);
   const saveExtractedText = useMutation(api.papers.saveExtractedText);
+  const markIngestFailed = useMutation(api.papers.markIngestFailed);
+  const discardUpload = useMutation(api.papers.discardUpload);
 
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  /**
+   * Tidying up after an ingest that stopped halfway: drop the blob nothing
+   * will ever point at, and record that this paper's text layer isn't coming
+   * — otherwise it sits at "text pending" forever, indistinguishable from one
+   * nobody has opened yet.
+   *
+   * Both are best effort. The member has already been told what went wrong,
+   * and a failure to clean up is not a second thing to tell them about.
+   */
+  async function recover(orphan: Id<"_storage"> | null, message: string) {
+    if (orphan !== null) {
+      try {
+        await discardUpload({ labId, storageId: orphan });
+      } catch {
+        // The blob outlives us. Nothing the member can do about it.
+      }
+    }
+    try {
+      await markIngestFailed({ paperId, message });
+    } catch {
+      // Same.
+    }
+  }
+
   async function attach(file: File) {
     setError(null);
+    // Held outside the `try` so the catch knows whether a file made it into
+    // storage before things went wrong.
+    let uploaded: Id<"_storage"> | null = null;
     try {
       setStatus("Reading the PDF…");
       const extraction = await extractPdfFile(file, {
@@ -54,17 +88,19 @@ export function PdfPanel({
       });
       setStatus("Storing it for the lab…");
       const uploadUrl = await generateUploadUrl({ labId });
-      const storageId = await uploadPdf(uploadUrl, file);
-      await attachPdf({ paperId, storageId, pages: extraction.pages });
+      uploaded = await uploadPdf(uploadUrl, file);
+      await attachPdf({ paperId, storageId: uploaded, pages: extraction.pages });
+      // The paper owns the file now; it is not an orphan any more.
+      uploaded = null;
       setStatus(null);
     } catch (caught) {
       setStatus(null);
-      setError(
-        readableError(
-          caught,
-          "Margin couldn't read that PDF. If it opens elsewhere, it may be encrypted.",
-        ),
+      const message = readableError(
+        caught,
+        "Margin couldn't read that PDF. If it opens elsewhere, it may be encrypted.",
       );
+      setError(message);
+      await recover(uploaded, message);
     }
   }
 
@@ -81,6 +117,11 @@ export function PdfPanel({
     try {
       setStatus("Fetching the PDF…");
       const response = await fetch(pdfUrl);
+      if (!response.ok) {
+        // Without this, a 404 body goes to pdf.js and comes back as
+        // "couldn't read that PDF" — which blames the file for the fetch.
+        throw new Error(`The stored file came back ${response.status}.`);
+      }
       const data = await response.arrayBuffer();
       const extraction = await extractPdf(data, {
         onProgress: (pagesDone, pages) =>
@@ -90,9 +131,20 @@ export function PdfPanel({
       setStatus(null);
     } catch (caught) {
       setStatus(null);
-      setError(readableError(caught, "That PDF wouldn't open."));
+      const message = readableError(caught, "That PDF wouldn't open.");
+      setError(message);
+      await recover(null, message);
     }
   }
+
+  /**
+   * Extraction is worth offering when it has never run, or when it ran and
+   * broke. It is not worth offering for a scan: that file has been read, it
+   * had no text in it, and reading it again would call a mutation that has
+   * already correctly decided to do nothing.
+   */
+  const canReadText =
+    !hasText && (pageCount === undefined || ingestStatus === "failed");
 
   return (
     <section className="flex flex-col gap-4">
@@ -119,23 +171,32 @@ export function PdfPanel({
                 Open the PDF
               </a>
             )}
-            {!hasText && (
+            {canReadText && (
               <button
                 type="button"
                 disabled={status !== null}
                 onClick={readStoredPdf}
                 className="font-sans text-sm text-accent underline-offset-4 hover:underline disabled:opacity-50"
               >
-                Read its text layer
+                {ingestStatus === "failed"
+                  ? "Try reading it again"
+                  : "Read its text layer"}
               </button>
             )}
           </div>
 
           {!hasText && (
-            <p className="max-w-prose font-serif text-base leading-relaxed text-ink-muted">
-              Annotations anchor to passages of extracted text, so the reader
-              needs this done once before anyone can write in the margins.
-            </p>
+            <div className="flex max-w-prose flex-col gap-2">
+              {ingestError !== undefined && (
+                <p className="font-serif text-base leading-relaxed text-ink">
+                  {ingestError}
+                </p>
+              )}
+              <p className="font-serif text-base leading-relaxed text-ink-muted">
+                Annotations anchor to passages of extracted text, so the reader
+                needs this done once before anyone can write in the margins.
+              </p>
+            </div>
           )}
 
           <details className="group">

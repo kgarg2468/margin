@@ -12,7 +12,12 @@ export async function uploadPdf(
 ): Promise<Id<"_storage">> {
   const response = await fetch(uploadUrl, {
     method: "POST",
-    headers: { "Content-Type": file.type || "application/pdf" },
+    // Declared, not forwarded. `file.type` is whatever the OS guessed from
+    // the extension and is routinely blank or `application/octet-stream` for
+    // a perfectly good PDF — and the stored content type is what the mutation
+    // checks before it will let a paper point at this blob. By here pdf.js has
+    // already parsed the file, which is better evidence than the guess.
+    headers: { "Content-Type": "application/pdf" },
     body: file,
   });
   if (!response.ok) {

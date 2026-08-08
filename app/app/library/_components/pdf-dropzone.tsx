@@ -69,11 +69,18 @@ export function PdfDropzone({
         <span className="font-sans text-xs text-ink-faint">{hint}</span>
       </button>
 
+      {/*
+        The real control is the button above; this exists only so that
+        clicking it can open a file picker. Left focusable it would be a
+        second, invisible tab stop with the same job and no label — so it is
+        taken out of the tab order and the button keeps it.
+      */}
       <input
         ref={inputRef}
         id={id}
         type="file"
         accept="application/pdf,.pdf"
+        tabIndex={-1}
         className="sr-only"
         onChange={(event) => {
           accept(event.target.files?.[0]);

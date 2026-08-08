@@ -78,6 +78,7 @@ function TabButton({
       role="tab"
       id={`add-paper-tab-${id}`}
       aria-selected={active}
+      aria-controls={`add-paper-panel-${id}`}
       onClick={onSelect}
       className={
         "-mb-px border-b-2 pb-2 font-sans text-sm transition-colors " +
@@ -110,7 +111,11 @@ function DoiTab({ labId }: { labId: Id<"labs"> }) {
   return (
     <div
       role="tabpanel"
+      id="add-paper-panel-doi"
       aria-labelledby="add-paper-tab-doi"
+      // A panel is a scrollable region a keyboard user has to be able to
+      // reach, so it takes focus itself rather than only its controls.
+      tabIndex={0}
       className="flex flex-col gap-4"
     >
       <p className="max-w-prose font-serif text-base leading-relaxed text-ink-muted">
@@ -175,9 +180,13 @@ function DoiTab({ labId }: { labId: Id<"labs"> }) {
 }
 
 /**
- * Three endings, and the middle one is the interesting case: we have the
- * record but not the file. Saying so plainly — and saying what to do about it
- * — is the difference between a paper that gets read and a dead row.
+ * Four endings, and every one of them is about what is still missing.
+ *
+ * "Added" alone would be a small lie in three of the four cases: a fetched PDF
+ * has never been near a browser that could read its text layer, and a paper
+ * that was already here may still be waiting for its file. Saying which — and
+ * pointing at the place it gets fixed — is the difference between a paper that
+ * gets read and a dead row.
  */
 function DoiOutcome({ result }: { result: DoiResult }) {
   const href = `/app/library/${result.paperId}`;
@@ -186,16 +195,18 @@ function DoiOutcome({ result }: { result: DoiResult }) {
     <div className="flex flex-col gap-2 border-l-2 border-accent pl-4">
       <p className="font-serif text-base leading-relaxed text-ink">
         {result.alreadyInLibrary
-          ? "Already in the library — nothing to add."
+          ? result.hasPdf
+            ? "Already in the library — nothing to add."
+            : "Already in the library — it still needs a PDF, open it to attach one."
           : result.hasPdf
-            ? "Added, with an open-access PDF."
+            ? "Added — open the paper to read its text layer."
             : "Added, metadata only. No open-access copy was available, so the reader needs the PDF attaching before anyone can annotate it."}
       </p>
       <Link
         href={href}
         className="font-sans text-sm text-accent underline-offset-4 hover:underline"
       >
-        {result.alreadyInLibrary || result.hasPdf
+        {result.hasPdf
           ? `Open ${result.title}`
           : `Attach the PDF to ${result.title}`}
       </Link>
@@ -214,6 +225,7 @@ type UploadPhase =
 function UploadTab({ labId }: { labId: Id<"labs"> }) {
   const generateUploadUrl = useMutation(api.papers.generateUploadUrl);
   const createFromUpload = useMutation(api.papers.createFromUpload);
+  const discardUpload = useMutation(api.papers.discardUpload);
   const router = useRouter();
 
   const [phase, setPhase] = useState<UploadPhase>({ kind: "empty" });
@@ -239,7 +251,9 @@ function UploadTab({ labId }: { labId: Id<"labs"> }) {
   return (
     <div
       role="tabpanel"
+      id="add-paper-panel-upload"
       aria-labelledby="add-paper-tab-upload"
+      tabIndex={0}
       className="flex flex-col gap-4"
     >
       {phase.kind === "empty" && (
@@ -272,12 +286,16 @@ function UploadTab({ labId }: { labId: Id<"labs"> }) {
           onSubmit={async (title, authors) => {
             setError(null);
             setPhase({ kind: "saving" });
+            // The upload and the paper are two round trips. If the second one
+            // fails, the file is already sitting in storage with nothing
+            // pointing at it — and nothing will ever find it again.
+            let uploaded: Id<"_storage"> | null = null;
             try {
               const uploadUrl = await generateUploadUrl({ labId });
-              const storageId = await uploadPdf(uploadUrl, phase.file);
+              uploaded = await uploadPdf(uploadUrl, phase.file);
               const paperId = await createFromUpload({
                 labId,
-                storageId,
+                storageId: uploaded,
                 title,
                 authors: authors.length > 0 ? authors : undefined,
                 pages: phase.extraction.pages,
@@ -288,6 +306,14 @@ function UploadTab({ labId }: { labId: Id<"labs"> }) {
               setError(
                 readableError(caught, "We couldn't add that paper. Try again."),
               );
+              if (uploaded !== null) {
+                try {
+                  await discardUpload({ labId, storageId: uploaded });
+                } catch {
+                  // Best effort. The member has already been told what went
+                  // wrong; a failed clean-up is not a second thing to say.
+                }
+              }
             }
           }}
         />
