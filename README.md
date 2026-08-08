@@ -91,13 +91,23 @@ Typography is serif-led: `font-serif` for anything you read or write,
 ## Layout
 
 ```
-app/           # App Router routes, layout, global styles + design tokens
-  signin/      # email + password sign-in / sign-up
-  app/         # the authenticated shell (sidebar, lab overview, onboarding)
-convex/        # Convex schema, auth config, and backend functions
-  lib/         # authz + ledger helpers, not Convex functions themselves
-  _generated/  # generated types, committed
-docs/          # architecture notes
-lib/           # shared front-end helpers
-middleware.ts  # redirects /app <-> /signin based on session
+app/             # root layout (fonts, tokens, metadata), global styles, brand assets
+  (marketing)/   # the landing page — no providers, so it prerenders as a static file
+  (app)/         # mounts the Convex + auth providers, which makes everything below dynamic
+    signin/      # email + password sign-in / sign-up
+    app/         # the authenticated shell (sidebar, lab overview, onboarding)
+convex/          # Convex schema, auth config, and backend functions
+  lib/           # authz + ledger helpers, not Convex functions themselves
+  _generated/    # generated types, committed
+docs/            # architecture notes
+lib/             # shared front-end helpers
+middleware.ts    # redirects /app <-> /signin based on session
 ```
+
+The two route groups exist to split rendering modes. `ConvexAuthNextjsServerProvider`
+reads the auth cookie on the server, which opts every route beneath it into dynamic
+rendering — correct for `/signin` and `/app`, wrong for a landing page with no
+authenticated content. So the providers moved out of the root layout and into
+`(app)/layout.tsx`, and `middleware.ts` matches only `/signin` and `/app`. Route
+groups are invisible in the URL, so none of the paths changed; `/` is now `○` static
+and is served with no `Set-Cookie`.

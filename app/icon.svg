@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="margin">
+  <!--
+    The mark is a lowercase m whose stem is the margin rule: it runs past
+    the letter above and below, in Wedgwood, the way a ruled page prints it.
+    The arches are espresso. Nothing else.
+  -->
+  <style>
+    .bg { fill: #f7f2e9 }
+    .ink { stroke: #2a211d }
+    .rule { stroke: #4068a0 }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #1e1815 }
+      .ink { stroke: #ece2d2 }
+      .rule { stroke: #7fa3d8 }
+    }
+  </style>
+  <rect class="bg" width="64" height="64" rx="14" />
+  <g fill="none" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round">
+    <path class="rule" d="M20 14V52" />
+    <path class="ink" d="M20 31C20 25 32 25 32 31V43" />
+    <path class="ink" d="M32 31C32 25 44 25 44 31V43" />
+  </g>
+</svg>
