@@ -8,8 +8,13 @@ together in a shared margin, and keeps the discussion attached to the text — s
 the questions, objections, and context a group builds up survive past the
 meeting they were raised in.
 
-This repo is the web app. It is early: the scaffold, design tokens, and a
-placeholder Convex schema are in place; the product surface comes next.
+This repo is the web app. It is early: the full data model, email/password
+auth, labs with invite codes, and the authenticated app shell are in place.
+Papers, the reader, sessions, and digests come next.
+
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the design — the
+append-only Ledger, passage anchoring, the digest policy, and the privacy
+constitution.
 
 ## Stack
 
@@ -18,17 +23,38 @@ placeholder Convex schema are in place; the product surface comes next.
 | Framework | Next.js 15 (App Router) + React 19, Turbopack        |
 | Language  | TypeScript (strict)                                  |
 | Styling   | Tailwind CSS v4 with semantic CSS custom properties  |
-| Backend   | Convex (schema placeholder — not yet provisioned)    |
+| Backend   | Convex — database, file storage, actions, scheduler  |
+| Auth      | Convex Auth, Password provider (email + password)    |
 | Fonts     | Source Serif 4 (reading/headings), Inter (UI chrome) |
 
 ## Getting started
 
+You need two terminals: one running the Convex backend, one running Next.js.
+
 ```bash
 npm install
+
+# terminal 1 — provisions the deployment on first run, then watches convex/
+# and keeps convex/_generated/ up to date
+npx convex dev
+
+# terminal 2
 npm run dev
 ```
 
 Then open http://localhost:3000.
+
+`npx convex dev` is interactive the first time: it creates the Convex project,
+writes `convex.json`, and puts `CONVEX_DEPLOYMENT` and `NEXT_PUBLIC_CONVEX_URL`
+into `.env.local`. See [`.env.example`](.env.example) for what ends up there.
+
+Then set up auth on the deployment once — this generates the RS256 key pair
+Convex Auth signs its JWTs with and sets `JWT_PRIVATE_KEY`, `JWKS`, and
+`SITE_URL`:
+
+```bash
+npx @convex-dev/auth
+```
 
 Other scripts:
 
@@ -36,21 +62,15 @@ Other scripts:
 npm run build   # production build
 npm run start   # serve the production build
 npm run lint    # eslint
+npx tsc --noEmit
 ```
 
-### Convex
+### Generated Convex types
 
-`convex/schema.ts` is a placeholder with no tables. Nothing in the app talks to
-Convex yet, so no deployment is needed to run `npm run dev`.
-
-When we are ready to provision a backend:
-
-```bash
-npx convex dev
-```
-
-That is interactive on first run — it creates the Convex project, writes
-`convex.json` and `.env.local`, and generates `convex/_generated/`.
+`convex/_generated/` is committed, because `tsc --noEmit` in CI has no
+deployment to generate it from. `npx convex dev` rewrites it whenever
+`convex/` changes; if you need to regenerate it without a deployment, run
+`npx convex codegen`.
 
 ## Design system
 
@@ -71,6 +91,13 @@ Typography is serif-led: `font-serif` for anything you read or write,
 ## Layout
 
 ```
-app/       # App Router routes, layout, global styles + design tokens
-convex/    # Convex backend functions and schema (placeholder)
+app/           # App Router routes, layout, global styles + design tokens
+  signin/      # email + password sign-in / sign-up
+  app/         # the authenticated shell (sidebar, lab overview, onboarding)
+convex/        # Convex schema, auth config, and backend functions
+  lib/         # authz + ledger helpers, not Convex functions themselves
+  _generated/  # generated types, committed
+docs/          # architecture notes
+lib/           # shared front-end helpers
+middleware.ts  # redirects /app <-> /signin based on session
 ```
