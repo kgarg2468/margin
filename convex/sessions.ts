@@ -791,6 +791,18 @@ export const getSession = query({
  * counted only for the person who wrote it — the privacy constitution rules out
  * per-member reading dashboards, and a heatmap that silently included notes
  * their author kept to themselves would be one by another name.
+ *
+ * ## What `countsTruncated` actually means
+ *
+ * The bound is on the *window read*, not on the rows counted. The query takes
+ * the first `MAX_COUNTED_ANNOTATIONS + 1` rows for the session and then drops
+ * the deleted ones and other people's private ones, so a session whose window
+ * is full of those returns counts lower than the visible total while
+ * `countsTruncated` is true. Read the flag as "there is more here than this
+ * query looked at", not as "the number below is exactly the cap". Nothing
+ * over-reports; the failure is only ever an undercount, and only past a
+ * thousand annotations in a single meeting. A session that big wants a real
+ * aggregate — a counter maintained on write — rather than a bigger `take`.
  */
 export const getSessionContext = query({
   args: { sessionId: v.id("sessions") },
@@ -834,6 +846,13 @@ export const getSessionContext = query({
       if (annotation.deletedAt !== undefined) {
         continue;
       }
+      // The privacy constitution, in two lines: what the lab can see, plus
+      // what the caller wrote. Nothing else is ever counted here, and nothing
+      // here is ever broken down by member — a per-type tally sliced by author
+      // is a reading dashboard, which is the thing the constitution forbids,
+      // and it stays forbidden however innocuous the aggregate it hides in
+      // looks. If a future view wants "who has annotated", it does not get it
+      // from this query; it does not get it.
       if (
         annotation.visibility === "private" &&
         annotation.memberId !== userId
