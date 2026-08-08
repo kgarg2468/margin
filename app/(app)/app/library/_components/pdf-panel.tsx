@@ -3,6 +3,7 @@
 import { readableError } from "@/app/(app)/app/_components/errors";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import { fetchPdfBytes } from "@/lib/pdf/delivery";
 import { describePdfOpenError, extractPdfFile } from "@/lib/pdf/extract";
 import {
   errorClass,
@@ -11,7 +12,8 @@ import {
   labelClass,
   secondaryButtonClass,
 } from "@/lib/ui";
-import { useAction, useMutation, useQuery } from "convex/react";
+import { useAuthToken } from "@convex-dev/auth/react";
+import { useAction, useMutation } from "convex/react";
 import type { FormEvent } from "react";
 import { useEffect, useState } from "react";
 import type { IngestStatus } from "./paper-meta";
@@ -46,10 +48,7 @@ export function PdfPanel({
   ingestStatus: IngestStatus;
   ingestError?: string;
 }) {
-  const pdfUrl = useQuery(
-    api.papers.getPdfUrl,
-    hasPdf ? { paperId } : "skip",
-  );
+  const token = useAuthToken();
   const generateUploadUrl = useMutation(api.papers.generateUploadUrl);
   const attachPdf = useMutation(api.papers.attachPdf);
   const markIngestFailed = useMutation(api.papers.markIngestFailed);
@@ -60,6 +59,57 @@ export function PdfPanel({
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [freeCopyUrl, setFreeCopyUrl] = useState("");
+  const [opening, setOpening] = useState(false);
+
+  /**
+   * Open the stored file on its own.
+   *
+   * This used to be an `<a href>` pointing at a Convex storage URL. There is
+   * no such URL any more — the PDF is served by a membership-checked endpoint
+   * that wants an `Authorization` header, and an anchor has no way to send
+   * one — so the bytes are fetched here and handed to the tab as a blob.
+   *
+   * The tab is opened first, synchronously, inside the click. A `window.open`
+   * that happens after an `await` has lost its connection to the gesture and
+   * browsers treat it as a popup.
+   */
+  async function openPdf() {
+    const tab = window.open("", "_blank");
+    setOpening(true);
+    setError(null);
+    try {
+      const bytes = await fetchPdfBytes(paperId, token);
+      const blobUrl = URL.createObjectURL(
+        new Blob([bytes], { type: "application/pdf" }),
+      );
+      if (tab === null) {
+        // The gesture wasn't enough for this browser. A download is not what
+        // was asked for, but it beats losing the file the member waited for.
+        const link = document.createElement("a");
+        link.href = blobUrl;
+        link.download = "paper.pdf";
+        link.click();
+      } else {
+        tab.location.href = blobUrl;
+      }
+      // Long enough for the tab to have loaded it, and then released —
+      // revoking only stops *new* loads, so the open document is unaffected,
+      // and the alternative is a copy of every PDF opened this session
+      // sitting in memory until the page is closed.
+      window.setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+    } catch (caught) {
+      tab?.close();
+      // `fetchPdfBytes` already phrases its failures for a person — an
+      // expired session, a paper that isn't visible — so those are kept.
+      setError(
+        caught instanceof Error && caught.message.length > 0
+          ? caught.message
+          : "That PDF wouldn't open.",
+      );
+    } finally {
+      setOpening(false);
+    }
+  }
 
   /**
    * Tidying up after an ingest that stopped halfway: drop the blob nothing
@@ -204,16 +254,14 @@ export function PdfPanel({
           </p>
 
           <div className="flex flex-wrap items-baseline gap-5">
-            {pdfUrl !== undefined && pdfUrl !== null && (
-              <a
-                href={pdfUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="font-sans text-sm text-accent underline-offset-4 hover:underline"
-              >
-                Open the PDF
-              </a>
-            )}
+            <button
+              type="button"
+              disabled={opening}
+              onClick={() => void openPdf()}
+              className="tap-target font-sans text-sm text-accent underline-offset-4 hover:underline disabled:opacity-50"
+            >
+              {opening ? "Opening the PDF…" : "Open the PDF"}
+            </button>
             {canReadText && (
               <button
                 type="button"

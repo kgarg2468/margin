@@ -3,9 +3,11 @@
 import { readableError } from "@/app/(app)/app/_components/errors";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import { fetchPdfBytes } from "@/lib/pdf/delivery";
 import { describePdfOpenError, extractPdf } from "@/lib/pdf/extract";
-import { useConvex, useMutation } from "convex/react";
-import { useCallback, useRef, useState } from "react";
+import { useAuthToken } from "@convex-dev/auth/react";
+import { useMutation } from "convex/react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 /**
  * Read the text layer out of a PDF that Margin already has.
@@ -16,9 +18,11 @@ import { useCallback, useRef, useState } from "react";
  * it can happen: straight after a DOI lookup, while the reader is still
  * standing there, and on the paper record for a paper that got past the first.
  *
- * The URL is fetched imperatively rather than through `useQuery` because this
- * runs in response to an event, and the paper it runs for is not known until
- * that event happens.
+ * The bytes are pulled down imperatively rather than through `useQuery`
+ * because this runs in response to an event, and the paper it runs for is not
+ * known until that event happens. They come from the membership-checked
+ * endpoint in `convex/http.ts` — the same one the reader renders from — so
+ * this hook needs the member's auth token to ask for them.
  */
 export type TextLayerPhase =
   | { kind: "idle" }
@@ -29,9 +33,17 @@ export type TextLayerPhase =
 const IDLE: TextLayerPhase = { kind: "idle" };
 
 export function useTextLayer() {
-  const convex = useConvex();
   const saveExtractedText = useMutation(api.papers.saveExtractedText);
   const markIngestFailed = useMutation(api.papers.markIngestFailed);
+
+  // Held in a ref rather than closed over, so that a token rotating does not
+  // change `read`'s identity. `PdfPanel` starts extraction from an effect that
+  // depends on `read`, and a `read` that changed under it would ask again.
+  const token = useAuthToken();
+  const tokenRef = useRef(token);
+  useEffect(() => {
+    tokenRef.current = token;
+  }, [token]);
 
   /**
    * A phase per paper, not one for the hook.
@@ -74,17 +86,7 @@ export function useTextLayer() {
 
       try {
         setPhase(paperId, { kind: "working", message: "Fetching the PDF…" });
-        const url = await convex.query(api.papers.getPdfUrl, { paperId });
-        if (url === null || url === undefined) {
-          throw new Error("The stored file has gone missing.");
-        }
-        const response = await fetch(url);
-        if (!response.ok) {
-          // Without this, a 404 body goes to pdf.js and comes back as
-          // "couldn't read that PDF" — which blames the file for the fetch.
-          throw new Error(`The stored file came back ${response.status}.`);
-        }
-        const data = await response.arrayBuffer();
+        const data = await fetchPdfBytes(paperId, tokenRef.current);
         const extraction = await extractPdf(data, {
           onProgress: (pagesDone, pages) =>
             setPhase(paperId, {
@@ -115,7 +117,7 @@ export function useTextLayer() {
         return false;
       }
     },
-    [convex, saveExtractedText, markIngestFailed, setPhase],
+    [saveExtractedText, markIngestFailed, setPhase],
   );
 
   return { phaseFor, read };
