@@ -48,9 +48,13 @@ test.describe("/ — the landing page", () => {
     await expect(
       hero.getByText("The collective intelligence layer for research groups."),
     ).toBeVisible();
+    // `?flow=signup` is load-bearing, not decoration: the CTA promises an
+    // account, and without it `/signin` opens on "Pick up where your lab left
+    // off" and a sign-in form — the returning-user state, contradicting the
+    // button that was just pressed.
     await expect(
       hero.getByRole("link", { name: "Start a journal club" }),
-    ).toHaveAttribute("href", "/signin");
+    ).toHaveAttribute("href", "/signin?flow=signup");
 
     // The landing page lives in the `(marketing)` route group precisely so it
     // mounts no Convex provider and prerenders to a static file. If this
