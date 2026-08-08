@@ -856,3 +856,160 @@ export const createFromDoi = action({
     });
   },
 });
+
+/* -------------------------------------------------------------------------
+ * Fetching a free copy the member found
+ * ---------------------------------------------------------------------- */
+
+/**
+ * The membership gate for `fetchPdfFromUrl` — an action has no database, so
+ * the check it needs has to be a query, the same shape as `findByDoi` — and,
+ * in the same round trip, the one fact that decides whether to fetch at all.
+ */
+export const paperFileState = internalQuery({
+  args: { paperId: v.id("papers") },
+  returns: v.object({ hasPdf: v.boolean() }),
+  handler: async (ctx, args) => {
+    const { paper } = await requirePaperAccess(ctx, args.paperId);
+    return { hasPdf: paper.storageId !== undefined };
+  },
+});
+
+/**
+ * Attach a PDF the action fetched from a link a member pasted.
+ *
+ * Deliberately not `attachPdf`: there are no pages to record yet (nothing has
+ * run pdf.js over a file the browser has never seen) and there is no file to
+ * replace. It patches, and the reader fills in the text layer on first open.
+ *
+ * The re-check is the same race `insertFromDoi` guards: fetching the file took
+ * seconds, and in those seconds a colleague could have dropped the real PDF
+ * in. Their file is the file — losing an upload someone made by hand to a
+ * link someone else pasted would be the wrong way round — so this one goes
+ * back to storage rather than orphaning there.
+ */
+export const attachFetchedPdf = internalMutation({
+  args: { paperId: v.id("papers"), storageId: v.id("_storage") },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const { paper } = await requirePaperAccess(ctx, args.paperId);
+    if (paper.storageId !== undefined) {
+      await ctx.storage.delete(args.storageId);
+      throw new ConvexError(
+        "This paper already has a PDF — someone attached one while Margin was fetching yours.",
+      );
+    }
+
+    await ctx.db.patch(paper._id, {
+      storageId: args.storageId,
+      // Same state a DOI-fetched copy lands in: the file is here, its text
+      // layer is not, and the first browser to open it makes one.
+      ingestStatus: "pending",
+      ingestError: undefined,
+    });
+    // No ledger event. `paper.added` was recorded when the paper arrived, and
+    // `saveExtractedText` records `paper.ingested` once a browser has actually
+    // read the file — exactly as on the DOI path. A row between the two would
+    // be announcing a paper that still can't be annotated.
+    return null;
+  },
+});
+
+/**
+ * A URL a member typed, on its way into `fetch`.
+ *
+ * Every other URL this file fetches came from Crossref or OpenAlex. This one
+ * came from a text box, which makes it the one that can be aimed at us:
+ * Convex actions run inside infrastructure that has a private network around
+ * it, and `fetch` will resolve `https://localhost:8080/` or an IP literal into
+ * a request originating from in there — the classic way to read a metadata
+ * endpoint or an internal service through someone else's server. Refusing
+ * hosts that name a machine rather than a name costs a member nothing, since
+ * a free copy of a paper lives at a hostname.
+ *
+ * It is half the problem, honestly: a public hostname that resolves to a
+ * private address still gets through, and closing that means resolving DNS
+ * ourselves and checking the address before connecting. This takes the easy
+ * half off the table now.
+ */
+function readPastedPdfUrl(input: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(input.trim());
+  } catch {
+    throw new ConvexError(
+      "That isn't a link Margin can follow. Paste the whole address, starting with https://.",
+    );
+  }
+
+  if (parsed.protocol !== "https:") {
+    throw new ConvexError(
+      "Margin fetches over https only — on a plaintext hop the file could be swapped for another on the way in.",
+    );
+  }
+
+  const host = parsed.hostname.toLowerCase();
+  const isIpv6Literal = host.startsWith("[");
+  // Dotted-quad, and the decimal and hex spellings of the same address.
+  const isNumericHost = /^(?:\d|0x)[0-9a-fx.]*$/i.test(host);
+  // `localhost`, and anything else with no public suffix to it.
+  const isSingleLabel = !host.includes(".");
+  if (isIpv6Literal || isNumericHost || isSingleLabel) {
+    throw new ConvexError(
+      "That link points at a machine rather than a public site. Paste the address you would send to a colleague.",
+    );
+  }
+
+  return parsed.toString();
+}
+
+/**
+ * Fetch a free copy from a link the member found.
+ *
+ * OpenAlex misses copies — a repository it has not indexed, a record where
+ * every `pdf_url` is empty — and the member is frequently looking at the file
+ * in another tab while Margin says there isn't one. Their recourse used to be
+ * download, then re-upload. This is the shortcut: the same fetcher the DOI
+ * path uses, pointed where they say, server-side so no publisher's CORS
+ * policy gets a vote.
+ *
+ * It will not replace a file. A paper that already has a PDF has a text layer
+ * anchored to it, and swapping that out is `attachPdf`'s job — it re-extracts
+ * and tells the ledger — so this one refuses and the dropzone stays the way
+ * to do it.
+ */
+export const fetchPdfFromUrl = action({
+  args: { paperId: v.id("papers"), url: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args): Promise<null> => {
+    // Also the authorization check: `paperFileState` requires membership.
+    const state: { hasPdf: boolean } = await ctx.runQuery(
+      internal.papers.paperFileState,
+      { paperId: args.paperId },
+    );
+    if (state.hasPdf) {
+      throw new ConvexError(
+        "This paper already has a PDF. Use “Replace the file” to swap it for another.",
+      );
+    }
+
+    const url = readPastedPdfUrl(args.url);
+    const pdf = await fetchOpenAccessPdf(url);
+    if (pdf === null) {
+      // The likeliest cause by a distance, and the member can fix it in one
+      // move once they know: `fetchOpenAccessPdf` checks the magic bytes, so
+      // an abstract page or a "download" interstitial fails here exactly like
+      // a dead link does.
+      throw new ConvexError(
+        "No PDF came back from that link. It may be a page about the paper rather than the file itself — try the link behind “Download PDF”, or save the file and drop it in below.",
+      );
+    }
+
+    const storageId = await ctx.storage.store(pdf);
+    await ctx.runMutation(internal.papers.attachFetchedPdf, {
+      paperId: args.paperId,
+      storageId,
+    });
+    return null;
+  },
+});

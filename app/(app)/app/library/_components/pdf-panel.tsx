@@ -4,8 +4,15 @@ import { readableError } from "@/app/(app)/app/_components/errors";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { extractPdfFile } from "@/lib/pdf/extract";
-import { errorClass, eyebrowClass } from "@/lib/ui";
-import { useMutation, useQuery } from "convex/react";
+import {
+  errorClass,
+  eyebrowClass,
+  inputClass,
+  labelClass,
+  secondaryButtonClass,
+} from "@/lib/ui";
+import { useAction, useMutation, useQuery } from "convex/react";
+import type { FormEvent } from "react";
 import { useEffect, useState } from "react";
 import type { IngestStatus } from "./paper-meta";
 import { PdfDropzone } from "./pdf-dropzone";
@@ -47,10 +54,12 @@ export function PdfPanel({
   const attachPdf = useMutation(api.papers.attachPdf);
   const markIngestFailed = useMutation(api.papers.markIngestFailed);
   const discardUpload = useMutation(api.papers.discardUpload);
+  const fetchPdfFromUrl = useAction(api.papers.fetchPdfFromUrl);
 
   const textLayer = useTextLayer();
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [freeCopyUrl, setFreeCopyUrl] = useState("");
 
   /**
    * Tidying up after an ingest that stopped halfway: drop the blob nothing
@@ -102,6 +111,31 @@ export function PdfPanel({
       );
       setError(message);
       await recover(uploaded, message);
+    }
+  }
+
+  /**
+   * The other way to close the gap: the member has the free copy open in
+   * another tab, and Margin can fetch it server-side without a publisher's
+   * CORS policy getting a vote. Nothing is uploaded from here, so there is no
+   * orphan blob to recover — the action either attaches a file or throws.
+   */
+  async function fetchFromLink(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+    setStatus("Fetching it…");
+    try {
+      await fetchPdfFromUrl({ paperId, url: freeCopyUrl });
+      setFreeCopyUrl("");
+      setStatus(null);
+      // A file Margin fetched itself has never been near a browser that could
+      // read it, and pdf.js only runs in one. `force`, because the automatic
+      // read has already had its one attempt at this paper — back when there
+      // was no PDF to read.
+      void textLayer.read(paperId, true);
+    } catch (caught) {
+      setStatus(null);
+      setError(readableError(caught, "Margin couldn't fetch that link."));
     }
   }
 
@@ -226,6 +260,39 @@ export function PdfPanel({
             disabled={busyMessage !== null}
             onFile={attach}
           />
+
+          <form
+            className="flex flex-col gap-2 border-t border-rule pt-4"
+            onSubmit={fetchFromLink}
+          >
+            <label htmlFor="free-copy-url" className={labelClass}>
+              Found a free copy online?
+            </label>
+            <p className="max-w-prose font-serif text-base leading-relaxed text-ink-muted">
+              Paste its link and Margin fetches it for the lab.
+            </p>
+            <input
+              id="free-copy-url"
+              name="url"
+              type="url"
+              required
+              value={freeCopyUrl}
+              onChange={(event) => setFreeCopyUrl(event.target.value)}
+              spellCheck={false}
+              placeholder="https://arxiv.org/pdf/1706.03762"
+              className={`${inputClass} font-mono`}
+            />
+            <p className="font-sans text-xs text-ink-faint">
+              A link to the PDF itself, not the page about the paper.
+            </p>
+            <button
+              type="submit"
+              disabled={busyMessage !== null}
+              className={`${secondaryButtonClass} mt-1 self-start`}
+            >
+              Fetch it
+            </button>
+          </form>
         </div>
       )}
 
