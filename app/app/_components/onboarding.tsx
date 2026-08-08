@@ -12,6 +12,7 @@ import {
 import { useMutation } from "convex/react";
 import { useState } from "react";
 import { readableError } from "./errors";
+import { useLabs } from "./lab-provider";
 
 export function Onboarding() {
   return (
@@ -36,6 +37,7 @@ export function Onboarding() {
 
 function CreateLabCard() {
   const createLab = useMutation(api.labs.createLab);
+  const { selectLab } = useLabs();
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
@@ -56,10 +58,14 @@ function CreateLabCard() {
           setError(null);
           setPending(true);
           try {
-            await createLab({
+            const labId = await createLab({
               name: String(formData.get("name") ?? ""),
               institution: String(formData.get("institution") ?? "") || undefined,
             });
+            // Land in the lab you just made rather than in whichever one
+            // happens to sort first — this card is also reachable from the
+            // overview of an existing lab.
+            selectLab(labId);
           } catch (caught) {
             setError(readableError(caught, "We couldn't create that lab."));
           } finally {

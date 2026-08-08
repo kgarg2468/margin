@@ -39,9 +39,11 @@
   --espresso-900: #2a211d;
   --espresso-800: #3b2f2a;
   --espresso-600: #6b5b52;
-  /* 4.65:1 on --page, 4.98:1 on --surface — AA for the small caps and
-   * captions this token is used for. */
-  --espresso-400: #7a6a5e;
+  /* --ink-faint's light value. It is used on all three backgrounds, and the
+   * binding constraint is the darkest of them: 4.60:1 on --surface-sunken
+   * (the sidebar), 5.10:1 on --page, 5.46:1 on --surface. AA at every size,
+   * which matters because this token carries small caps and captions. */
+  --espresso-400: #736458;
 
   --wedgwood-700: #2f4f80;
   --wedgwood-500: #4068a0;
@@ -63,7 +65,10 @@
   --ink: light-dark(var(--espresso-800), #ece2d2);
   --ink-strong: light-dark(var(--espresso-900), #f7f2e9);
   --ink-muted: light-dark(var(--espresso-600), #b6a795);
-  --ink-faint: light-dark(var(--espresso-400), #8a7a6c);
+  /* Dark value picked against --surface-sunken for the same reason — it is
+   * the lightest dark background: 4.59:1 there, 4.90:1 on --surface, 5.24:1
+   * on --page. */
+  --ink-faint: light-dark(var(--espresso-400), #938578);
 
   --accent: light-dark(var(--wedgwood-500), var(--wedgwood-300));
   --accent-strong: light-dark(var(--wedgwood-700), #a3bfe8);
