@@ -1,7 +1,7 @@
-# Margin
+<h1 align="center">Margin</h1>
 
 <p align="center">
-  <img src="docs/assets/brand/margin-wordmark.png" alt="Margin" width="220">
+  <img src="docs/assets/brand/margin-wordmark.png" alt="" width="300">
 </p>
 
 <p align="center">
@@ -32,30 +32,32 @@
 
 Margin is where a research group runs its journal club. A lab brings in a paper by DOI, annotates it together in a shared margin before the meeting, and runs the discussion off the passages it flagged. Every note carries a type — hypothesis, method note, critique, definition, connection, open question — so the reading leaves a structured record instead of a drawer of highlights, and that record is what the next session, the next member, and the write-up are built from. The model layer only ever quotes and attributes what the lab already said.
 
-<table>
-  <tr>
-    <td width="50%"><img src="docs/assets/screenshots/landing-light.png" alt="Margin landing page in light mode"></td>
-    <td width="50%"><img src="docs/assets/screenshots/landing-dark.png" alt="Margin landing page in dark mode"></td>
-  </tr>
-</table>
+The product stays in its warm brown dark mode throughout:
 
-The landing page, in both color schemes.
+<p align="center">
+  <img src="docs/assets/screenshots/landing-dark.png" alt="Margin landing page in warm dark mode, with the first annotation visible" width="100%">
+</p>
+<p align="center"><em>Fig. 1 — The landing page, where the page itself demonstrates a shared margin.</em></p>
 
-<img src="docs/assets/screenshots/reader.png" alt="The reader, showing anchored passages and the typed margin rail">
+<p align="center">
+  <img src="docs/assets/screenshots/reader.png" alt="Margin reader in warm dark mode, showing anchored passages and the typed margin rail" width="100%">
+</p>
+<p align="center"><em>Fig. 2 — The reader: typed notes anchored to passages in one paper.</em></p>
 
-The reader: five typed notes from two members, anchored to four sentences of one abstract.
+<p align="center">
+  <img src="docs/assets/screenshots/composer.png" alt="Margin annotation composer in warm dark mode, open on a live text selection" width="100%">
+</p>
+<p align="center"><em>Fig. 3 — The composer: choose a note type and visibility before saving the thought.</em></p>
 
-<img src="docs/assets/screenshots/composer.png" alt="The annotation composer open on a live text selection">
+<p align="center">
+  <img src="docs/assets/screenshots/session-live.png" alt="Margin live session projector in warm dark mode, with a populated typed passage board" width="100%">
+</p>
+<p align="center"><em>Fig. 4 — The live session: the room runs from the passages the lab flagged.</em></p>
 
-Letting go of a selection opens the composer, with the type chips and the visibility choice shown rather than applied quietly.
-
-<img src="docs/assets/screenshots/session-live.png" alt="The live session projector view with a populated typed passage board">
-
-The live session: the screen at the front of the room, built from the passages the lab flagged.
-
-<img src="docs/assets/screenshots/synthesis.png" alt="The generated session synthesis, with attribution and citations">
-
-The write-up, generated once the session ends — every claim quoted from an annotation and attributed to whoever wrote it.
+<p align="center">
+  <img src="docs/assets/screenshots/synthesis.png" alt="Margin session write-up in warm dark mode, with attribution and citations" width="72%">
+</p>
+<p align="center"><em>Fig. 5 — The write-up: every claim is quoted from an annotation and attributed to its author.</em></p>
 
 ## First Session
 
