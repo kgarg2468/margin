@@ -12,15 +12,20 @@ import {
 /**
  * The synthesis is the one place a model's output reaches the database, and
  * everything between the two is in this file: the fencing that keeps an
- * annotation from being read as an instruction, the name index that decides
- * who may be attributed, and the ref check that decides what may be stored.
+ * annotation from being read as an instruction, the ref check that decides
+ * what may be stored, and the derivation that decides whose name goes on it.
  * These tests are the guarantee, since nothing downstream re-checks any of it.
  */
 
 const id = (n: number) => `annotation_${n}` as Id<"annotations">;
 
-const refs = (n: number) =>
-  annotationRefs(Array.from({ length: n }, (_, i) => ({ _id: id(i + 1) }))).idOf;
+/** `[A1]`, `[A2]`, … with an author each, since attribution is derived. */
+const material = (...authors: string[]) =>
+  annotationRefs(authors.map((author, i) => ({ _id: id(i + 1), author })))
+    .byLabel;
+
+/** A1 and A2 are Ana's; A3 is Ben's. Every test below reads against this. */
+const refs = () => material("Ana Ruiz", "Ana Ruiz", "Ben Okafor");
 
 /** One well-formed item, so each test only has to say what it is changing. */
 function payload(
@@ -68,7 +73,7 @@ describe("sanitizeSections", () => {
         { text: "Does the ablation hold at scale?", attribution: ["Ana"], refs: ["A2"] },
       ]),
       members,
-      refs(3),
+      refs(),
     );
     expect(result.droppedForRefs).toBe(0);
     expect(itemsIn(result, "open-questions")).toEqual([
@@ -86,16 +91,62 @@ describe("sanitizeSections", () => {
         { text: "A question.", attribution: ["Ben Okafor"], refs: ["[A1]", "a1", " A3 "] },
       ]),
       members,
-      refs(3),
+      refs(),
     );
     expect(itemsIn(result, "open-questions")[0]?.annotationIds).toEqual([id(1), id(3)]);
+  });
+
+  it("derives attribution from the citations, not from what the model claimed", () => {
+    // The model named only Ben, but it cited one of Ana's annotations too.
+    // Ana wrote part of what this item is made of, so Ana is on it.
+    const result = sanitizeSections(
+      payload([
+        { text: "They disagreed.", attribution: ["Ben Okafor"], refs: ["A1", "A3"] },
+      ]),
+      members,
+      refs(),
+    );
+    expect(itemsIn(result, "open-questions")[0]?.attribution).toEqual([
+      "Ana Ruiz",
+      "Ben Okafor",
+    ]);
+  });
+
+  it("drops an item crediting a member its own citations don't support", () => {
+    // A3 is Ben's annotation. Crediting Ana for it is the failure that a name
+    // check and a ref check passing independently used to let through.
+    const result = sanitizeSections(
+      payload([
+        { text: "Ana raised this.", attribution: ["Ana Ruiz"], refs: ["A3"] },
+        { text: "Ben raised this.", attribution: ["Ben Okafor"], refs: ["A3"] },
+      ]),
+      members,
+      refs(),
+    );
+    expect(itemsIn(result, "open-questions").map((item) => item.text)).toEqual([
+      "Ben raised this.",
+    ]);
+    expect(result.droppedForAttribution).toBe(1);
+    expect(result.droppedForRefs).toBe(0);
+  });
+
+  it("drops an item where only one of two claimed names is cited", () => {
+    const result = sanitizeSections(
+      payload([
+        { text: "Both of them.", attribution: ["Ana Ruiz", "Ben Okafor"], refs: ["A1"] },
+      ]),
+      members,
+      refs(),
+    );
+    expect(itemsIn(result, "open-questions")).toHaveLength(0);
+    expect(result.droppedForAttribution).toBe(1);
   });
 
   it("drops an item attributed to somebody who never annotated", () => {
     const result = sanitizeSections(
       payload([{ text: "A question.", attribution: ["Cara Lin"], refs: ["A1"] }]),
       members,
-      refs(3),
+      refs(),
     );
     expect(itemsIn(result, "open-questions")).toHaveLength(0);
     // Not a citation failure — the item never got that far.
@@ -106,7 +157,7 @@ describe("sanitizeSections", () => {
     const result = sanitizeSections(
       payload([{ text: "A question.", attribution: ["Ana"], refs: ["A1"] }]),
       ["Ana Ruiz", "Ana Meyer"],
-      refs(3),
+      refs(),
     );
     expect(itemsIn(result, "open-questions")).toHaveLength(0);
   });
@@ -117,7 +168,7 @@ describe("sanitizeSections", () => {
         { text: "A question.", attribution: ["Ana", "Cara Lin", 7, null], refs: ["A1"] },
       ]),
       members,
-      refs(3),
+      refs(),
     );
     expect(itemsIn(result, "open-questions")[0]?.attribution).toEqual(["Ana Ruiz"]);
   });
@@ -131,7 +182,7 @@ describe("sanitizeSections", () => {
         { text: "Gibberish ref.", attribution: ["Ben"], refs: ["the second one"] },
       ]),
       members,
-      refs(3),
+      refs(),
     );
     expect(itemsIn(result, "open-questions").map((item) => item.text)).toEqual(["Kept."]);
     expect(result.droppedForRefs).toBe(3);
@@ -145,7 +196,7 @@ describe("sanitizeSections", () => {
         { text: "Refs aren't even a list.", attribution: ["Ana"], refs: "A1" },
       ]),
       members,
-      refs(3),
+      refs(),
     );
     expect(itemsIn(result, "open-questions")).toHaveLength(0);
     expect(result.droppedForRefs).toBe(3);
@@ -158,7 +209,7 @@ describe("sanitizeSections", () => {
         "recommendations",
       ),
       members,
-      refs(3),
+      refs(),
     );
     expect(result.sections.map((section) => section.key)).toEqual([
       "summary",
@@ -184,7 +235,7 @@ describe("sanitizeSections", () => {
       { sections: [{ key: "summary", items: "nope" }] },
       { sections: [{ key: "summary", items: [null, 3, { text: "" }, { text: 9 }] }] },
     ]) {
-      const result = sanitizeSections(garbage, members, refs(3));
+      const result = sanitizeSections(garbage, members, refs());
       expect(result.sections).toHaveLength(5);
       expect(result.sections.every((section) => section.items.length === 0)).toBe(true);
       expect(result.droppedForRefs).toBe(0);
@@ -201,12 +252,12 @@ describe("sanitizeSections", () => {
           },
           {
             key: "summary",
-            items: [{ text: "Second.", attribution: ["Ben"], refs: ["A2"] }],
+            items: [{ text: "Second.", attribution: ["Ben"], refs: ["A3"] }],
           },
         ],
       },
       members,
-      refs(3),
+      refs(),
     );
     expect(itemsIn(result, "summary").map((item) => item.text)).toEqual([
       "First.",
@@ -287,8 +338,8 @@ describe("buildUserPrompt", () => {
       _id: id(i + 1),
     }));
     const prompt = buildUserPrompt({ ...context, annotations: many });
-    const { idOf } = annotationRefs(many);
-    expect(idOf.get("A3")).toBe(id(3));
+    const { byLabel } = annotationRefs(many);
+    expect(byLabel.get("A3")).toEqual({ id: id(3), author: "Ana Ruiz" });
     expect(prompt).toContain("[A3]");
   });
 });

@@ -24,13 +24,15 @@ import { recordEvent } from "./lib/ledger";
  * ## The constraint is the product
  *
  * The model is not asked what it thinks about the paper. It is given the
- * lab's annotations and told it may only quote or paraphrase-with-attribution
- * what is in front of it. Every item it emits carries the names it came from,
- * and an item that attributes to nobody the lab knows is dropped before it is
- * stored (see `sanitizeSections`). A synthesis that says something no member
- * said is a bug, not a flourish: the failure mode of a paper-summarizing
- * product is confident text nobody can trace, and that is exactly what a lab
- * cannot use.
+ * lab's annotations, each under an `[A#]` label, and told it may only quote or
+ * paraphrase-with-attribution what is in front of it — citing the labels it
+ * used. An item that cites a label this session never issued is dropped before
+ * it is stored, and the names on the items that survive are *derived from
+ * those citations* rather than taken from the model (see `sanitizeSections`),
+ * so a stored attribution cannot be a name the model chose. A synthesis that
+ * says something no member said, or credits it to the wrong member, is a bug
+ * rather than a flourish: the failure mode of a paper-summarizing product is
+ * confident text nobody can trace, and that is exactly what a lab cannot use.
  *
  * ## Privacy
  *
@@ -352,27 +354,35 @@ export function fence(text: string): string {
   return text.replace(FENCE_TAGS, "");
 }
 
+/** What an `[A#]` label resolves back to: the row, and who wrote it. */
+export type MaterialRef<A extends string = string> = {
+  id: A;
+  author: string;
+};
+
 /**
  * `A1`, `A2`, … in the order the material is laid out, both ways round.
  *
  * The prompt needs id → label to write the material; the sanitizer needs
- * label → id to resolve what the model cited. One function so the two can
- * never drift, which is the only reason the resolved ids mean anything.
+ * label → row to resolve what the model cited, and the author with it, because
+ * attribution is derived from citations rather than taken on trust. One
+ * function so the two can never drift, which is the only reason the resolved
+ * ids mean anything.
  */
-export function annotationRefs(
-  annotations: readonly { _id: Id<"annotations"> }[],
+export function annotationRefs<A extends string>(
+  annotations: readonly { _id: A; author: string }[],
 ): {
-  labelOf: Map<Id<"annotations">, string>;
-  idOf: Map<string, Id<"annotations">>;
+  labelOf: Map<A, string>;
+  byLabel: Map<string, MaterialRef<A>>;
 } {
-  const labelOf = new Map<Id<"annotations">, string>();
-  const idOf = new Map<string, Id<"annotations">>();
+  const labelOf = new Map<A, string>();
+  const byLabel = new Map<string, MaterialRef<A>>();
   annotations.forEach((a, index) => {
     const label = `A${index + 1}`;
     labelOf.set(a._id, label);
-    idOf.set(label, a._id);
+    byLabel.set(label, { id: a._id, author: a.author });
   });
-  return { labelOf, idOf };
+  return { labelOf, byLabel };
 }
 
 /** The material, laid out so a reference like `[A12]` is unambiguous. */
@@ -520,25 +530,45 @@ function normalizeRef(raw: unknown): string | undefined {
  * Turn whatever the model returned into the five sections, and enforce the
  * citation and attribution rules mechanically.
  *
- * Two independent gates, and an item has to pass both:
+ * Three gates, in order, and an item has to pass all of them:
  *
- * - **Attribution.** Names are matched against the members who actually
- *   annotated, via `nameIndex`. Unrecognized names are dropped, and an item
- *   left attributing to nobody is dropped with them.
+ * - **Naming.** Claimed names are matched against the members who actually
+ *   annotated, via `nameIndex`. Unrecognized names are ignored, and an item
+ *   left claiming nobody is dropped with them.
  * - **Citation.** Every `[A#]` the item cites must be a label this prompt
  *   actually issued. An item that cites a label outside the material — or
  *   cites nothing — is dropped whole rather than stored as a claim nobody can
- *   check; those are counted, because a run that drops everything is a failed
- *   run and not an empty discussion.
+ *   check.
+ * - **Agreement.** Every name the item claims must be the author of one of the
+ *   annotations it cites. Checking the two independently let an item say "Ana
+ *   raised this" while citing only Ben's annotation, and both halves passed:
+ *   the name was a real member and the ref was a real annotation, so a
+ *   perfectly checkable-looking item went in crediting the wrong person. The
+ *   name and the citation have to be about the same thing or the item is not
+ *   evidence of anything.
  *
- * That is the whole guarantee: an item in a stored synthesis names a real
- * member of this discussion and points at the annotations it came from.
+ * The stored `attribution` is then **derived** from the citations, not copied
+ * from the model. Under quote-and-attribute the annotations an item cites are
+ * what it is made of, so their authors are who it came from — and a derived
+ * name cannot be wrong, missing, or invented. The model's own list survives
+ * only as the cross-check above.
+ *
+ * Drops are counted, because a run that drops everything is a failed run and
+ * not an empty discussion.
+ *
+ * That is the whole guarantee: every name on a stored item is the author of an
+ * annotation that item cites, and every annotation it cites is one this
+ * session actually contains.
  */
 export function sanitizeSections<A extends string = string>(
   parsed: unknown,
   memberNames: readonly string[],
-  refIds: ReadonlyMap<string, A>,
-): { sections: Section<A>[]; droppedForRefs: number } {
+  material: ReadonlyMap<string, MaterialRef<A>>,
+): {
+  sections: Section<A>[];
+  droppedForRefs: number;
+  droppedForAttribution: number;
+} {
   const known = nameIndex(memberNames);
 
   const raw =
@@ -548,6 +578,7 @@ export function sanitizeSections<A extends string = string>(
   const rawSections = Array.isArray(raw) ? raw : [];
 
   let droppedForRefs = 0;
+  let droppedForAttribution = 0;
   const byKey = new Map<string, SectionItem<A>[]>();
   for (const entry of rawSections) {
     if (typeof entry !== "object" || entry === null) continue;
@@ -564,33 +595,43 @@ export function sanitizeSections<A extends string = string>(
       };
       if (typeof text !== "string" || text.trim().length === 0) continue;
       const names = Array.isArray(attribution) ? attribution : [];
-      const resolved: string[] = [];
+      const claimed: string[] = [];
       for (const name of names) {
         if (typeof name !== "string") continue;
         const match = known.get(name.trim().toLowerCase());
-        if (match !== undefined && !resolved.includes(match)) {
-          resolved.push(match);
+        if (match !== undefined && !claimed.includes(match)) {
+          claimed.push(match);
         }
       }
-      if (resolved.length === 0) continue;
+      if (claimed.length === 0) continue;
 
       const cited = Array.isArray(refs) ? refs : [];
       const annotationIds: A[] = [];
+      const authors: string[] = [];
       let citesOutside = cited.length === 0;
       for (const ref of cited) {
-        const id = refIds.get(normalizeRef(ref) ?? "");
-        if (id === undefined) {
+        const resolved = material.get(normalizeRef(ref) ?? "");
+        if (resolved === undefined) {
           citesOutside = true;
           break;
         }
-        if (!annotationIds.includes(id)) annotationIds.push(id);
+        if (!annotationIds.includes(resolved.id)) {
+          annotationIds.push(resolved.id);
+          if (!authors.includes(resolved.author)) authors.push(resolved.author);
+        }
       }
       if (citesOutside || annotationIds.length === 0) {
         droppedForRefs += 1;
         continue;
       }
 
-      cleaned.push({ text: text.trim(), attribution: resolved, annotationIds });
+      // The model named somebody its own citations don't support.
+      if (!claimed.every((name) => authors.includes(name))) {
+        droppedForAttribution += 1;
+        continue;
+      }
+
+      cleaned.push({ text: text.trim(), attribution: authors, annotationIds });
     }
     byKey.set(key, [...(byKey.get(key) ?? []), ...cleaned]);
   }
@@ -602,6 +643,7 @@ export function sanitizeSections<A extends string = string>(
       items: byKey.get(section.key) ?? [],
     })),
     droppedForRefs,
+    droppedForAttribution,
   };
 }
 
@@ -713,39 +755,42 @@ export const generate = action({
     }
     const model = process.env.SYNTHESIS_MODEL ?? DEFAULT_MODEL;
 
-    // Claim the session before spending anything. `claimGeneration` runs the
-    // same authorization gate the rest of this file does, so the marker is not
-    // a way around it.
-    await ctx.runMutation(internal.synthesis.claimGeneration, {
+    // Authorization lives in the query: `ctx.auth` carries through, so the
+    // caller is checked against the session before anything is read — and
+    // before a lease is taken, so a session that cannot be synthesized never
+    // holds one.
+    const context = await ctx.runQuery(internal.synthesis.collectMaterial, {
+      sessionId: args.sessionId,
+    });
+    // Presenter notes alone are not enough. Every item has to cite an `[A#]`
+    // label and every label is an annotation, so a session with no shared
+    // annotations issues no labels, and the sanitizer would reject the whole
+    // response however good it was. That call is guaranteed to be wasted; the
+    // refusal belongs here, before the money is spent.
+    if (context.annotations.length === 0) {
+      throw new ConvexError(
+        "There's nothing to synthesize yet — nobody has shared an annotation on this paper. Presenter notes on their own can't be quoted and attributed.",
+      );
+    }
+
+    // Claim the session before spending anything. The token is what makes the
+    // claim ours: it comes back from the mutation and every write from here on
+    // presents it, so a run that overran its lease cannot clobber the run that
+    // replaced it.
+    const lease = await ctx.runMutation(internal.synthesis.claimGeneration, {
       sessionId: args.sessionId,
     });
 
     try {
-      // Authorization lives in the query too: `ctx.auth` carries through, so
-      // the caller is checked against the session before anything is read.
-      const context = await ctx.runQuery(internal.synthesis.collectMaterial, {
-        sessionId: args.sessionId,
-      });
-      if (
-        context.annotations.length === 0 &&
-        context.presenterNotes === undefined
-      ) {
-        throw new ConvexError(
-          "There's nothing to synthesize yet — no shared annotations and no presenter notes.",
-        );
-      }
-
       const text = await callAnthropic(model, apiKey, buildUserPrompt(context));
-      const { idOf } = annotationRefs(context.annotations);
-      const { sections, droppedForRefs } = sanitizeSections(
-        extractJson(text),
-        context.memberNames,
-        idOf,
-      );
+      const { byLabel } = annotationRefs(context.annotations);
+      const { sections, droppedForRefs, droppedForAttribution } =
+        sanitizeSections(extractJson(text), context.memberNames, byLabel);
       if (sections.every((section) => section.items.length === 0)) {
+        const dropped = droppedForRefs + droppedForAttribution;
         throw new ConvexError(
-          droppedForRefs > 0
-            ? `The synthesis came back citing annotations that aren't in this session (${droppedForRefs} ${droppedForRefs === 1 ? "item" : "items"} dropped). Nothing has been saved — try again.`
+          dropped > 0
+            ? `The synthesis came back without anything we could check against the lab's annotations — ${dropped} ${dropped === 1 ? "item cited" : "items cited"} the wrong annotations or credited the wrong member. Nothing has been saved — try again.`
             : "The synthesis came back with nothing traceable to the lab's annotations. Nothing has been saved.",
         );
       }
@@ -754,6 +799,7 @@ export const generate = action({
         sessionId: args.sessionId,
         model,
         sections,
+        lease,
       });
     } catch (error) {
       // `store` releases the claim on the way through; every other exit is
@@ -764,6 +810,7 @@ export const generate = action({
       try {
         await ctx.runMutation(internal.synthesis.releaseGeneration, {
           sessionId: args.sessionId,
+          lease,
         });
       } catch (releaseError) {
         console.error("Failed to release the synthesis lease:", releaseError);
@@ -775,19 +822,26 @@ export const generate = action({
 });
 
 /**
- * Take the session's generation lease, or refuse.
+ * Take the session's generation lease, or refuse. Returns the lease token.
  *
  * Generation is the one thing here that costs money and time outside a
  * transaction, and the button that starts it is a button. Two clicks — or two
  * people — would run two calls and race to overwrite one row with whichever
- * finished last. The lease is a timestamp so that a run which dies without
- * releasing it expires on its own; without that, one crashed action would make
- * a session permanently unsynthesizable, which is a worse failure than a
- * double call.
+ * finished last.
+ *
+ * The lease expires so that a run which dies without releasing it does not
+ * make the session permanently unsynthesizable — a worse failure than a double
+ * call. But an expiring lease means a slow run can find itself holding one
+ * that someone else has since taken, so the lease is a *token* as well as a
+ * timestamp. The token is minted here and presented by every later write, and
+ * `store` and `releaseGeneration` do nothing at all when the session is
+ * holding a different one. Without it the first run's completion path would
+ * clear the second run's lease and overwrite the second run's synthesis, which
+ * is exactly the outcome the lease exists to prevent.
  */
 export const claimGeneration = internalMutation({
   args: { sessionId: v.id("sessions") },
-  returns: v.null(),
+  returns: v.string(),
   handler: async (ctx, args) => {
     const { session } = await requireManageableSession(ctx, args.sessionId);
     const now = Date.now();
@@ -797,20 +851,36 @@ export const claimGeneration = internalMutation({
         "A synthesis for this session is already being written. Give it a minute.",
       );
     }
-    await ctx.db.patch(args.sessionId, { synthesisGeneratingAt: now });
-    return null;
+    const lease = crypto.randomUUID();
+    await ctx.db.patch(args.sessionId, {
+      synthesisGeneratingAt: now,
+      synthesisGeneratingLease: lease,
+    });
+    return lease;
   },
 });
 
-/** Give the lease back after a run that produced nothing. */
+/** Does the session still belong to the run presenting this token? */
+function holdsLease(session: Doc<"sessions">, lease: string): boolean {
+  return session.synthesisGeneratingLease === lease;
+}
+
+/**
+ * Give the lease back after a run that produced nothing.
+ *
+ * A no-op when the session has moved on to another run's lease: the failure
+ * being cleaned up here is this run's, and clearing somebody else's claim
+ * would hand a third run the session while the second is still working.
+ */
 export const releaseGeneration = internalMutation({
-  args: { sessionId: v.id("sessions") },
+  args: { sessionId: v.id("sessions"), lease: v.string() },
   returns: v.null(),
   handler: async (ctx, args) => {
     const { session } = await requireManageableSession(ctx, args.sessionId);
-    if (session.synthesisGeneratingAt !== undefined) {
+    if (holdsLease(session, args.lease)) {
       await ctx.db.patch(args.sessionId, {
         synthesisGeneratingAt: undefined,
+        synthesisGeneratingLease: undefined,
       });
     }
     return null;
@@ -827,12 +897,20 @@ export const releaseGeneration = internalMutation({
  * Re-generating replaces the row and leaves the status alone — the transition
  * is `ended → synthesized` and nothing else, so a second run on an already
  * synthesized session is a refresh, not a state change.
+ *
+ * The write is refused outright if the session is no longer holding this run's
+ * lease. A run that overran its three minutes has been superseded: whatever it
+ * is carrying was written against material the newer run has already re-read,
+ * and letting it land would overwrite a fresher synthesis with a staler one
+ * and clear a lease it does not own. It refuses rather than returning quietly
+ * because the caller is about to tell somebody their synthesis is ready.
  */
 export const store = internalMutation({
   args: {
     sessionId: v.id("sessions"),
     model: v.string(),
     sections: v.array(synthesisSection),
+    lease: v.string(),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
@@ -843,6 +921,11 @@ export const store = internalMutation({
     if (session.status !== "ended" && session.status !== "synthesized") {
       throw new ConvexError(
         "A session can only be synthesized once it has ended.",
+      );
+    }
+    if (!holdsLease(session, args.lease)) {
+      throw new ConvexError(
+        "This synthesis took long enough that another run took over the session. Nothing has been saved — the newer run's write-up is the one to wait for.",
       );
     }
 
@@ -866,9 +949,10 @@ export const store = internalMutation({
 
     // The run that got here is finished; the lease goes back in the same
     // transaction as the write it was protecting.
-    if (session.synthesisGeneratingAt !== undefined) {
-      await ctx.db.patch(args.sessionId, { synthesisGeneratingAt: undefined });
-    }
+    await ctx.db.patch(args.sessionId, {
+      synthesisGeneratingAt: undefined,
+      synthesisGeneratingLease: undefined,
+    });
 
     if (session.status === "ended") {
       await ctx.db.patch(args.sessionId, { status: "synthesized" });

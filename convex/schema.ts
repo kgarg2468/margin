@@ -411,6 +411,15 @@ export default defineSchema({
      * session that can never be synthesized again.
      */
     synthesisGeneratingAt: v.optional(v.number()),
+    /**
+     * Which run holds that claim.
+     *
+     * The timestamp alone is not enough, because the lease expires: a run that
+     * overran it would come back and clear — or overwrite — the work of the
+     * run that legitimately replaced it. Every write in the generation path
+     * presents this token and does nothing if the session is holding another.
+     */
+    synthesisGeneratingLease: v.optional(v.string()),
     startedAt: v.optional(v.number()),
     endedAt: v.optional(v.number()),
     cancelledAt: v.optional(v.number()),
