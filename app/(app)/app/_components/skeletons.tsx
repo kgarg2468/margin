@@ -7,11 +7,23 @@ import { skeletonClass } from "@/lib/ui";
  * over a sans meta line, ruled apart — so one ghost fits all of them. The
  * blocks breathe (see `margin-breathe`) with a small stagger down the page,
  * and the whole thing is one `status` region so a screen reader hears
- * "Loading" once, not a shape at a time.
+ * "Loading" once, not a shape at a time. `standalone` is how `PageSkeleton`
+ * composes it without nesting a second status region inside its own.
  */
-export function ListSkeleton({ rows = 3 }: { rows?: number }) {
+export function ListSkeleton({
+  rows = 3,
+  standalone = true,
+}: {
+  rows?: number;
+  standalone?: boolean;
+}) {
   return (
-    <div role="status" aria-label="Loading" className="flex flex-col">
+    <div
+      {...(standalone
+        ? { role: "status", "aria-label": "Loading" }
+        : { "aria-hidden": true })}
+      className="flex flex-col"
+    >
       {Array.from({ length: rows }, (_, i) => (
         <div
           key={i}
@@ -46,7 +58,7 @@ export function PageSkeleton() {
           style={{ animationDelay: "70ms" }}
         />
       </div>
-      <ListSkeleton rows={3} />
+      <ListSkeleton rows={3} standalone={false} />
     </div>
   );
 }
