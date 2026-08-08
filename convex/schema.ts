@@ -209,13 +209,20 @@ export default defineSchema({
     .index("by_user", ["userId"])
     .index("by_lab_and_user", ["labId", "userId"]),
 
-  /** A shareable 8-character code that grants `member` access to one lab; reusable until it expires or is revoked. */
+  /** A shareable 8-character code that grants `member` access to one lab; reusable until it expires, fills up, or is revoked. */
   invites: defineTable({
     code: v.string(),
     labId: v.id("labs"),
     createdBy: v.id("users"),
     expiresAt: v.number(),
-    usedBy: v.array(v.id("users")),
+    /**
+     * A counter, not a roster. *Who* redeemed a code is already a
+     * `member.joined` fact in the ledger with full provenance; duplicating it
+     * as an array here only bought an unbounded field on a hot document.
+     */
+    useCount: v.number(),
+    /** Redemptions are refused past this. A code is a credential, not a URL. */
+    maxUses: v.number(),
     revokedAt: v.optional(v.number()),
   })
     .index("by_code", ["code"])

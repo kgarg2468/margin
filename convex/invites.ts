@@ -1,4 +1,5 @@
 import { ConvexError, v } from "convex/values";
+import type { Doc } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
 import { mutation, query } from "./_generated/server";
 import { getMembership, requirePi, requireUserId } from "./lib/authz";
@@ -14,6 +15,9 @@ const CODE_LENGTH = 8;
 const DEFAULT_TTL_DAYS = 14;
 const MAX_TTL_DAYS = 90;
 const DAY_MS = 24 * 60 * 60 * 1000;
+/** A lab is a research group, not a mailing list — 25 covers the big ones. */
+const DEFAULT_MAX_USES = 25;
+const MAX_MAX_USES = 200;
 
 function randomCode(): string {
   const bytes = new Uint8Array(CODE_LENGTH);
@@ -44,15 +48,26 @@ async function generateUniqueCode(ctx: MutationCtx): Promise<string> {
   throw new ConvexError("Could not generate an invite code. Please try again.");
 }
 
+/** A code admits people only while it is unrevoked, unexpired, and unfilled. */
+function isLive(invite: Doc<"invites">, now: number): boolean {
+  return (
+    invite.revokedAt === undefined &&
+    invite.expiresAt > now &&
+    invite.useCount < invite.maxUses
+  );
+}
+
 /** Mint a shareable join code for a lab. PI only. */
 export const createInvite = mutation({
   args: {
     labId: v.id("labs"),
     ttlDays: v.optional(v.number()),
+    maxUses: v.optional(v.number()),
   },
   returns: v.object({
     code: v.string(),
     expiresAt: v.number(),
+    maxUses: v.number(),
   }),
   handler: async (ctx, args) => {
     const membership = await requirePi(ctx, args.labId);
@@ -64,6 +79,17 @@ export const createInvite = mutation({
       );
     }
 
+    const maxUses = args.maxUses ?? DEFAULT_MAX_USES;
+    if (
+      !Number.isInteger(maxUses) ||
+      maxUses < 1 ||
+      maxUses > MAX_MAX_USES
+    ) {
+      throw new ConvexError(
+        `An invite code can admit between 1 and ${MAX_MAX_USES} people.`,
+      );
+    }
+
     const code = await generateUniqueCode(ctx);
     const expiresAt = Date.now() + ttlDays * DAY_MS;
 
@@ -72,7 +98,8 @@ export const createInvite = mutation({
       labId: args.labId,
       createdBy: membership.userId,
       expiresAt,
-      usedBy: [],
+      useCount: 0,
+      maxUses,
     });
 
     await recordEvent(ctx, {
@@ -82,7 +109,7 @@ export const createInvite = mutation({
       inviteId,
     });
 
-    return { code, expiresAt };
+    return { code, expiresAt, maxUses };
   },
 });
 
@@ -94,7 +121,8 @@ export const listInvites = query({
       _id: v.id("invites"),
       code: v.string(),
       expiresAt: v.number(),
-      usedCount: v.number(),
+      useCount: v.number(),
+      maxUses: v.number(),
     }),
   ),
   handler: async (ctx, args) => {
@@ -107,13 +135,14 @@ export const listInvites = query({
       .collect();
 
     return invites
-      .filter((invite) => invite.revokedAt === undefined && invite.expiresAt > now)
+      .filter((invite) => isLive(invite, now))
       .sort((a, b) => b._creationTime - a._creationTime)
       .map((invite) => ({
         _id: invite._id,
         code: invite.code,
         expiresAt: invite.expiresAt,
-        usedCount: invite.usedBy.length,
+        useCount: invite.useCount,
+        maxUses: invite.maxUses,
       }));
   },
 });
@@ -143,13 +172,9 @@ export const redeemInvite = mutation({
       .withIndex("by_code", (q) => q.eq("code", code))
       .unique();
 
-    // Same message for "wrong code" and "dead code" — an invite code should
-    // not be an oracle for which labs exist.
-    if (
-      invite === null ||
-      invite.revokedAt !== undefined ||
-      invite.expiresAt <= Date.now()
-    ) {
+    // Same message for "wrong code", "expired", "revoked", and "full" — an
+    // invite code should not be an oracle for which labs exist.
+    if (invite === null || !isLive(invite, Date.now())) {
       throw new ConvexError("That invite code is not valid.");
     }
 
@@ -170,9 +195,7 @@ export const redeemInvite = mutation({
       joinedAt: Date.now(),
     });
 
-    if (!invite.usedBy.includes(userId)) {
-      await ctx.db.patch(invite._id, { usedBy: [...invite.usedBy, userId] });
-    }
+    await ctx.db.patch(invite._id, { useCount: invite.useCount + 1 });
 
     await recordEvent(ctx, {
       labId: invite.labId,

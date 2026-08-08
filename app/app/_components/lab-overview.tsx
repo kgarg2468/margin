@@ -111,8 +111,8 @@ function Invites({ lab }: { lab: LabSummary }) {
     <section className="flex flex-col gap-5">
       <h2 className={eyebrowClass}>Invite codes</h2>
       <p className="max-w-prose font-serif text-base leading-relaxed text-ink-muted">
-        Anyone with a live code can join as a member. Codes last 14 days and can
-        be used by more than one person.
+        Anyone with a live code can join as a member. Codes last 14 days, admit
+        up to 25 people, and can be revoked at any time.
       </p>
 
       {invites === undefined ? (
@@ -132,7 +132,8 @@ function Invites({ lab }: { lab: LabSummary }) {
                 {invite.code}
               </code>
               <span className="font-sans text-xs text-ink-faint">
-                {invite.usedCount} used · expires {formatDate(invite.expiresAt)}
+                {invite.useCount} of {invite.maxUses} used · expires{" "}
+                {formatDate(invite.expiresAt)}
               </span>
             </li>
           ))}
