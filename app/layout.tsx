@@ -1,7 +1,5 @@
-import { ConvexAuthNextjsServerProvider } from "@convex-dev/auth/nextjs/server";
 import type { Metadata, Viewport } from "next";
 import { Inter, Source_Serif_4 } from "next/font/google";
-import { ConvexClientProvider } from "./convex-client-provider";
 import "./globals.css";
 
 const sourceSerif = Source_Serif_4({
@@ -42,27 +40,26 @@ export const viewport: Viewport = {
   ],
 };
 
+/**
+ * Document shell only — fonts, tokens, metadata. Deliberately free of any
+ * provider that reads the request, so the marketing route group under
+ * `(marketing)` can be prerendered at build time. Everything that needs a
+ * session lives under `(app)`, which mounts the Convex providers itself.
+ */
 export default function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
   return (
-    // ConvexAuthNextjsServerProvider reads the auth cookie on the server so
-    // the client starts up already knowing whether there is a session.
-    <ConvexAuthNextjsServerProvider>
-      {/* The font variables live on <html> so `--font-serif` (declared on
-          :root in globals.css) can resolve them; on <body> they would be out
-          of scope. */}
-      <html
-        lang="en"
-        className={`${sourceSerif.variable} ${inter.variable}`}
-        suppressHydrationWarning
-      >
-        <body className="antialiased">
-          <ConvexClientProvider>{children}</ConvexClientProvider>
-        </body>
-      </html>
-    </ConvexAuthNextjsServerProvider>
+    // The font variables live on <html> so `--font-serif` (declared on :root
+    // in globals.css) can resolve them; on <body> they would be out of scope.
+    <html
+      lang="en"
+      className={`${sourceSerif.variable} ${inter.variable}`}
+      suppressHydrationWarning
+    >
+      <body className="antialiased">{children}</body>
+    </html>
   );
 }
