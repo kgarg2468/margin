@@ -1,113 +1,123 @@
-# margin
+# Margin
 
-**The collective intelligence layer for research groups.**
+<p align="center">
+  <img src="docs/assets/brand/margin-wordmark.png" alt="Margin" width="220">
+</p>
 
-Margin is a collaborative journal-club and annotation platform. A lab, reading
-group, or research team brings in the papers it is reading, annotates them
-together in a shared margin, and keeps the discussion attached to the text — so
-the questions, objections, and context a group builds up survive past the
-meeting they were raised in.
+<p align="center">
+  <strong>The collective intelligence layer for research groups.</strong>
+</p>
 
-This repo is the web app. It is early: the full data model, email/password
-auth, labs with invite codes, and the authenticated app shell are in place.
-Papers, the reader, sessions, and digests come next.
+<p align="center">
+  Margin is a journal club platform where a lab annotates papers together in a shared margin, and the typed notes it leaves become a durable, queryable record of what the group actually argued about.
+</p>
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the design — the
-append-only Ledger, passage anchoring, the digest policy, and the privacy
-constitution.
+<p align="center">
+  <a href="https://margin-ochre-three.vercel.app/"><strong>Live website</strong></a>
+</p>
 
-## Stack
+<p align="center">
+  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5.9-3B2F2A?style=for-the-badge&logo=typescript&logoColor=white">
+  <img alt="Next.js" src="https://img.shields.io/badge/Next.js-15-4068A0?style=for-the-badge&logo=nextdotjs&logoColor=white">
+  <img alt="React" src="https://img.shields.io/badge/React-19-3B2F2A?style=for-the-badge&logo=react&logoColor=white">
+  <img alt="Tailwind" src="https://img.shields.io/badge/Tailwind-v4-4068A0?style=for-the-badge&logo=tailwindcss&logoColor=white">
+  <img alt="Convex" src="https://img.shields.io/badge/Convex-Backend-3B2F2A?style=for-the-badge&logo=convex&logoColor=white">
+  <img alt="OpenAI" src="https://img.shields.io/badge/OpenAI-Synthesis-4068A0?style=for-the-badge">
+  <img alt="pdf.js" src="https://img.shields.io/badge/pdf.js-Reader-3B2F2A?style=for-the-badge">
+  <img alt="Playwright" src="https://img.shields.io/badge/Playwright-CI-4068A0?style=for-the-badge">
+  <img alt="Vercel" src="https://img.shields.io/badge/Vercel-Frontend-3B2F2A?style=for-the-badge&logo=vercel&logoColor=white">
+</p>
 
-| Layer     | Choice                                               |
-| --------- | ---------------------------------------------------- |
-| Framework | Next.js 15 (App Router) + React 19, Turbopack        |
-| Language  | TypeScript (strict)                                  |
-| Styling   | Tailwind CSS v4 with semantic CSS custom properties  |
-| Backend   | Convex — database, file storage, actions, scheduler  |
-| Auth      | Convex Auth, Password provider (email + password)    |
-| Fonts     | Source Serif 4 (reading/headings), Inter (UI chrome) |
+## Product
 
-## Getting started
+Margin is where a research group runs its journal club. A lab brings in a paper by DOI, annotates it together in a shared margin before the meeting, and runs the discussion off the passages it flagged. Every note carries a type — hypothesis, method note, critique, definition, connection, open question — so the reading leaves a structured record instead of a drawer of highlights, and that record is what the next session, the next member, and the write-up are built from. The model layer only ever quotes and attributes what the lab already said.
 
-You need two terminals: one running the Convex backend, one running Next.js.
+<table>
+  <tr>
+    <td width="50%"><img src="docs/assets/screenshots/landing-light.png" alt="Margin landing page in light mode"></td>
+    <td width="50%"><img src="docs/assets/screenshots/landing-dark.png" alt="Margin landing page in dark mode"></td>
+  </tr>
+</table>
 
-```bash
-npm install
+The landing page, in both color schemes.
 
-# terminal 1 — provisions the deployment on first run, then watches convex/
-# and keeps convex/_generated/ up to date
-npx convex dev
+<img src="docs/assets/screenshots/reader.png" alt="The reader, showing anchored passages and the typed margin rail">
 
-# terminal 2
-npm run dev
+The reader: five typed notes from two members, anchored to four sentences of one abstract.
+
+<img src="docs/assets/screenshots/composer.png" alt="The annotation composer open on a live text selection">
+
+Letting go of a selection opens the composer, with the type chips and the visibility choice shown rather than applied quietly.
+
+<img src="docs/assets/screenshots/session-live.png" alt="The live session projector view with a populated typed passage board">
+
+The live session: the screen at the front of the room, built from the passages the lab flagged.
+
+<img src="docs/assets/screenshots/synthesis.png" alt="The generated session synthesis, with attribution and citations">
+
+The write-up, generated once the session ends — every claim quoted from an annotation and attributed to whoever wrote it.
+
+## First Session
+
+| Step | A lab's first journal club | Margin output |
+| --- | --- | --- |
+| Ingest | Someone pastes a DOI | Crossref record, open-access PDF, per-page extracted text layer |
+| Annotate | Members read into the margin beforehand | Typed marginalia anchored to passages, visibility-controlled |
+| Prep | Two hours before the meeting | Digest of gold collisions, passage-addressed, capped at 5 |
+| Discuss | The meeting runs off what the lab flagged | Live typed passage board; private notes never shown |
+| Record | The session ends | Quote-and-attribute synthesis, sectioned by annotation type |
+
+```mermaid
+flowchart LR
+  DOI["DOI"] --> Text["Extracted text layer"]
+  Text --> Notes["Typed marginalia"]
+  Notes --> Ledger["Append-only ledger"]
+  Ledger --> Digest["Boundary digest, capped at 5"]
+  Digest --> Board["Live passage board"]
+  Board --> Writeup["Quote-and-attribute synthesis"]
 ```
 
-Then open http://localhost:3000.
+## Architecture
 
-`npx convex dev` is interactive the first time: it creates the Convex project,
-writes `convex.json`, and puts `CONVEX_DEPLOYMENT` and `NEXT_PUBLIC_CONVEX_URL`
-into `.env.local`. See [`.env.example`](.env.example) for what ends up there.
+| Layer | Stack | Role |
+| --- | --- | --- |
+| Frontend | Next.js 15 App Router, React 19, Tailwind v4 | Landing, reader, margin rail, session projector, session record |
+| Backend | Convex — database, actions, scheduler, file storage | Papers, annotations, sessions, digests, stored PDFs |
+| Auth | Convex Auth, password provider | Email and password hashed on the deployment; every lab-scoped read authorized against `memberships` |
+| Ledger | Append-only `events` table | The provenance record: every meaningful act in a lab, never updated, never deleted |
+| Anchoring | W3C-style redundant selectors, fuzzy re-anchoring | Annotations survive PDF variants; drift is surfaced rather than silently moved; 78 unit tests |
+| Digests | Deterministic typed-pair collision detection | Simulation-validated cap-5 policy, per-recipient staleness cursors, no model in the loop |
+| Synthesis | OpenAI Responses API, structured outputs | Sectioned write-up; attribution derived from the citations, never taken from the model |
+| CI | GitHub Actions, Vitest, Playwright, Greptile | Lint, types, 149 unit tests, backend-free browser smoke, privacy-constitution guard, review |
 
-Then set up auth on the deployment once — this generates the RS256 key pair
-Convex Auth signs its JWTs with and sets `JWT_PRIVATE_KEY`, `JWKS`, and
-`SITE_URL`:
-
-```bash
-npx @convex-dev/auth
+```mermaid
+flowchart TD
+  Reader["Reader"] --> Annotations["Typed annotations"]
+  Annotations --> Ledger["Append-only ledger"]
+  Ledger --> Collisions["Typed-pair collision detection"]
+  Collisions --> Digests["Per-recipient digests, hard cap 5"]
+  Digests --> Prep["Session prep"]
+  Prep --> Session["Live session"]
+  Session --> Synthesis["Synthesis, OpenAI Responses API"]
+  Synthesis -->|"quotes and attributes, never generates claims"| Record["Session record"]
+  Privacy["Privacy constitution: no read tracking. Evidence is only what members write."] -.-> Reader
+  Privacy -.-> Ledger
+  Privacy -.-> Synthesis
 ```
 
-Other scripts:
+## What It Proves
 
-```bash
-npm run build   # production build
-npm run start   # serve the production build
-npm run lint    # eslint
-npx tsc --noEmit
-```
+| Product question | Margin answer |
+| --- | --- |
+| Can an annotation survive a different copy of the same PDF? | Yes. Every anchor carries a text-quote selector with prefix and suffix context alongside position offsets, and re-anchors fuzzily; when a passage moves, the note says so with a drift badge instead of pointing at the wrong sentence. |
+| Can a lab see where it is converging without surveillance? | Yes. Convergence is computed from typed-pair collisions between notes members chose to write. There is no read tracking anywhere in the system, and a CI schema guard fails the build if any is added. |
+| Can AI be trusted inside scholarship? | Yes. The synthesis is constrained to quote and attribute existing annotations rather than generate claims, and attribution is derived from the citations it emits, so a stored name cannot be one the model chose. |
+| Can delivery avoid notification fatigue? | Yes. Digests are computed at boundaries rather than on write, addressed per recipient from a staleness cursor, and hard-capped at five items — a shape validated by simulation across lab sizes 5 to 25. |
+| Is the privacy stance mechanical rather than editorial? | Yes. The guard reads `convex/schema.ts` back through Convex's own validator introspection, so a `reads` table, a `viewedAt` field, or a read event type is a failing build rather than a broken promise. |
 
-### Generated Convex types
+## View
 
-`convex/_generated/` is committed, because `tsc --noEmit` in CI has no
-deployment to generate it from. `npx convex dev` rewrites it whenever
-`convex/` changes; if you need to regenerate it without a deployment, run
-`npx convex codegen`.
-
-## Design system
-
-Design tokens live in [`app/globals.css`](app/globals.css). The visual target is
-a well-kept lab notebook: warm sand paper, espresso ink, a single Wedgwood-blue
-accent for anything interactive, and a muted violet reserved for synthesis
-surfaces. Dark mode is a deep warm brown-black with sand-toned ink.
-
-Tokens are semantic rather than literal — components should use `bg-page`,
-`bg-surface`, `text-ink`, `text-ink-muted`, `border-rule`, `bg-accent`,
-`text-secondary`, and `bg-highlight` instead of raw hex, so themes flip for
-free. Light/dark follows `prefers-color-scheme`; adding `.dark` to `<html>`
-forces dark mode if we later ship an explicit toggle.
-
-Typography is serif-led: `font-serif` for anything you read or write,
-`font-sans` for chrome, labels, and controls.
-
-## Layout
-
-```
-app/             # root layout (fonts, tokens, metadata), global styles, brand assets
-  (marketing)/   # the landing page — no providers, so it prerenders as a static file
-  (app)/         # mounts the Convex + auth providers, which makes everything below dynamic
-    signin/      # email + password sign-in / sign-up
-    app/         # the authenticated shell (sidebar, lab overview, onboarding)
-convex/          # Convex schema, auth config, and backend functions
-  lib/           # authz + ledger helpers, not Convex functions themselves
-  _generated/    # generated types, committed
-docs/            # architecture notes
-lib/             # shared front-end helpers
-middleware.ts    # redirects /app <-> /signin based on session
-```
-
-The two route groups exist to split rendering modes. `ConvexAuthNextjsServerProvider`
-reads the auth cookie on the server, which opts every route beneath it into dynamic
-rendering — correct for `/signin` and `/app`, wrong for a landing page with no
-authenticated content. So the providers moved out of the root layout and into
-`(app)/layout.tsx`, and `middleware.ts` matches only `/signin` and `/app`. Route
-groups are invisible in the URL, so none of the paths changed; `/` is now `○` static
-and is served with no `Set-Cookie`.
+| Link | URL |
+| --- | --- |
+| Live website | https://margin-ochre-three.vercel.app/ |
+| YouTube walkthrough | Coming soon |
