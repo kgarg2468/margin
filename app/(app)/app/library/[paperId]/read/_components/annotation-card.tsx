@@ -266,6 +266,8 @@ export function AnnotationCard({
                   ? "Withdraw — the replies stay"
                   : "Delete — nothing is kept"
               }
+              // The edit form around this already has a Cancel.
+              cancelLabel="Keep it"
               run={() =>
                 run(async () => {
                   await remove({ annotationId: annotation._id });

@@ -43,12 +43,20 @@ const toneClass = {
 export function ConfirmAction({
   label,
   confirmLabel,
+  cancelLabel = "Cancel",
   tone = "accent",
   disabled = false,
   run,
 }: {
   label: string;
   confirmLabel: string;
+  /**
+   * Only worth setting where the surrounding UI already has a Cancel — an
+   * armed note card has one for the edit it is sitting inside, and two
+   * controls with the same accessible name in the same card is a coin toss
+   * for anyone not looking at it.
+   */
+  cancelLabel?: string;
   tone?: keyof typeof toneClass;
   disabled?: boolean;
   run: () => Promise<void>;
@@ -94,7 +102,7 @@ export function ConfirmAction({
         className={`${classes.idle} tap-target`}
         onClick={() => setArmed(false)}
       >
-        Cancel
+        {cancelLabel}
       </button>
     </span>
   );
