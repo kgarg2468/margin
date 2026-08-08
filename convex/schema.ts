@@ -403,7 +403,7 @@ export default defineSchema({
      * When a synthesis run claimed this session, if one currently has it.
      *
      * Generation is an action: it leaves the transaction, spends up to two
-     * minutes and several thousand tokens at the Anthropic API, and comes back
+     * minutes and several thousand tokens at the model provider, and comes back
      * to overwrite one row. Two people pressing the button — or one person
      * pressing it twice — would pay for that twice and race over the result.
      * The marker is a timestamp rather than a flag because an action that dies

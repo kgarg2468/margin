@@ -91,22 +91,50 @@ const HEADINGS: Readonly<Record<SectionKey, string>> = Object.fromEntries(
   SECTIONS.map((s) => [s.key, s.heading]),
 ) as Record<SectionKey, string>;
 
-/** Default model. Overridable per deployment with `SYNTHESIS_MODEL`. */
-const DEFAULT_MODEL = "claude-sonnet-5";
+/**
+ * Default model. Overridable per deployment with `SYNTHESIS_MODEL`.
+ *
+ * The flagship tier, on a call that happens once per session and is read by
+ * everyone in the lab afterwards. This is the cheapest place in the product to
+ * be generous and the most expensive place to be wrong: the whole feature is a
+ * claim that the write-up can be trusted, and a mini tier saves fractions of a
+ * cent per meeting against that.
+ */
+const DEFAULT_MODEL = "gpt-5.6-sol";
 
-/** Enough for five sections of cited items and not much rope beyond that. */
-const MAX_TOKENS = 4000;
+/**
+ * The output budget, reasoning included.
+ *
+ * `max_output_tokens` covers reasoning tokens as well as visible ones, so this
+ * is not the four thousand the write-up needs — it is that plus room for the
+ * model to think first. Set too close to the visible requirement, a run can
+ * spend the entire budget reasoning and come back `incomplete` with nothing in
+ * it, having been billed for the privilege.
+ */
+const MAX_OUTPUT_TOKENS = 16_000;
+
+/**
+ * How hard the model thinks before writing.
+ *
+ * Low rather than off. The task is extraction under a constraint, not
+ * open-ended reasoning, and the budget should mostly go to the write-up — but
+ * deciding which of four hundred annotations back a given item, and which
+ * names those annotations carry, is a small judgment rather than a
+ * transcription, and it is the judgment the whole feature rests on.
+ */
+const REASONING_EFFORT = "low";
 
 const MAX_ANNOTATIONS = 400;
 
-const ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages";
+const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 
 /**
  * How long one call is allowed to take.
  *
- * Long enough for four thousand tokens over a full session's material, short
- * enough that a hung connection surfaces as an error a person can retry rather
- * than a request that sits there until the action's own limit kills it.
+ * Long enough for a reasoning pass and several thousand tokens over a full
+ * session's material, short enough that a hung connection surfaces as an error
+ * a person can retry rather than a request that sits there until the action's
+ * own limit kills it.
  */
 const REQUEST_TIMEOUT_MS = 120_000;
 
@@ -651,38 +679,97 @@ export function sanitizeSections<A extends string = string>(
  * The call
  * ---------------------------------------------------------------------- */
 
-type AnthropicResponse = {
-  content?: { type?: string; text?: string }[];
-  stop_reason?: string;
+/**
+ * The response contract, as a JSON schema the API will enforce for us.
+ *
+ * Built from `SECTIONS` rather than written out, so the keys the model is
+ * allowed to emit cannot drift from the keys `sanitizeSections` accepts. This
+ * is belt to the parser's braces: `extractJson` and the sanitizer still run
+ * and still assume nothing, because a schema constrains shape and has no
+ * opinion whatever about whether an item's citations are real.
+ */
+const RESPONSE_SCHEMA = {
+  type: "object",
+  properties: {
+    sections: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          key: { type: "string", enum: SECTIONS.map((s) => s.key) },
+          items: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                text: { type: "string" },
+                attribution: { type: "array", items: { type: "string" } },
+                refs: { type: "array", items: { type: "string" } },
+              },
+              required: ["text", "attribution", "refs"],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ["key", "items"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["sections"],
+  additionalProperties: false,
+} as const;
+
+/**
+ * The Responses API payload, in the shape plain `fetch` actually receives it.
+ *
+ * Note `output` rather than `output_text`: the flat convenience property is
+ * something the SDKs assemble, and a run that spends its whole budget
+ * reasoning returns an `output` array with no message in it at all. Reading
+ * the array is the only way to tell that apart from a model that answered with
+ * nothing.
+ */
+type OpenAIResponse = {
+  status?: string;
+  incomplete_details?: { reason?: string } | null;
+  error?: { message?: string } | null;
+  output?: {
+    type?: string;
+    content?: { type?: string; text?: string; refusal?: string }[];
+  }[];
 };
 
-async function callAnthropic(
+async function callModel(
   model: string,
   apiKey: string,
   userPrompt: string,
 ): Promise<string> {
   let response: Response;
   try {
-    response = await fetch(ANTHROPIC_MESSAGES_URL, {
+    response = await fetch(OPENAI_RESPONSES_URL, {
       method: "POST",
       headers: {
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
+        authorization: `Bearer ${apiKey}`,
         "content-type": "application/json",
       },
       body: JSON.stringify({
         model,
-        max_tokens: MAX_TOKENS,
-        // Off deliberately: thinking shares the output budget, and this task is
-        // extraction under a constraint rather than reasoning. The budget should
-        // all go to the write-up.
-        thinking: { type: "disabled" },
-        system: SYSTEM_PROMPT,
-        messages: [{ role: "user", content: userPrompt }],
+        max_output_tokens: MAX_OUTPUT_TOKENS,
+        reasoning: { effort: REASONING_EFFORT },
+        instructions: SYSTEM_PROMPT,
+        input: userPrompt,
+        text: {
+          format: {
+            type: "json_schema",
+            name: "lab_synthesis",
+            strict: true,
+            schema: RESPONSE_SCHEMA,
+          },
+        },
       }),
       // Without this the request has no upper bound of its own: a connection
       // that stalls holds the action open until the platform kills it, and the
-      // session's generation marker with it.
+      // session's generation lease with it.
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch (error) {
@@ -696,8 +783,8 @@ async function callAnthropic(
   }
 
   if (!response.ok) {
-    // The body can carry the API key's org details; it goes to the deployment
-    // log, never to the caller.
+    // The body can carry account details; it goes to the deployment log, never
+    // to the caller.
     console.error(
       `Synthesis call failed: ${response.status} ${await response.text()}`,
     );
@@ -708,24 +795,40 @@ async function callAnthropic(
     );
   }
 
-  const payload = (await response.json()) as AnthropicResponse;
-  if (payload.stop_reason === "refusal") {
-    throw new ConvexError(
-      "The model declined to write this synthesis. Nothing has been saved.",
-    );
-  }
-  if (payload.stop_reason === "max_tokens") {
-    // The write-up ran out of budget mid-sentence. What came back is real but
-    // truncated — the JSON will not close, and even if it did the last section
-    // would be silently missing. Storing half a synthesis and calling it done
-    // is the one outcome worse than not having one.
+  const payload = (await response.json()) as OpenAIResponse;
+
+  if (
+    payload.status === "incomplete" &&
+    payload.incomplete_details?.reason === "max_output_tokens"
+  ) {
+    // The write-up ran out of budget — mid-sentence, or before it wrote a word
+    // if the reasoning pass ate the lot. Either way what came back is not the
+    // whole synthesis, and the JSON will not close. Storing half a synthesis
+    // and calling it done is the one outcome worse than not having one.
     throw new ConvexError(
       "This session has more discussion in it than one synthesis can hold. Nothing has been saved — try again after trimming the session, or synthesize it in parts.",
     );
   }
-  const text = (payload.content ?? [])
-    .filter((block) => block.type === "text" && typeof block.text === "string")
-    .map((block) => block.text)
+  if (payload.status === "failed" || payload.error != null) {
+    console.error(`Synthesis run failed: ${payload.error?.message ?? ""}`);
+    throw new ConvexError(
+      "The synthesis couldn't be generated right now. Try again.",
+    );
+  }
+
+  const parts = (payload.output ?? [])
+    .filter((item) => item.type === "message")
+    .flatMap((item) => item.content ?? []);
+  if (parts.some((part) => part.type === "refusal")) {
+    throw new ConvexError(
+      "The model declined to write this synthesis. Nothing has been saved.",
+    );
+  }
+  const text = parts
+    .filter(
+      (part) => part.type === "output_text" && typeof part.text === "string",
+    )
+    .map((part) => part.text)
     .join("");
   if (text.trim().length === 0) {
     throw new ConvexError(
@@ -747,7 +850,7 @@ export const generate = action({
   args: { sessionId: v.id("sessions") },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const apiKey = process.env.ANTHROPIC_API_KEY;
+    const apiKey = process.env.OPENAI_API_KEY;
     if (apiKey === undefined || apiKey.length === 0) {
       throw new ConvexError(
         "Synthesis isn't configured for this deployment yet.",
@@ -782,7 +885,7 @@ export const generate = action({
     });
 
     try {
-      const text = await callAnthropic(model, apiKey, buildUserPrompt(context));
+      const text = await callModel(model, apiKey, buildUserPrompt(context));
       const { byLabel } = annotationRefs(context.annotations);
       const { sections, droppedForRefs, droppedForAttribution } =
         sanitizeSections(extractJson(text), context.memberNames, byLabel);
