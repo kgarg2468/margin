@@ -77,6 +77,22 @@ describe("anchorOverlap", () => {
     const b = ann({ memberId: "ben", type: "note", pageIndex: 5, quote: "" });
     expect(anchorOverlap(a, b)).toBeNull();
   });
+
+  it("will not call two short identical selections the same passage", () => {
+    // "Figure 3" recurs; matching on it would manufacture collisions.
+    const a = ann({ memberId: "ana", type: "note", pageIndex: 2, quote: " Figure 3 " });
+    const b = ann({ memberId: "ben", type: "note", pageIndex: 5, quote: "Figure 3" });
+    expect(a.quote.trim().length).toBeLessThan(20);
+    expect(anchorOverlap(a, b)).toBeNull();
+  });
+
+  it("still falls back on a long identical selection", () => {
+    const quote = "attention is all you need, really";
+    expect(quote.length).toBeGreaterThanOrEqual(20);
+    const a = ann({ memberId: "ana", type: "note", pageIndex: 2, quote });
+    const b = ann({ memberId: "ben", type: "note", pageIndex: 5, quote });
+    expect(anchorOverlap(a, b)).toBe("quote");
+  });
 });
 
 describe("detectCollisions", () => {
@@ -199,7 +215,10 @@ describe("assembleDigest", () => {
     );
   });
 
-  it("names both members when the recipient is a bystander", () => {
+  it("does not promote a collision the recipient had no part in", () => {
+    // Ana and Ben converged on a passage. That is a real gold pair — but for
+    // Cara it is news about the lab, not news about her, so it coalesces
+    // instead of spending one of her five lines.
     const one = ann({ memberId: "ana", type: "hypothesis", createdAt: 10 });
     const two = ann({ memberId: "ben", type: "hypothesis", createdAt: 20 });
     const { items } = assembleDigest({
@@ -208,7 +227,47 @@ describe("assembleDigest", () => {
       delta: [one, two],
       paperTitles: titles,
     });
-    expect(items[0]?.line).toContain("Ana and Ben both left a hypothesis on the same passage");
+    expect(detectCollisions([one, two])).toHaveLength(1);
+    expect(items).toHaveLength(1);
+    expect(items[0]?.kind).toBe("coalesced");
+    expect(items[0]?.annotationIds).toEqual([one.id, two.id]);
+    expect(items[0]?.line).toBe(
+      "2 new annotations on Attention Is All You Need from 2 members — 2 hypotheses",
+    );
+  });
+
+  it("still promotes the same collision for the members who are in it", () => {
+    const one = ann({ memberId: "ana", type: "hypothesis", createdAt: 10 });
+    const two = ann({ memberId: "ben", type: "hypothesis", createdAt: 20 });
+    const { items } = assembleDigest({
+      recipientId: "ana",
+      pool: [one, two],
+      delta: [two],
+      paperTitles: titles,
+    });
+    expect(items[0]?.kind).toBe("collision");
+    expect(items[0]?.line).toContain("You and Ben both left a hypothesis on the same passage");
+  });
+
+  it("accepts precomputed collisions and ranks them the same way", () => {
+    const mine = ann({ memberId: "ana", type: "hypothesis", createdAt: 10 });
+    const theirs = ann({ memberId: "ben", type: "critique", createdAt: 20 });
+    const pool = [mine, theirs];
+    const detected = assembleDigest({
+      recipientId: "ana",
+      pool,
+      delta: [theirs],
+      paperTitles: titles,
+    });
+    const supplied = assembleDigest({
+      recipientId: "ana",
+      pool,
+      delta: [theirs],
+      paperTitles: titles,
+      // Handed in unsorted, as a whole-lab pass would produce it.
+      collisions: detectCollisions(pool).reverse(),
+    });
+    expect(supplied).toEqual(detected);
   });
 
   it("coalesces everything that isn't gold to one line per paper", () => {
@@ -283,23 +342,72 @@ describe("assembleDigest", () => {
     expect(items).toHaveLength(2);
   });
 
-  it("gives each new annotation at most one gold line", () => {
-    // Ben's hypothesis collides with a critique, a method note and another
-    // hypothesis. It should still be news exactly once.
-    const bens = ann({ memberId: "ben", type: "hypothesis", createdAt: 500 });
-    const pool = [
-      bens,
-      ann({ memberId: "ana", type: "critique", createdAt: 1 }),
-      ann({ memberId: "ana", type: "method-note", createdAt: 2 }),
-      ann({ memberId: "cara", type: "hypothesis", createdAt: 3 }),
-    ];
+  it("gives each new annotation at most one gold line, and says which", () => {
+    // Ben's hypothesis collides with two of Ana's annotations and with Cara's.
+    // Cara's is not Ana's business at all; of the two that are, the tie on
+    // recency breaks on id, so the critique is the one Ana hears about.
+    const bens = ann({ id: "ben-hypothesis", memberId: "ben", type: "hypothesis", createdAt: 500 });
+    const critique = ann({ id: "ana-critique", memberId: "ana", type: "critique", createdAt: 1 });
+    const method = ann({ id: "ana-method", memberId: "ana", type: "method-note", createdAt: 2 });
+    const caras = ann({ id: "cara-hypothesis", memberId: "cara", type: "hypothesis", createdAt: 3 });
+    const pool = [bens, critique, method, caras];
     const { items } = assembleDigest({
       recipientId: "ana",
       pool,
       delta: [bens],
       paperTitles: titles,
     });
-    expect(items.filter((item) => item.kind === "collision")).toHaveLength(1);
+    // Five gold pairs exist in the pool; exactly one becomes Ana's line.
+    expect(detectCollisions(pool)).toHaveLength(5);
+    const gold = items.filter((item) => item.kind === "collision");
+    expect(gold).toHaveLength(1);
+    expect(gold[0]?.pairType).toBe("critique x hypothesis");
+    expect(gold[0]?.annotationIds).toEqual([critique.id, bens.id]);
+    expect(gold[0]?.line).toContain("You critiqued the passage Ben hypothesised about");
+  });
+
+  it("promotes the most recent of a recipient's collisions when the cap bites", () => {
+    const mine = ann({ id: "mine", memberId: "ana", type: "hypothesis", createdAt: 1 });
+    const older = ann({ id: "older", memberId: "ben", type: "critique", createdAt: 100 });
+    const newer = ann({ id: "newer", memberId: "cara", type: "critique", createdAt: 200 });
+    const { items } = assembleDigest({
+      recipientId: "ana",
+      pool: [mine, older, newer],
+      delta: [older, newer],
+      paperTitles: titles,
+      cap: 1,
+    });
+    expect(items).toHaveLength(1);
+    expect(items[0]?.annotationIds).toEqual([mine.id, newer.id]);
+  });
+
+  it("counts dropped annotations, not dropped lines", () => {
+    const mine = ann({ memberId: "ana", type: "hypothesis", createdAt: 1 });
+    const gold = ann({ memberId: "ben", type: "critique", createdAt: 500 });
+    // One coalesced line for p2, hiding six annotations behind it.
+    const chatter = Array.from({ length: 6 }, (_, i) =>
+      ann({
+        memberId: "cara",
+        type: "note",
+        paperId: "p2",
+        start: 1000 + i * 10,
+        end: 1005 + i * 10,
+        quote: `chatter ${i}`,
+        createdAt: 900 + i,
+      }),
+    );
+    const { items, droppedCount } = assembleDigest({
+      recipientId: "ana",
+      pool: [mine, gold, ...chatter],
+      delta: [gold, ...chatter],
+      paperTitles: titles,
+      cap: 1,
+    });
+    expect(items).toHaveLength(1);
+    expect(items[0]?.kind).toBe("collision");
+    // The dropped p2 line stood for six annotations, and the recipient's own
+    // hypothesis inside the kept collision is not news to count.
+    expect(droppedCount).toBe(6);
   });
 
   it("falls back gracefully when a paper title is missing", () => {

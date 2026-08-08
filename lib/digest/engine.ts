@@ -14,7 +14,11 @@
  *    digest cannot hallucinate a connection that isn't in the data.
  * 2. Detection is at **passage** granularity. Paper-level co-annotation was
  *    measured at 6–12% precision and is not used.
- * 3. Gold pairs are promoted to individual, passage-addressed lines.
+ * 3. Gold pairs are promoted to individual, passage-addressed lines — but
+ *    **recipient-relative**: only when the recipient authored one of the two
+ *    colliding annotations, which is the sim's definition of a gold *event*
+ *    (RESULTS.md §4). A collision between two other members is real, but it is
+ *    news about the lab rather than news about you, so it coalesces.
  *    Everything else coalesces to **one line per paper**.
  * 4. **Hard cap of five items.** The simulation put gold retention at
  *    99.7–100% at that cap, which is the whole argument for it: the cap costs
@@ -115,6 +119,18 @@ export const MAX_DIGEST_ITEMS = 5;
 /** Longest quote we will inline in a digest line before eliding. */
 const MAX_QUOTE_CHARS = 100;
 
+/**
+ * Shortest quote that may stand in for a passage anchor on its own.
+ *
+ * The identical-quote fallback exists for one case: the same sentence at
+ * different offsets because two members are reading different PDFs of the same
+ * paper. Short selections are not that case — "the model", "Figure 3", "n = 40"
+ * recur all over a paper and across pages, and treating two of them as the same
+ * passage manufactures collisions out of coincidence. Twenty characters is
+ * roughly a clause: long enough that an exact match is evidence.
+ */
+const MIN_QUOTE_MATCH_CHARS = 20;
+
 /** Canonical matrix key for two types, order-free. */
 export function pairKey(a: AnnotationType, b: AnnotationType): string {
   return a <= b ? `${a} x ${b}` : `${b} x ${a}`;
@@ -128,10 +144,12 @@ export function pairKey(a: AnnotationType, b: AnnotationType): string {
  * - **range** — same paper, same page, and half-open `[start, end)` character
  *   ranges that intersect. Touching endpoints do not count; two people who
  *   highlighted adjacent sentences did not highlight the same sentence.
- * - **quote** — same paper and byte-identical selected text. This is the
- *   escape hatch for the case the redundant anchor exists for: the same
- *   sentence at different offsets, because one member is reading the preprint
- *   and the other the published PDF.
+ * - **quote** — same paper and byte-identical selected text, of at least
+ *   `MIN_QUOTE_MATCH_CHARS`. This is the escape hatch for the case the
+ *   redundant anchor exists for: the same sentence at different offsets,
+ *   because one member is reading the preprint and the other the published
+ *   PDF. The length floor is what keeps it from firing on a two-word selection
+ *   that happens to recur.
  *
  * Returns `null` when they are not the same passage.
  */
@@ -150,10 +168,26 @@ export function anchorOverlap(
     return "range";
   }
   const quote = a.quote.trim();
-  if (quote.length > 0 && quote === b.quote.trim()) {
+  if (quote.length >= MIN_QUOTE_MATCH_CHARS && quote === b.quote.trim()) {
     return "quote";
   }
   return null;
+}
+
+/**
+ * Deterministic collision order: newest collision first, id as the tiebreak.
+ *
+ * Shared by `detectCollisions` and `assembleDigest` so that a precomputed list
+ * handed in from the Convex layer is ranked exactly the same way as one the
+ * engine detected itself. Order decides which gold lines survive the cap, so it
+ * is not allowed to depend on where the list came from.
+ */
+function byRecency(x: Collision, y: Collision): number {
+  const yAt = Math.max(y.a.createdAt, y.b.createdAt);
+  const xAt = Math.max(x.a.createdAt, x.b.createdAt);
+  if (yAt !== xAt) return yAt - xAt;
+  if (x.a.id !== y.a.id) return x.a.id < y.a.id ? -1 : 1;
+  return x.b.id < y.b.id ? -1 : x.b.id > y.b.id ? 1 : 0;
 }
 
 /**
@@ -201,13 +235,7 @@ export function detectCollisions<
       });
     }
   }
-  collisions.sort((x, y) => {
-    const yAt = Math.max(y.a.createdAt, y.b.createdAt);
-    const xAt = Math.max(x.a.createdAt, x.b.createdAt);
-    if (yAt !== xAt) return yAt - xAt;
-    if (x.a.id !== y.a.id) return x.a.id < y.a.id ? -1 : 1;
-    return x.b.id < y.b.id ? -1 : x.b.id > y.b.id ? 1 : 0;
-  });
+  collisions.sort(byRecency);
   return collisions;
 }
 
@@ -312,7 +340,14 @@ export function collisionLine(
     }
   }
 
-  const page = Math.max(a.pageIndex, b.pageIndex) + 1;
+  // Cite the page the recipient will recognize. When the two anchors are on
+  // different pages — the identical-quote fallback across a preprint and a
+  // published PDF — "p. 7" has to mean the page in *their* copy, or the line
+  // sends them somewhere they have never been. Only a third-party collision,
+  // which `assembleDigest` no longer promotes, has no recipient side to use.
+  const mine =
+    a.memberId === recipientId ? a : b.memberId === recipientId ? b : undefined;
+  const page = (mine?.pageIndex ?? Math.max(a.pageIndex, b.pageIndex)) + 1;
   const quote = elide(a.quote.length >= b.quote.length ? a.quote : b.quote);
   const where = `${paperTitle}, p. ${page}`;
   return quote.length > 0
@@ -358,7 +393,11 @@ export type AssembledDigest<
   AnnotationId extends string = string,
 > = {
   items: DigestItem<PaperId, AnnotationId>[];
-  /** Items the cap cut. Stored so the reader can say "and 3 more". */
+  /**
+   * Annotations the cap kept out of this digest — the underlying rows, not the
+   * lines they would have occupied, because one dropped coalesced line can be
+   * hiding a dozen annotations and "and 1 more" would be a lie.
+   */
   droppedCount: number;
 };
 
@@ -371,10 +410,21 @@ export type AssembledDigest<
  * - `delta` is the subset that is new to this recipient — authored by someone
  *   else, after their cursor. Only a delta annotation can cause an item; the
  *   recipient's own annotation can only ever be the other half of a pair.
+ * - `collisions`, when supplied, is a precomputed `detectCollisions(pool)`.
+ *   The Convex layer runs one detection pass for a whole lab rather than one
+ *   per member; the engine stays pure either way, and the default keeps the
+ *   single-argument call honest.
+ *
+ * Promotion is **recipient-relative**: a gold pair earns its own line only when
+ * the recipient wrote one half of it. A collision between two other members is
+ * a real convergence in the lab, but the sim counted gold *events* per
+ * recipient (RESULTS.md §4), and "Ana and Ben both hypothesised about p. 7" is
+ * a newsletter item — it goes into the coalesced count for its paper, where a
+ * bystander's five items of budget are not spent on it.
  *
  * Each new annotation contributes to at most one gold line, so five different
- * people colliding with one hypothesis reads as five lines, but one annotation
- * colliding with five things does not.
+ * people colliding with one of your hypotheses reads as five lines, but one
+ * annotation colliding with five things does not.
  */
 export function assembleDigest<
   P extends string,
@@ -386,6 +436,8 @@ export function assembleDigest<
   delta: readonly DigestAnnotation<P, A, U>[];
   /** `paperId` → display title. Missing titles fall back to "this paper". */
   paperTitles: ReadonlyMap<P, string>;
+  /** `detectCollisions(pool)`, if the caller already has it. */
+  collisions?: readonly Collision<P, A, U>[];
   cap?: number;
 }): AssembledDigest<P, A> {
   const cap = input.cap ?? MAX_DIGEST_ITEMS;
@@ -396,7 +448,16 @@ export function assembleDigest<
   const promoted = new Set<A>();
   const goldItems: DigestItem<P, A>[] = [];
 
-  for (const collision of detectCollisions(input.pool)) {
+  // Re-sorted rather than trusted: a precomputed list must rank identically to
+  // a detected one, because this order is what the cap cuts against.
+  const candidates = (input.collisions ?? detectCollisions(input.pool))
+    .filter(
+      (c) =>
+        c.a.memberId === input.recipientId || c.b.memberId === input.recipientId,
+    )
+    .sort(byRecency);
+
+  for (const collision of candidates) {
     const fresh = [collision.a, collision.b].filter((x) => deltaIds.has(x.id));
     if (fresh.length === 0) continue;
     if (fresh.some((x) => promoted.has(x.id))) continue;
@@ -437,8 +498,17 @@ export function assembleDigest<
     }));
 
   const all = [...goldItems, ...coalesced];
+  // Count the annotations behind the lines that didn't fit, not the lines.
+  // Only delta rows count: a promoted collision cites the recipient's own
+  // annotation as its other half, and their own writing was never news to them.
+  const withheld = new Set<A>();
+  for (const item of all.slice(cap)) {
+    for (const id of item.annotationIds) {
+      if (deltaIds.has(id)) withheld.add(id);
+    }
+  }
   return {
     items: all.slice(0, cap),
-    droppedCount: Math.max(0, all.length - cap),
+    droppedCount: withheld.size,
   };
 }
