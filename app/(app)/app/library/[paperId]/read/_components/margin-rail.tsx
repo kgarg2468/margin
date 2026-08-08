@@ -1,10 +1,26 @@
 "use client";
 
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnnotationCard } from "./annotation-card";
 import { typeStyle } from "./ontology";
 import { eyebrowClass, skeletonClass } from "@/lib/ui";
 import type { AnchorState, AnnotationId, AnnotationView } from "./types";
+
+/**
+ * How a note takes and leaves its place in the margin: the entrance the
+ * app's small surfaces share (rise, settle), a plain fade out. Applied
+ * through `AnimatePresence` with `initial={false}`, so the first paint
+ * composes at rest and only notes that arrive *while you watch* — a
+ * colleague writing during a session, a filter letting one back in — get
+ * the entrance.
+ */
+const CARD_ENTER = {
+  initial: { opacity: 0, y: 6, scale: 0.985 },
+  animate: { opacity: 1, y: 0, scale: 1 },
+  exit: { opacity: 0, transition: { duration: 0.15 } },
+  transition: { duration: 0.24, ease: [0.16, 1, 0.3, 1] as const },
+};
 
 export type RailCard = {
   annotation: AnnotationView;
@@ -69,6 +85,8 @@ export function MarginRail({
   const elements = useRef(new Map<AnnotationId, HTMLElement>());
   const sizes = useRef<ResizeObserver | null>(null);
   const [heights, setHeights] = useState<Map<AnnotationId, number>>(new Map());
+  const reduce = useReducedMotion();
+  const entrance = reduce === true ? {} : CARD_ENTER;
 
   // A ResizeObserver rather than a measure-on-every-render pass: a card grows
   // when its thread is expanded or its editor opens, and the cards below it
@@ -177,18 +195,22 @@ export function MarginRail({
           style={{ height: placed.length === 0 ? 0 : Math.max(height, 1) }}
         >
 
-          {placed.map(({ card: entry, top }) => (
-            <div
-              key={entry.annotation._id}
-              // The typesetting pass moves cards when a thread expands or a
-              // filter changes; easing `top` turns those jumps into the
-              // margin re-flowing, which is what actually happened.
-              className="absolute inset-x-0 motion-safe:transition-[top] motion-safe:duration-300 motion-safe:ease-[cubic-bezier(0.16,1,0.3,1)]"
-              style={{ top }}
-            >
-              {card(entry)}
-            </div>
-          ))}
+          <AnimatePresence initial={false}>
+            {placed.map(({ card: entry, top }) => (
+              <motion.div
+                key={entry.annotation._id}
+                {...entrance}
+                // The typesetting pass moves cards when a thread expands or a
+                // filter changes; easing `top` turns those jumps into the
+                // margin re-flowing, which is what actually happened. Motion
+                // owns transform and opacity; `top` stays with CSS.
+                className="absolute inset-x-0 motion-safe:transition-[top] motion-safe:duration-300 motion-safe:ease-[cubic-bezier(0.16,1,0.3,1)]"
+                style={{ top }}
+              >
+                {card(entry)}
+              </motion.div>
+            ))}
+          </AnimatePresence>
 
           {/* A tether for a card that could not have the line it asked for.
               A crowded passage pushes later cards a long way down — far enough
@@ -220,9 +242,17 @@ export function MarginRail({
         </div>
       ) : (
         <div className="flex flex-col gap-2.5">
-          {cards.map((entry) => (
-            <div key={entry.annotation._id}>{card(entry)}</div>
-          ))}
+          <AnimatePresence initial={false}>
+            {cards.map((entry) => (
+              <motion.div
+                key={entry.annotation._id}
+                {...entrance}
+                layout={reduce !== true}
+              >
+                {card(entry)}
+              </motion.div>
+            ))}
+          </AnimatePresence>
         </div>
       )}
 

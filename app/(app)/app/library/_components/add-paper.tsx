@@ -9,6 +9,7 @@ import {
   errorClass,
   inputClass,
   labelClass,
+  panelClass,
   primaryButtonClass,
   secondaryButtonClass,
 } from "@/lib/ui";
@@ -46,7 +47,7 @@ export function AddPaper({
   const [tab, setTab] = useState<"doi" | "upload">("doi");
 
   return (
-    <section className="flex flex-col gap-6 rounded-md border border-rule bg-surface p-6">
+    <section className={`${panelClass} flex flex-col gap-6`}>
       <div
         role="tablist"
         aria-label="How to add a paper"

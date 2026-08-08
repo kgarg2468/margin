@@ -14,77 +14,16 @@ import {
   labelClass,
   primaryButtonClass,
   secondaryButtonClass,
+  selectClass,
 } from "@/lib/ui";
 import { useMutation, useQuery } from "convex/react";
 import { useState } from "react";
+import { ConfirmAction } from "../../../_components/confirm-action";
 import { readableError } from "../../../_components/errors";
 
 export type SessionDetail = NonNullable<
   FunctionReturnType<typeof api.sessions.getSession>
 >;
-
-/**
- * A two-step affordance for anything that can't be undone: the first click
- * arms it, the second commits.
- *
- * The same shape as the one in `_components/lab-overview.tsx`. Deliberately a
- * second copy rather than a shared control — hoisting it would mean editing the
- * lab overview, which this change has no other reason to touch. Flagged as a
- * duplicate worth collapsing the next time either one is edited.
- */
-function ConfirmAction({
-  label,
-  confirmLabel,
-  run,
-}: {
-  label: string;
-  confirmLabel: string;
-  run: () => Promise<void>;
-}) {
-  const [armed, setArmed] = useState(false);
-  const [pending, setPending] = useState(false);
-
-  if (!armed) {
-    return (
-      <button
-        type="button"
-        className="font-sans text-sm text-ink-faint underline-offset-4 hover:text-accent hover:underline"
-        onClick={() => setArmed(true)}
-      >
-        {label}
-      </button>
-    );
-  }
-
-  return (
-    <span className="flex items-baseline gap-3">
-      <button
-        type="button"
-        disabled={pending}
-        className="font-sans text-sm font-medium text-accent-strong underline underline-offset-4 disabled:cursor-not-allowed disabled:opacity-50"
-        onClick={async () => {
-          setPending(true);
-          try {
-            await run();
-          } finally {
-            setPending(false);
-            setArmed(false);
-          }
-        }}
-      >
-        {pending ? "Working…" : confirmLabel}
-      </button>
-      <button
-        type="button"
-        disabled={pending}
-        className="font-sans text-sm text-ink-faint underline-offset-4 hover:underline"
-        onClick={() => setArmed(false)}
-      >
-        Keep it
-      </button>
-    </span>
-  );
-}
 
 /**
  * Running the meeting: start it, move it, hand it over, call it off.
@@ -176,6 +115,9 @@ export function ManageSession({ session }: { session: SessionDetail }) {
             <ConfirmAction
               label="Cancel session"
               confirmLabel="Call it off"
+              cancelLabel="Keep it"
+              tone="faint"
+              size="sm"
               run={() =>
                 run(
                   () => cancelSession({ sessionId: session._id }),
@@ -221,7 +163,7 @@ function Reschedule({
 
   return (
     <form
-      className="flex flex-wrap items-end gap-4 rounded-md border border-rule bg-surface p-4"
+      className="pop-in flex flex-wrap items-end gap-4 rounded-md border border-rule bg-surface p-4 shadow-[var(--shadow-card)]"
       onSubmit={async (event) => {
         event.preventDefault();
         if (scheduledAt === null) {
@@ -290,7 +232,7 @@ function PresenterPicker({ session }: { session: SessionDetail }) {
         id="session-presenter-change"
         value={session.presenterId}
         disabled={pending}
-        className={`${inputClass} max-w-xs`}
+        className={`${selectClass} max-w-xs`}
         onChange={async (event) => {
           const presenterId = event.target.value as Id<"users">;
           setError(null);
@@ -350,7 +292,7 @@ export function PresenterNotes({ session }: { session: SessionDetail }) {
       <h2 className={eyebrowClass}>Presenter&rsquo;s notes</h2>
 
       {editing ? (
-        <div className="flex flex-col gap-3">
+        <div className="pop-in flex flex-col gap-3">
           <label htmlFor="presenter-notes" className="sr-only">
             Presenter&rsquo;s notes
           </label>
@@ -361,7 +303,7 @@ export function PresenterNotes({ session }: { session: SessionDetail }) {
             maxLength={20_000}
             onChange={(event) => setDraft(event.target.value)}
             placeholder="What you want to take the lab through…"
-            className="w-full resize-y rounded-sm border border-rule bg-surface px-3 py-2 font-serif text-base leading-relaxed text-ink placeholder:text-ink-faint"
+            className="w-full resize-y rounded-sm border border-rule bg-surface px-3 py-2 font-serif text-base leading-relaxed text-ink placeholder:text-ink-faint transition-colors hover:border-ink-faint"
           />
           <div className="flex flex-wrap items-center gap-4">
             <button

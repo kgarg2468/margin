@@ -192,7 +192,7 @@ export function AnnotationCard({
           Withdrawn by its author.
         </p>
       ) : editing ? (
-        <div className="mt-2 flex flex-col gap-2">
+        <div className="pop-in mt-2 flex flex-col gap-2">
           <TypeChips
             size="small"
             value={annotation.type}
@@ -322,7 +322,7 @@ export function AnnotationCard({
       )}
 
       {replying ? (
-        <div className="mt-2 flex flex-col gap-2">
+        <div className="pop-in mt-2 flex flex-col gap-2">
           <textarea
             autoFocus
             rows={2}
