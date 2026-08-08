@@ -43,10 +43,14 @@ export function createToastStore() {
 
   const emit = () => listeners.forEach((fn) => fn(toasts));
 
-  const dismiss = (id: number) => {
+  const clearTimer = (id: number) => {
     const timer = timers.get(id);
     if (timer !== undefined) clearTimeout(timer);
     timers.delete(id);
+  };
+
+  const dismiss = (id: number) => {
+    clearTimer(id);
     toasts = toasts.filter((t) => t.id !== id);
     emit();
   };
@@ -56,7 +60,13 @@ export function createToastStore() {
     // The overflow is dropped by the same expression that adds the newcomer,
     // so there is no window in which four are live: whoever reads the next
     // emit sees at most three.
-    toasts = [...toasts, { ...input, id }].slice(-MAX_VISIBLE);
+    const next = [...toasts, { ...input, id }];
+    toasts = next.slice(-MAX_VISIBLE);
+    // A toast pushed off the end takes its timer with it. Left running, it
+    // would wake up seconds later and dismiss a toast that is already gone —
+    // harmless to the list, but it emits, and every subscriber re-renders for
+    // a notice nobody has seen since.
+    next.slice(0, next.length - toasts.length).forEach((t) => clearTimer(t.id));
     const ms = input.durationMs ?? DURATION[input.tone ?? "default"];
     timers.set(id, setTimeout(() => dismiss(id), ms));
     emit();

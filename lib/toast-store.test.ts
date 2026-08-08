@@ -27,6 +27,26 @@ describe("toast store", () => {
     expect(current.map((t) => t.message)).toEqual(["b", "c", "d"]);
   });
 
+  it("forgets the timer of a toast the cap dropped", () => {
+    vi.useFakeTimers();
+    const store = createToastStore();
+    // "a" is dropped by the cap half a second before its own timer would have
+    // fired; that timer must go with it, or it wakes up later and emits for a
+    // toast that has not been on screen since.
+    store.push({ message: "a", durationMs: 1000 });
+    ["b", "c", "d"].forEach((message) =>
+      store.push({ message, durationMs: 9000 }),
+    );
+
+    let emissions = 0;
+    store.subscribe(() => emissions++);
+    expect(emissions).toBe(1); // the list as it stands on subscription
+
+    vi.advanceTimersByTime(1500);
+    expect(emissions).toBe(1);
+    vi.useRealTimers();
+  });
+
   it("auto-dismisses after the tone's duration", () => {
     vi.useFakeTimers();
     const store = createToastStore();

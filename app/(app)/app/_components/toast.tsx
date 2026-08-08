@@ -112,13 +112,17 @@ function ToastViewport({ store }: { store: ToastStore }) {
     setShown((current) => current.filter((toast) => toast.id !== id));
   }, []);
 
-  if (rendered.length === 0) return null;
-
   return (
     // Bottom right, out of the reading column. `pointer-events-none` on the
     // stack itself so the gaps between cards — and the box a one-toast stack
     // still occupies — never eat a click meant for the page underneath.
+    //
+    // Rendered even when there is nothing to show, which is not a detail: the
+    // live region below has to be in the document *before* the text it is
+    // going to announce, and a viewport that unmounted itself when the stack
+    // emptied would take it with it.
     <div className="pointer-events-none fixed right-6 bottom-6 z-50 flex max-w-[calc(100vw-3rem)] flex-col gap-2">
+      <Announcer toasts={live} />
       {rendered.map((toast) => (
         <ToastCard
           key={toast.id}
@@ -157,10 +161,15 @@ function ToastCard({
 
   return (
     <div
-      // An error is worth interrupting a screen reader for; a confirmation is
-      // not. Same card either way — the tone is carried by the rule down the
-      // left, not by colour or by an icon.
-      role={isError ? "alert" : "status"}
+      // An error is worth interrupting a screen reader for, so it carries the
+      // assertive role on the card itself; an `alert` is announced reliably
+      // even when the element carrying it was only just inserted. Everything
+      // quieter is announced politely by `Announcer`, and so takes no role
+      // here — two live regions for one message would say it twice.
+      //
+      // Visually the two are the same card: the tone is carried by the rule
+      // down the left, not by colour or by an icon.
+      role={isError ? "alert" : undefined}
       data-leaving={leaving ? "" : undefined}
       className={
         "pointer-events-auto pop-in w-full max-w-sm rounded-md border border-rule bg-surface " +
@@ -199,6 +208,50 @@ function ToastCard({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * What a screen reader hears.
+ *
+ * A toast card is inserted into the page already carrying its text, and a
+ * polite live region that is *created* with its content is one NVDA and JAWS
+ * routinely miss — the region has to be there first, so that what changes is
+ * the text inside it and not the region itself. So this sits in the viewport
+ * permanently, empty, and the messages are written into it.
+ *
+ * Errors do not come through here; they are `role="alert"` on the card, which
+ * is assertive and is announced on insertion (see `ToastCard`).
+ */
+function Announcer({ toasts }: { toasts: Toast[] }) {
+  const [announcement, setAnnouncement] = useState("");
+  const announced = useRef(0);
+
+  useEffect(() => {
+    const fresh = toasts.filter(
+      (toast) => toast.id > announced.current && toast.tone !== "error",
+    );
+    for (const toast of toasts) {
+      announced.current = Math.max(announced.current, toast.id);
+    }
+    if (fresh.length > 0) {
+      setAnnouncement(fresh.map((toast) => toast.message).join(". "));
+    }
+  }, [toasts]);
+
+  // Emptied again once it has been read. A live region only announces what
+  // *changed*, so without this the second "Saved" in a row is identical text
+  // and is never spoken at all.
+  useEffect(() => {
+    if (announcement === "") return;
+    const timer = setTimeout(() => setAnnouncement(""), 1000);
+    return () => clearTimeout(timer);
+  }, [announcement]);
+
+  return (
+    <div aria-live="polite" aria-atomic="true" className="sr-only">
+      {announcement}
     </div>
   );
 }
