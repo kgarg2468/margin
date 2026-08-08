@@ -109,11 +109,15 @@
    * ontology *is* the brand.
    *
    * Every ink carries small sans-serif text, so all five clear AA on the
-   * lightest ground they land on. Light values on --surface (#fdfaf4):
-   * hypothesis 7.9:1, method 6.8:1, critique 6.5:1, connection 7.0:1,
-   * question 7.1:1. Dark values on --surface-sunken (#251e1a): none below
-   * 6.2:1. An ink on its own wash is the tightest pairing and still clears
-   * it — critique, the closest, is 5.1:1 in both modes.
+   * grounds they land on. Light values on --surface (#fdfaf4): hypothesis
+   * 7.9:1, method 6.7:1, critique 6.5:1, connection 6.9:1, question 7.1:1.
+   * Dark values on --surface-sunken (#251e1a): none below 6.2:1.
+   *
+   * An ink on its own wash is the tightest pairing, and it only occurs on
+   * --surface (the type badge on a margin note). The floor there is dark
+   * mode: question 4.75:1, hypothesis 4.83:1, critique 5.09:1 — AA at every
+   * size, but with less headroom than anything else here, so these three are
+   * what to re-measure if a hue moves.
    *
    * The washes are written as light-dark(color-mix(), color-mix()) rather
    * than color-mix() over a light-dark() ink: mixing a value that is only
@@ -181,11 +185,9 @@
   --color-highlight: var(--highlight);
   --color-ring: var(--ring);
 
-  --color-note-hypothesis: var(--note-hypothesis);
-  --color-note-method: var(--note-method);
-  --color-note-critique: var(--note-critique);
-  --color-note-connection: var(--note-connection);
-  --color-note-question: var(--note-question);
+  /* The annotation inks deliberately have no utility classes: a note's type
+     is data, so its colour is looked up at runtime as `var(--note-*)` in a
+     style attribute rather than picked from a static class name. */
 
   /* Serif leads (reading + headings); sans is for UI chrome only. */
   --font-serif: var(--font-source-serif), ui-serif, Georgia, serif;
