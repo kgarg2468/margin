@@ -56,6 +56,26 @@ function readFirstString(value: unknown): string | undefined {
   return readString(value);
 }
 
+/**
+ * A URL we are willing to hand to a browser or to `fetch`.
+ *
+ * These strings come from a third party and end up in an `href` and in an
+ * outbound request, so the scheme is checked rather than assumed: `javascript:`
+ * and `data:` are the obvious hazards, `file:` the quiet one.
+ */
+function readHttpUrl(value: unknown): string | undefined {
+  const raw = readString(value);
+  if (raw === undefined) {
+    return undefined;
+  }
+  try {
+    const { protocol } = new URL(raw);
+    return protocol === "https:" || protocol === "http:" ? raw : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function readYear(value: unknown): number | undefined {
   const year = typeof value === "number" ? value : Number(value);
   if (!Number.isInteger(year) || year < 1600 || year > 2200) {
@@ -92,6 +112,13 @@ function stripJats(markup: string): string {
     .replace(/&amp;/g, "&");
 }
 
+/**
+ * Long enough for a cold Crossref record, short enough that a member is not
+ * left watching a spinner because a metadata service is hanging rather than
+ * refusing.
+ */
+const FETCH_TIMEOUT_MS = 10_000;
+
 async function fetchJson(
   url: string,
   serviceName: string,
@@ -100,6 +127,7 @@ async function fetchJson(
   try {
     response = await fetch(url, {
       headers: { Accept: "application/json", "User-Agent": USER_AGENT },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
   } catch {
     throw new ConvexError(
@@ -193,7 +221,7 @@ export async function fetchCrossref(doi: string): Promise<PaperMetadata | null> 
     abstract: clampAbstract(
       rawAbstract === undefined ? undefined : stripJats(rawAbstract),
     ),
-    sourceUrl: readString(message.URL),
+    sourceUrl: readHttpUrl(message.URL),
   };
 }
 
@@ -283,9 +311,9 @@ export async function fetchOpenAlex(doi: string): Promise<PaperMetadata | null> 
     venue: openAlexVenue(body),
     abstract: clampAbstract(openAlexAbstract(body.abstract_inverted_index)),
     sourceUrl:
-      readString(bestOa?.landing_page_url) ??
-      readString(primary?.landing_page_url) ??
-      readString(body.doi),
-    pdfUrl: readString(bestOa?.pdf_url),
+      readHttpUrl(bestOa?.landing_page_url) ??
+      readHttpUrl(primary?.landing_page_url) ??
+      readHttpUrl(body.doi),
+    pdfUrl: readHttpUrl(bestOa?.pdf_url),
   };
 }
