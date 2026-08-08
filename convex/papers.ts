@@ -13,7 +13,7 @@ import { getMembership, requireMembership, requireUserId } from "./lib/authz";
 import { isPlausibleDoi, normalizeDoi } from "./lib/doi";
 import { recordEvent } from "./lib/ledger";
 import type { PaperMetadata } from "./lib/scholarly";
-import { fetchCrossref, fetchOpenAlex } from "./lib/scholarly";
+import { arxivPdfUrl, fetchCrossref, fetchOpenAlex } from "./lib/scholarly";
 import { ingestStatus } from "./schema";
 
 /**
@@ -45,6 +45,16 @@ const MAX_PAGE_CHARS = 60_000;
 const MAX_TOTAL_CHARS = 4_000_000;
 const MAX_PDF_BYTES = 60 * 1024 * 1024;
 const MAX_PDF_MB = MAX_PDF_BYTES / (1024 * 1024);
+
+/**
+ * How many open-access candidates one DOI lookup is allowed to try.
+ *
+ * Each attempt is a fetch with its own 20-second ceiling, and a member is
+ * watching the whole sum. Four is enough for the case this exists for — the
+ * curated pick is dead, the publisher's copy works — while keeping the worst
+ * case a wait rather than an action the platform kills mid-flight.
+ */
+const MAX_PDF_FETCH_ATTEMPTS = 4;
 
 /**
  * Not an error: a scanned PDF is a perfectly good file that simply has no
@@ -801,7 +811,7 @@ export const createFromDoi = action({
     }
 
     // Crossref is authoritative for the record; OpenAlex fills the gaps it
-    // leaves (abstracts, mostly) and is the sole source of the OA link.
+    // leaves (abstracts, mostly) and is the sole source of the OA links.
     const merged: PaperMetadata = {
       title: metadata.title,
       authors: metadata.authors ?? openAlex?.authors,
@@ -809,14 +819,27 @@ export const createFromDoi = action({
       venue: metadata.venue ?? openAlex?.venue,
       abstract: metadata.abstract ?? openAlex?.abstract,
       sourceUrl: metadata.sourceUrl ?? openAlex?.sourceUrl,
-      pdfUrl: openAlex?.pdfUrl,
+      pdfUrls: openAlex?.pdfUrls,
     };
 
+    // The DOI itself is a source of last resort: an arXiv DOI says where the
+    // file is whether or not OpenAlex managed to index it, and arXiv records
+    // are among the likeliest to arrive with no `pdf_url` at all.
+    const candidates = [...(merged.pdfUrls ?? [])];
+    const arxiv = arxivPdfUrl(doi);
+    if (arxiv !== undefined && !candidates.includes(arxiv)) {
+      candidates.push(arxiv);
+    }
+
+    // First one that hands back actual PDF bytes wins; the rest are mirrors of
+    // the same file. All of them failing is not an error — the paper is still
+    // worth having, and it lands as `needs-pdf` exactly as it always did.
     let storageId: Id<"_storage"> | undefined;
-    if (merged.pdfUrl !== undefined) {
-      const pdf = await fetchOpenAccessPdf(merged.pdfUrl);
+    for (const candidate of candidates.slice(0, MAX_PDF_FETCH_ATTEMPTS)) {
+      const pdf = await fetchOpenAccessPdf(candidate);
       if (pdf !== null) {
         storageId = await ctx.storage.store(pdf);
+        break;
       }
     }
 
