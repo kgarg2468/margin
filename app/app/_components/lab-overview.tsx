@@ -1,6 +1,7 @@
 "use client";
 
 import { api } from "@/convex/_generated/api";
+import type { Id } from "@/convex/_generated/dataModel";
 import {
   cardClass,
   errorClass,
@@ -9,6 +10,7 @@ import {
 } from "@/lib/ui";
 import { useMutation, useQuery } from "convex/react";
 import { useState } from "react";
+import { readableError } from "./errors";
 import type { LabSummary } from "./lab-provider";
 import { JoinLabCard } from "./onboarding";
 
@@ -19,6 +21,18 @@ function formatDate(ms: number): string {
     year: "numeric",
   });
 }
+
+/**
+ * Destructive actions are quiet text, not red buttons — but they arm before
+ * they fire, so nothing irreversible is ever one stray click away.
+ */
+const quietActionClass =
+  "font-sans text-xs text-accent underline-offset-4 hover:underline " +
+  "disabled:cursor-not-allowed disabled:opacity-50";
+
+const quietConfirmClass =
+  "font-sans text-xs font-medium text-accent-strong underline underline-offset-4 " +
+  "disabled:cursor-not-allowed disabled:opacity-50";
 
 export function LabOverview({ lab }: { lab: LabSummary }) {
   return (
@@ -61,12 +75,83 @@ export function LabOverview({ lab }: { lab: LabSummary }) {
           </div>
         </details>
       </section>
+
+      <LeaveLab lab={lab} />
     </div>
+  );
+}
+
+/**
+ * A two-step affordance for anything that can't be undone: the first click
+ * arms it, the second one commits.
+ */
+function ConfirmAction({
+  label,
+  confirmLabel,
+  run,
+}: {
+  label: string;
+  confirmLabel: string;
+  run: () => Promise<void>;
+}) {
+  const [armed, setArmed] = useState(false);
+  const [pending, setPending] = useState(false);
+
+  if (!armed) {
+    return (
+      <button
+        type="button"
+        className={quietActionClass}
+        onClick={() => setArmed(true)}
+      >
+        {label}
+      </button>
+    );
+  }
+
+  return (
+    <span className="flex items-baseline gap-3">
+      <button
+        type="button"
+        disabled={pending}
+        className={quietConfirmClass}
+        onClick={async () => {
+          setPending(true);
+          try {
+            await run();
+          } finally {
+            setPending(false);
+            setArmed(false);
+          }
+        }}
+      >
+        {pending ? "Working…" : confirmLabel}
+      </button>
+      <button
+        type="button"
+        disabled={pending}
+        className={quietActionClass}
+        onClick={() => setArmed(false)}
+      >
+        Cancel
+      </button>
+    </span>
   );
 }
 
 function Members({ lab }: { lab: LabSummary }) {
   const members = useQuery(api.labs.listMembers, { labId: lab._id });
+  const removeMember = useMutation(api.labs.removeMember);
+  const [error, setError] = useState<string | null>(null);
+
+  async function remove(userId: Id<"users">) {
+    setError(null);
+    try {
+      await removeMember({ labId: lab._id, userId });
+    } catch (caught) {
+      setError(readableError(caught, "We couldn't remove that member."));
+    }
+  }
 
   return (
     <section className="flex flex-col gap-5">
@@ -90,12 +175,27 @@ function Members({ lab }: { lab: LabSummary }) {
                   </span>
                 )}
               </span>
-              <span className="font-sans text-xs text-ink-faint">
-                {member.email} · joined {formatDate(member.joinedAt)}
+              <span className="flex items-baseline gap-4">
+                <span className="font-sans text-xs text-ink-faint">
+                  {member.email} · joined {formatDate(member.joinedAt)}
+                </span>
+                {lab.role === "pi" && !member.isYou && (
+                  <ConfirmAction
+                    label="Remove"
+                    confirmLabel={`Remove ${member.name ?? member.email ?? "them"}`}
+                    run={() => remove(member.userId)}
+                  />
+                )}
               </span>
             </li>
           ))}
         </ul>
+      )}
+
+      {error !== null && (
+        <p role="alert" className={errorClass}>
+          {error}
+        </p>
       )}
     </section>
   );
@@ -104,6 +204,7 @@ function Members({ lab }: { lab: LabSummary }) {
 function Invites({ lab }: { lab: LabSummary }) {
   const invites = useQuery(api.invites.listInvites, { labId: lab._id });
   const createInvite = useMutation(api.invites.createInvite);
+  const revokeInvite = useMutation(api.invites.revokeInvite);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
@@ -131,9 +232,28 @@ function Invites({ lab }: { lab: LabSummary }) {
               <code className="font-mono text-base tracking-[0.2em] text-ink-strong">
                 {invite.code}
               </code>
-              <span className="font-sans text-xs text-ink-faint">
-                {invite.useCount} of {invite.maxUses} used · expires{" "}
-                {formatDate(invite.expiresAt)}
+              <span className="flex items-baseline gap-4">
+                <span className="font-sans text-xs text-ink-faint">
+                  {invite.useCount} of {invite.maxUses} used · expires{" "}
+                  {formatDate(invite.expiresAt)}
+                </span>
+                <ConfirmAction
+                  label="Revoke"
+                  confirmLabel={`Revoke ${invite.code}`}
+                  run={async () => {
+                    setError(null);
+                    try {
+                      await revokeInvite({ inviteId: invite._id });
+                    } catch (caught) {
+                      setError(
+                        readableError(
+                          caught,
+                          "We couldn't revoke that code. Please try again.",
+                        ),
+                      );
+                    }
+                  }}
+                />
               </span>
             </li>
           ))}
@@ -155,8 +275,13 @@ function Invites({ lab }: { lab: LabSummary }) {
           setPending(true);
           try {
             await createInvite({ labId: lab._id });
-          } catch {
-            setError("We couldn't generate a code. Please try again.");
+          } catch (caught) {
+            setError(
+              readableError(
+                caught,
+                "We couldn't generate a code. Please try again.",
+              ),
+            );
           } finally {
             setPending(false);
           }
@@ -164,6 +289,55 @@ function Invites({ lab }: { lab: LabSummary }) {
       >
         {pending ? "Generating…" : "New invite code"}
       </button>
+    </section>
+  );
+}
+
+/**
+ * Leaving is the member's half of the roster; `Members` above is the PI's.
+ *
+ * A lab's only PI can't leave — there would be nobody left who can invite or
+ * manage anyone — so they get the reason instead of a button that only fails.
+ */
+function LeaveLab({ lab }: { lab: LabSummary }) {
+  const leaveLab = useMutation(api.labs.leaveLab);
+  const [error, setError] = useState<string | null>(null);
+
+  return (
+    <section className="flex flex-col gap-3 border-t border-rule pt-8">
+      <h2 className={eyebrowClass}>Leaving</h2>
+      {lab.role === "pi" ? (
+        <p className="max-w-prose font-serif text-base leading-relaxed text-ink-muted">
+          You are the PI of {lab.name}, so you can&rsquo;t leave it — a lab has
+          to have someone who can manage the roster. Handing the lab over comes
+          later.
+        </p>
+      ) : (
+        <>
+          <p className="max-w-prose font-serif text-base leading-relaxed text-ink-muted">
+            You&rsquo;ll lose access to {lab.name}&rsquo;s papers and sessions.
+            The annotations you wrote for the lab stay with it.
+          </p>
+          <ConfirmAction
+            label="Leave this lab"
+            confirmLabel={`Leave ${lab.name}`}
+            run={async () => {
+              setError(null);
+              try {
+                await leaveLab({ labId: lab._id });
+              } catch (caught) {
+                setError(readableError(caught, "We couldn't do that."));
+              }
+            }}
+          />
+        </>
+      )}
+
+      {error !== null && (
+        <p role="alert" className={errorClass}>
+          {error}
+        </p>
+      )}
     </section>
   );
 }

@@ -1,10 +1,20 @@
 import { ConvexError, v } from "convex/values";
+import type { Doc, Id } from "./_generated/dataModel";
+import type { MutationCtx } from "./_generated/server";
 import { mutation, query } from "./_generated/server";
-import { getMembership, requireMembership, requireUserId } from "./lib/authz";
+import {
+  getMembership,
+  requireMembership,
+  requirePi,
+  requireUserId,
+} from "./lib/authz";
 import { recordEvent } from "./lib/ledger";
 import { membershipRole } from "./schema";
 
 const MAX_LAB_NAME_LENGTH = 120;
+
+const SOLE_PI_MESSAGE =
+  "A lab has to have a PI. Make someone else the PI before this one steps back.";
 
 /** Create a lab. The creator becomes its PI; there is no lab without a member. */
 export const createLab = mutation({
@@ -155,10 +165,12 @@ export const listMembers = query({
       email: v.optional(v.string()),
       role: membershipRole,
       joinedAt: v.number(),
+      /** Saves the roster from having to cross-reference `users.viewer`. */
+      isYou: v.boolean(),
     }),
   ),
   handler: async (ctx, args) => {
-    await requireMembership(ctx, args.labId);
+    const viewer = await requireMembership(ctx, args.labId);
 
     const memberships = await ctx.db
       .query("memberships")
@@ -174,6 +186,7 @@ export const listMembers = query({
         email: user?.email,
         role: membership.role,
         joinedAt: membership.joinedAt,
+        isYou: membership.userId === viewer.userId,
       });
     }
 
@@ -185,5 +198,96 @@ export const listMembers = query({
       return a.joinedAt - b.joinedAt;
     });
     return members;
+  },
+});
+
+/**
+ * Is this membership the lab's last PI? A lab with no PI has nobody who can
+ * mint invites or manage the roster, so both departure paths refuse it.
+ */
+async function isSolePi(
+  ctx: MutationCtx,
+  membership: Doc<"memberships">,
+): Promise<boolean> {
+  if (membership.role !== "pi") {
+    return false;
+  }
+  const memberships = await ctx.db
+    .query("memberships")
+    .withIndex("by_lab", (q) => q.eq("labId", membership.labId))
+    .collect();
+  return memberships.filter((m) => m.role === "pi").length <= 1;
+}
+
+/**
+ * The one way a membership ends. Deleting the row, moving the denormalized
+ * count, and writing the `member.left` fact happen in a single mutation, so
+ * the roster, the counter, and the ledger can never disagree.
+ */
+async function endMembership(
+  ctx: MutationCtx,
+  membership: Doc<"memberships">,
+  actorId: Id<"users">,
+  reason: "left" | "removed",
+): Promise<void> {
+  await ctx.db.delete(membership._id);
+
+  const lab = await ctx.db.get(membership.labId);
+  if (lab !== null) {
+    await ctx.db.patch(lab._id, {
+      memberCount: Math.max(0, lab.memberCount - 1),
+    });
+  }
+
+  await recordEvent(ctx, {
+    labId: membership.labId,
+    type: "member.left",
+    actorId,
+    subjectUserId: membership.userId,
+    reason,
+  });
+}
+
+/**
+ * Take someone off the roster. PI only.
+ *
+ * Idempotent: removing someone who already left is a no-op rather than an
+ * error, so a stale member list can't produce a confusing failure. The last PI
+ * cannot be removed — including by themselves.
+ */
+export const removeMember = mutation({
+  args: { labId: v.id("labs"), userId: v.id("users") },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const actor = await requirePi(ctx, args.labId);
+
+    const target = await getMembership(ctx, args.labId, args.userId);
+    if (target === null) {
+      return null;
+    }
+    if (await isSolePi(ctx, target)) {
+      throw new ConvexError(SOLE_PI_MESSAGE);
+    }
+
+    await endMembership(ctx, target, actor.userId, "removed");
+    return null;
+  },
+});
+
+/**
+ * Leave a lab you belong to. Anyone can, except a lab's only PI — they would
+ * be locking the door behind them on everyone still inside.
+ */
+export const leaveLab = mutation({
+  args: { labId: v.id("labs") },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const membership = await requireMembership(ctx, args.labId);
+    if (await isSolePi(ctx, membership)) {
+      throw new ConvexError(SOLE_PI_MESSAGE);
+    }
+
+    await endMembership(ctx, membership, membership.userId, "left");
+    return null;
   },
 });

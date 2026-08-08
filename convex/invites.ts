@@ -148,6 +148,39 @@ export const listInvites = query({
 });
 
 /**
+ * Kill a code before it expires — the only remedy when one is pasted into the
+ * wrong Slack. PI only, and idempotent so a double-click is harmless.
+ *
+ * Revocation is a patch on the invite, not a delete: `listInvites` stops
+ * showing it and `redeemInvite` stops honouring it, but the ledger's
+ * `invite.created` fact keeps pointing at a row that still exists.
+ */
+export const revokeInvite = mutation({
+  args: { inviteId: v.id("invites") },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const invite = await ctx.db.get(args.inviteId);
+    if (invite === null) {
+      throw new ConvexError("That invite code is not valid.");
+    }
+    const membership = await requirePi(ctx, invite.labId);
+
+    if (invite.revokedAt !== undefined) {
+      return null;
+    }
+
+    await ctx.db.patch(invite._id, { revokedAt: Date.now() });
+    await recordEvent(ctx, {
+      labId: invite.labId,
+      type: "invite.revoked",
+      actorId: membership.userId,
+      inviteId: invite._id,
+    });
+    return null;
+  },
+});
+
+/**
  * Join a lab with a code. Idempotent: redeeming twice (or redeeming a code for
  * a lab you already belong to, including your own) is a no-op that reports
  * `alreadyMember` instead of erroring or duplicating a membership.
