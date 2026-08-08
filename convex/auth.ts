@@ -1,5 +1,6 @@
 import { Password } from "@convex-dev/auth/providers/Password";
 import { convexAuth } from "@convex-dev/auth/server";
+import { ConvexError } from "convex/values";
 import type { DataModel } from "./_generated/dataModel";
 
 /**
@@ -14,8 +15,15 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
   providers: [
     Password<DataModel>({
       profile(params) {
-        const email = (params.email as string).trim().toLowerCase();
-        const name = (params.name as string | undefined)?.trim();
+        // `params` is whatever the sign-in form posted, so it is untrusted:
+        // a request without an `email` field would otherwise throw a raw
+        // TypeError on `.trim()` and surface as an opaque "Server Error".
+        if (typeof params.email !== "string") {
+          throw new ConvexError("Email is required");
+        }
+        const email = params.email.trim().toLowerCase();
+        const name =
+          typeof params.name === "string" ? params.name.trim() : undefined;
         return {
           email,
           // Fall back to the local part of the email so bylines are never blank.

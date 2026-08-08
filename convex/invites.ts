@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import type { MutationCtx } from "./_generated/server";
 import { mutation, query } from "./_generated/server";
 import { getMembership, requirePi, requireUserId } from "./lib/authz";
@@ -41,7 +41,7 @@ async function generateUniqueCode(ctx: MutationCtx): Promise<string> {
       return code;
     }
   }
-  throw new Error("Could not generate an invite code. Please try again.");
+  throw new ConvexError("Could not generate an invite code. Please try again.");
 }
 
 /** Mint a shareable join code for a lab. PI only. */
@@ -59,7 +59,9 @@ export const createInvite = mutation({
 
     const ttlDays = args.ttlDays ?? DEFAULT_TTL_DAYS;
     if (!Number.isFinite(ttlDays) || ttlDays <= 0 || ttlDays > MAX_TTL_DAYS) {
-      throw new Error(`Invite codes can last between 1 and ${MAX_TTL_DAYS} days.`);
+      throw new ConvexError(
+        `Invite codes can last between 1 and ${MAX_TTL_DAYS} days.`,
+      );
     }
 
     const code = await generateUniqueCode(ctx);
@@ -133,7 +135,7 @@ export const redeemInvite = mutation({
     const code = normalizeCode(args.code);
 
     if (code.length !== CODE_LENGTH) {
-      throw new Error("Invite codes are 8 characters.");
+      throw new ConvexError("Invite codes are 8 characters.");
     }
 
     const invite = await ctx.db
@@ -148,12 +150,12 @@ export const redeemInvite = mutation({
       invite.revokedAt !== undefined ||
       invite.expiresAt <= Date.now()
     ) {
-      throw new Error("That invite code is not valid.");
+      throw new ConvexError("That invite code is not valid.");
     }
 
     const lab = await ctx.db.get(invite.labId);
     if (lab === null) {
-      throw new Error("That invite code is not valid.");
+      throw new ConvexError("That invite code is not valid.");
     }
 
     const existing = await getMembership(ctx, invite.labId, userId);

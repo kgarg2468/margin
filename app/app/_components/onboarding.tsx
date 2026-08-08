@@ -11,13 +11,7 @@ import {
 } from "@/lib/ui";
 import { useMutation } from "convex/react";
 import { useState } from "react";
-
-/** Convex surfaces thrown errors with a stack-ish prefix; keep only our sentence. */
-function readableError(error: unknown, fallback: string): string {
-  const message = error instanceof Error ? error.message : "";
-  const match = message.match(/Uncaught Error:\s*(.+?)(?:\n|\s+at\s)/);
-  return match?.[1]?.trim() ?? fallback;
-}
+import { readableError } from "./errors";
 
 export function Onboarding() {
   return (

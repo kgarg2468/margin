@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import { getMembership, requireMembership, requireUserId } from "./lib/authz";
 import { recordEvent } from "./lib/ledger";
@@ -18,10 +18,12 @@ export const createLab = mutation({
 
     const name = args.name.trim();
     if (name.length === 0) {
-      throw new Error("A lab needs a name.");
+      throw new ConvexError("A lab needs a name.");
     }
     if (name.length > MAX_LAB_NAME_LENGTH) {
-      throw new Error(`Lab names are limited to ${MAX_LAB_NAME_LENGTH} characters.`);
+      throw new ConvexError(
+        `Lab names are limited to ${MAX_LAB_NAME_LENGTH} characters.`,
+      );
     }
     const institution = args.institution?.trim();
 

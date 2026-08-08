@@ -1,4 +1,5 @@
 import { getAuthUserId } from "@convex-dev/auth/server";
+import { ConvexError } from "convex/values";
 import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "../_generated/server";
 
@@ -18,7 +19,7 @@ export async function requireUserId(
 ): Promise<Id<"users">> {
   const userId = await getAuthUserId(ctx);
   if (userId === null) {
-    throw new Error("Not signed in.");
+    throw new ConvexError("Not signed in.");
   }
   return userId;
 }
@@ -45,7 +46,7 @@ export async function requireMembership(
   const userId = await requireUserId(ctx);
   const membership = await getMembership(ctx, labId, userId);
   if (membership === null) {
-    throw new Error("You are not a member of this lab.");
+    throw new ConvexError("You are not a member of this lab.");
   }
   return membership;
 }
@@ -57,7 +58,7 @@ export async function requirePi(
 ): Promise<Doc<"memberships">> {
   const membership = await requireMembership(ctx, labId);
   if (membership.role !== "pi") {
-    throw new Error("Only the lab's PI can do that.");
+    throw new ConvexError("Only the lab's PI can do that.");
   }
   return membership;
 }
