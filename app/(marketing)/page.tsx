@@ -181,7 +181,7 @@ export default function LandingPage() {
                   everyone was doing anyway. Nothing to migrate.
                 </p>
 
-                <div className="mt-10 flex flex-wrap items-center gap-x-7 gap-y-4">
+                <div className="mt-10">
                   <Link href="/signin" className={`group ${primaryButtonClass}`}>
                     Start a journal club
                     <span
@@ -191,17 +191,10 @@ export default function LandingPage() {
                       &rarr;
                     </span>
                   </Link>
-                  <Link
-                    href="/signin"
-                    className="font-sans text-sm text-accent underline-offset-4 hover:underline"
-                  >
-                    Sign in
-                  </Link>
                 </div>
 
                 <p className="mt-10 max-w-[34rem] font-sans text-xs leading-relaxed text-ink-faint">
-                  Pre-product. Closed beta with partner labs at Rice University
-                  and the Texas Medical Center.
+                  Pre-product. Closed beta opening with partner labs this fall.
                 </p>
               </div>
             </div>
