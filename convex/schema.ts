@@ -144,6 +144,18 @@ export const eventDoc = v.union(
     paperId: v.id("papers"),
     pageCount: v.number(),
   }),
+  /**
+   * A *different* file for a paper that already had one — a preprint swapped
+   * for the version of record. Distinct from `paper.ingested` because it
+   * invalidates the text layer every existing annotation is anchored to, and
+   * a reader looking at why an anchor moved needs to find that fact here.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("paper.pdf_replaced"),
+    paperId: v.id("papers"),
+    pageCount: v.number(),
+  }),
   v.object({
     ...eventBase,
     type: v.literal("annotation.created"),
@@ -282,7 +294,14 @@ export default defineSchema({
     addedBy: v.id("users"),
   })
     .index("by_lab", ["labId"])
-    .index("by_lab_and_doi", ["labId", "doi"]),
+    .index("by_lab_and_doi", ["labId", "doi"])
+    /**
+     * "Is any paper using this blob?" — the question `discardUpload` asks
+     * before deleting a file the browser uploaded and then failed to attach.
+     * Without it that check would be a full scan of the table, which is a
+     * strange price to pay for cleaning up after a dropped connection.
+     */
+    .index("by_pdf_storage", ["storageId"]),
 
   /**
    * One page of pdf.js-extracted text, the surface anchors resolve against.

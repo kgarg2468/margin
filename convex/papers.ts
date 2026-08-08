@@ -36,7 +36,23 @@ const MAX_TITLE_LENGTH = 500;
 const MAX_PAGES = 2000;
 /** A page of a paper is a few thousand characters. This is a guard, not a target. */
 const MAX_PAGE_CHARS = 60_000;
+/**
+ * The per-page cap alone bounds nothing useful: 2000 pages of 60k characters
+ * is 120 MB of inserts in one transaction. This is the cap that matters — far
+ * more than the ~1M characters of a long book, far less than a transaction
+ * Convex will refuse halfway through.
+ */
+const MAX_TOTAL_CHARS = 4_000_000;
 const MAX_PDF_BYTES = 60 * 1024 * 1024;
+const MAX_PDF_MB = MAX_PDF_BYTES / (1024 * 1024);
+
+/**
+ * Not an error: a scanned PDF is a perfectly good file that simply has no
+ * text in it. The paper stays `pending` and carries this so the reader can
+ * say why the margins are closed.
+ */
+const NO_TEXT_LAYER_MESSAGE =
+  "No text layer found — this may be a scanned PDF";
 
 const paperSummary = v.object({
   _id: v.id("papers"),
@@ -122,6 +138,71 @@ function cleanAuthors(input: string[] | undefined): string[] | undefined {
 }
 
 /**
+ * Whether a paper has any text worth anchoring to.
+ *
+ * Streamed rather than collected: for every paper that has a text layer the
+ * first page answers it, and `.collect()` would pull the entire text of the
+ * paper into memory to learn one bit. Only an all-empty scan reads to the end.
+ */
+async function hasExtractedText(
+  ctx: QueryCtx | MutationCtx,
+  paperId: Id<"papers">,
+): Promise<boolean> {
+  for await (const page of ctx.db
+    .query("paperPages")
+    .withIndex("by_paper", (q) => q.eq("paperId", paperId))) {
+    if (page.text.trim().length > 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Where a paper lands once extraction has run.
+ *
+ * `ready` means annotations can anchor, which takes actual text — a PDF whose
+ * every page comes back empty is a scan, and calling it ready would promise a
+ * reader something the file cannot do.
+ */
+function ingestStateFor(pages: string[]): {
+  ingestStatus: "ready" | "pending";
+  ingestError: string | undefined;
+} {
+  return pages.some((page) => page.trim().length > 0)
+    ? { ingestStatus: "ready", ingestError: undefined }
+    : { ingestStatus: "pending", ingestError: NO_TEXT_LAYER_MESSAGE };
+}
+
+/**
+ * A storage id from the client is a claim, exactly like a `labId` is.
+ *
+ * The browser uploads straight to Convex and then tells us the id it got
+ * back; nothing so far has checked that the blob exists, that it is a PDF, or
+ * that it is a size we agreed to hold. Without this a member could point a
+ * paper at any file in the deployment.
+ */
+async function requireStoredPdf(
+  ctx: MutationCtx,
+  storageId: Id<"_storage">,
+): Promise<void> {
+  const file = await ctx.db.system.get(storageId);
+  if (file === null) {
+    throw new ConvexError(
+      "That upload isn't there any more. Try dropping the file in again.",
+    );
+  }
+  if (file.contentType !== "application/pdf") {
+    throw new ConvexError("Margin stores PDFs, and that file isn't one.");
+  }
+  if (file.size > MAX_PDF_BYTES) {
+    throw new ConvexError(
+      `That PDF is larger than the ${MAX_PDF_MB} MB Margin will hold for one paper.`,
+    );
+  }
+}
+
+/**
  * Replace a paper's extracted text.
  *
  * Written as delete-then-insert rather than a diff because re-extraction only
@@ -139,6 +220,14 @@ async function replacePageText(
     );
   }
 
+  const clamped = pages.map((page) => page.slice(0, MAX_PAGE_CHARS));
+  const totalChars = clamped.reduce((total, page) => total + page.length, 0);
+  if (totalChars > MAX_TOTAL_CHARS) {
+    throw new ConvexError(
+      `That PDF holds ${Math.round(totalChars / 1_000_000)} million characters of text, more than Margin can store for one paper (${MAX_TOTAL_CHARS / 1_000_000} million). Split it and add the parts separately.`,
+    );
+  }
+
   const existing = await ctx.db
     .query("paperPages")
     .withIndex("by_paper", (q) => q.eq("paperId", paperId))
@@ -147,11 +236,11 @@ async function replacePageText(
     await ctx.db.delete(page._id);
   }
 
-  for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
+  for (let pageIndex = 0; pageIndex < clamped.length; pageIndex++) {
     await ctx.db.insert("paperPages", {
       paperId,
       pageIndex,
-      text: (pages[pageIndex] ?? "").slice(0, MAX_PAGE_CHARS),
+      text: clamped[pageIndex] ?? "",
     });
   }
 }
@@ -191,6 +280,7 @@ export const createFromUpload = mutation({
   handler: async (ctx, args) => {
     const membership = await requireMembership(ctx, args.labId);
     const title = cleanTitle(args.title);
+    await requireStoredPdf(ctx, args.storageId);
 
     const paperId = await ctx.db.insert("papers", {
       labId: args.labId,
@@ -198,7 +288,7 @@ export const createFromUpload = mutation({
       authors: cleanAuthors(args.authors),
       storageId: args.storageId,
       pageCount: args.pages.length,
-      ingestStatus: "ready",
+      ...ingestStateFor(args.pages),
       addedBy: membership.userId,
     });
 
@@ -238,23 +328,27 @@ export const attachPdf = mutation({
   returns: v.null(),
   handler: async (ctx, args) => {
     const { paper, membership } = await requirePaperAccess(ctx, args.paperId);
+    await requireStoredPdf(ctx, args.storageId);
     const previous = paper.storageId;
+    const isReplacement = previous !== undefined && previous !== args.storageId;
 
     await ctx.db.patch(paper._id, {
       storageId: args.storageId,
       pageCount: args.pages.length,
-      ingestStatus: "ready",
-      ingestError: undefined,
+      ...ingestStateFor(args.pages),
     });
     await replacePageText(ctx, paper._id, args.pages);
 
-    if (previous !== undefined && previous !== args.storageId) {
+    if (isReplacement) {
       await ctx.storage.delete(previous);
     }
 
     await recordEvent(ctx, {
       labId: paper.labId,
-      type: "paper.ingested",
+      // A swap is not an arrival. Every annotation on this paper was anchored
+      // against the text layer that just went away, so the ledger records the
+      // two as different facts.
+      type: isReplacement ? "paper.pdf_replaced" : "paper.ingested",
       actorId: membership.userId,
       paperId: paper._id,
       pageCount: args.pages.length,
@@ -269,6 +363,14 @@ export const attachPdf = mutation({
  * The open-access path stores a file the browser never saw, so there is
  * nothing to extract from until a member opens the paper. This is the callback
  * for that: same text, same table, no new file.
+ *
+ * It is deliberately a no-op once the paper has pages. Two members can open
+ * the same freshly-fetched paper in the same minute, and both browsers will
+ * extract the same text from the same file; the second one re-running
+ * delete-then-insert would churn every row that the first one's annotations
+ * are anchored against, for a text layer identical to the one already there.
+ * A genuine file swap goes through `attachPdf`, which is the only path that
+ * replaces existing pages.
  */
 export const saveExtractedText = mutation({
   args: { paperId: v.id("papers"), pages: v.array(v.string()) },
@@ -279,10 +381,17 @@ export const saveExtractedText = mutation({
       throw new ConvexError("That paper has no PDF to extract text from.");
     }
 
+    const alreadyExtracted = await ctx.db
+      .query("paperPages")
+      .withIndex("by_paper", (q) => q.eq("paperId", paper._id))
+      .first();
+    if (alreadyExtracted !== null) {
+      return null;
+    }
+
     await ctx.db.patch(paper._id, {
       pageCount: args.pages.length,
-      ingestStatus: "ready",
-      ingestError: undefined,
+      ...ingestStateFor(args.pages),
     });
     await replacePageText(ctx, paper._id, args.pages);
 
@@ -297,6 +406,68 @@ export const saveExtractedText = mutation({
   },
 });
 
+/**
+ * The other ending for extraction: it didn't work.
+ *
+ * pdf.js runs in the browser, so a file that is encrypted, truncated, or
+ * simply unreadable fails out there — and without this the paper would sit at
+ * `pending` forever, indistinguishable from one nobody has opened yet.
+ *
+ * Two things it refuses to do. It will not fail a paper that has no stored
+ * file (that is `needs-pdf`, which is more useful than "failed"), and it will
+ * not fail a paper that already reads: a botched attempt to swap in a new PDF
+ * leaves the working one, and its text, exactly where they were.
+ */
+export const markIngestFailed = mutation({
+  args: { paperId: v.id("papers"), message: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const { paper } = await requirePaperAccess(ctx, args.paperId);
+    if (paper.storageId === undefined) {
+      return null;
+    }
+    if (await hasExtractedText(ctx, paper._id)) {
+      return null;
+    }
+
+    await ctx.db.patch(paper._id, {
+      ingestStatus: "failed",
+      ingestError: args.message.trim().slice(0, 300),
+    });
+    return null;
+  },
+});
+
+/**
+ * Delete a blob the browser uploaded and then failed to attach.
+ *
+ * The upload URL and the mutation that records the paper are two round trips,
+ * and everything between them can fail — a closed tab, a rejected title, a
+ * PDF over the size limit. Without this the file stays in storage with
+ * nothing pointing at it and no way to ever find it again.
+ *
+ * The `by_pdf_storage` lookup is the safety catch: if any paper already
+ * claims this blob, the caller is confused and the file stays.
+ */
+export const discardUpload = mutation({
+  args: { labId: v.id("labs"), storageId: v.id("_storage") },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    await requireMembership(ctx, args.labId);
+
+    const claimed = await ctx.db
+      .query("papers")
+      .withIndex("by_pdf_storage", (q) => q.eq("storageId", args.storageId))
+      .first();
+    if (claimed !== null) {
+      return null;
+    }
+
+    await ctx.storage.delete(args.storageId);
+    return null;
+  },
+});
+
 /** The lab's library, newest first. */
 export const listPapers = query({
   args: { labId: v.id("labs") },
@@ -304,11 +475,15 @@ export const listPapers = query({
   handler: async (ctx, args) => {
     await requireMembership(ctx, args.labId);
 
+    // Bounded rather than paginated: a library this long wants a real paged
+    // view with a cursor, and the list UI has to grow a "load more" before
+    // that is worth building. Until then this is a ceiling, not a page — the
+    // 201st paper is the signal to do it properly.
     const papers = await ctx.db
       .query("papers")
       .withIndex("by_lab", (q) => q.eq("labId", args.labId))
       .order("desc")
-      .collect();
+      .take(200);
 
     return papers.map(toSummary);
   },
@@ -332,10 +507,9 @@ export const getPaper = query({
       return null;
     }
 
-    const firstPage = await ctx.db
-      .query("paperPages")
-      .withIndex("by_paper", (q) => q.eq("paperId", paper._id))
-      .first();
+    // Pages existing is not the same as text existing: a scan extracts to a
+    // row per page, every one of them empty, and nothing can anchor to that.
+    const hasText = await hasExtractedText(ctx, paper._id);
     const addedBy = await ctx.db.get(paper.addedBy);
 
     return {
@@ -351,7 +525,7 @@ export const getPaper = query({
       ingestStatus: paper.ingestStatus,
       ingestError: paper.ingestError,
       hasPdf: paper.storageId !== undefined,
-      hasText: firstPage !== null,
+      hasText,
       pageCount: paper.pageCount,
       addedAt: paper._creationTime,
       addedByName: addedBy?.name ?? addedBy?.email,
@@ -359,7 +533,17 @@ export const getPaper = query({
   },
 });
 
-/** A time-limited URL for the stored PDF, for members of the paper's lab only. */
+/**
+ * A URL for the stored PDF, mintable by members of the paper's lab only.
+ *
+ * Read that precisely: the membership check gates the *minting*, not the URL.
+ * `storage.getUrl` returns a permanent, unauthenticated link — anyone it is
+ * forwarded to can fetch the file, for as long as the file exists, whether or
+ * not they are in the lab. For a library that will hold paywalled PDFs that
+ * gap has to close, and closing it means serving the bytes through a
+ * membership-checked HTTP action instead of handing out a storage URL.
+ * Tracked in https://github.com/kgarg2468/margin/issues/9.
+ */
 export const getPdfUrl = query({
   args: { paperId: v.id("papers") },
   returns: v.union(v.null(), v.string()),
@@ -505,10 +689,31 @@ export const insertFromDoi = internalMutation({
  */
 async function fetchOpenAccessPdf(url: string): Promise<Blob | null> {
   try {
-    const response = await fetch(url, { headers: { Accept: "application/pdf" } });
+    // The URL came from OpenAlex, which is to say from outside. TLS only: this
+    // request carries no credentials, but the bytes it returns become a file
+    // the whole lab reads, and a plaintext hop is a place to swap them.
+    if (new URL(url).protocol !== "https:") {
+      return null;
+    }
+
+    const response = await fetch(url, {
+      headers: { Accept: "application/pdf" },
+      // A repository that accepts the connection and then stops talking would
+      // otherwise hold this action open for as long as the platform allows.
+      signal: AbortSignal.timeout(20_000),
+    });
     if (!response.ok) {
       return null;
     }
+
+    // Refuse the download before starting it when the host is honest about
+    // the size. It can lie or say nothing, so the check after the read stays
+    // as the one that actually holds.
+    const declaredBytes = Number(response.headers.get("content-length"));
+    if (Number.isFinite(declaredBytes) && declaredBytes > MAX_PDF_BYTES) {
+      return null;
+    }
+
     const blob = await response.blob();
     if (blob.size === 0 || blob.size > MAX_PDF_BYTES) {
       return null;
@@ -563,10 +768,33 @@ export const createFromDoi = action({
       return existing;
     }
 
-    const crossref = await fetchCrossref(doi);
-    const openAlex = await fetchOpenAlex(doi);
+    // Both at once, and neither one's failure is allowed to take the other
+    // down with it. Crossref being down is not a reason to refuse a DataCite
+    // DOI that OpenAlex knows perfectly well, and vice versa — the fallback
+    // only means anything if it survives the thing it is falling back from.
+    const [crossrefResult, openAlexResult] = await Promise.allSettled([
+      fetchCrossref(doi),
+      fetchOpenAlex(doi),
+    ]);
+    const crossref =
+      crossrefResult.status === "fulfilled" ? crossrefResult.value : null;
+    const openAlex =
+      openAlexResult.status === "fulfilled" ? openAlexResult.value : null;
+
     const metadata: PaperMetadata | null = crossref ?? openAlex;
     if (metadata === null) {
+      if (
+        crossrefResult.status === "rejected" &&
+        openAlexResult.status === "rejected"
+      ) {
+        // Neither service answered at all, so "not found" would be a claim we
+        // cannot make. Their own message says what actually happened.
+        throw crossrefResult.reason instanceof ConvexError
+          ? crossrefResult.reason
+          : new ConvexError(
+              "Neither Crossref nor OpenAlex is answering right now. Please try again in a moment.",
+            );
+      }
       throw new ConvexError(
         "DOI not found. Check it against the publisher's page, or upload the PDF instead.",
       );
