@@ -41,6 +41,25 @@ export const annotationVisibility = v.union(
 export const membershipRole = v.union(v.literal("pi"), v.literal("member"));
 
 /**
+ * Where a paper is on its way to being readable:
+ *
+ * - `needs-pdf` — metadata only. A DOI lookup found the record but no
+ *   open-access file; a member can attach the PDF later.
+ * - `pending` — the file is stored but its text layer hasn't been extracted
+ *   yet. Extraction runs in the browser (pdf.js), so a PDF that Margin fetched
+ *   itself from an open-access host waits here until someone opens it.
+ * - `extracting` / `failed` — the states above, in flight and gone wrong.
+ * - `ready` — file and per-page text both present; anchors can resolve.
+ */
+export const ingestStatus = v.union(
+  v.literal("needs-pdf"),
+  v.literal("pending"),
+  v.literal("extracting"),
+  v.literal("ready"),
+  v.literal("failed"),
+);
+
+/**
  * W3C Web Annotation-style redundant selector: a TextQuoteSelector
  * (`quote` + `prefix`/`suffix` context) plus a TextPositionSelector
  * (`start`/`end` character offsets into the page's extracted text). The
@@ -122,6 +141,18 @@ export const eventDoc = v.union(
   v.object({
     ...eventBase,
     type: v.literal("paper.ingested"),
+    paperId: v.id("papers"),
+    pageCount: v.number(),
+  }),
+  /**
+   * A *different* file for a paper that already had one — a preprint swapped
+   * for the version of record. Distinct from `paper.ingested` because it
+   * invalidates the text layer every existing annotation is anchored to, and
+   * a reader looking at why an anchor moved needs to find that fact here.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("paper.pdf_replaced"),
     paperId: v.id("papers"),
     pageCount: v.number(),
   }),
@@ -237,10 +268,15 @@ export default defineSchema({
     .index("by_lab", ["labId"]),
 
   /**
-   * A paper in a lab's library. `pageText` holds pdf.js-extracted text per
-   * page and is what anchors resolve against; it stays on the document
-   * because Convex documents are generous but not unbounded — if we ever hit
-   * the 1 MiB limit on book-length PDFs this moves to its own table.
+   * A paper in a lab's library.
+   *
+   * `doi` is stored normalized (lowercase, bare — no `https://doi.org/`
+   * prefix) so `by_lab_and_doi` can be the dedupe key: one DOI is one paper
+   * per lab, however it got there.
+   *
+   * The extracted text does NOT live here. A book-length PDF's text runs to
+   * several megabytes and a Convex document is capped at 1 MiB, so it hangs
+   * off `paperPages` instead, one document per page.
    */
   papers: defineTable({
     labId: v.id("labs"),
@@ -248,22 +284,40 @@ export default defineSchema({
     authors: v.optional(v.array(v.string())),
     year: v.optional(v.number()),
     venue: v.optional(v.string()),
+    abstract: v.optional(v.string()),
     doi: v.optional(v.string()),
     sourceUrl: v.optional(v.string()),
     storageId: v.optional(v.id("_storage")),
-    pageText: v.optional(v.array(v.string())),
     pageCount: v.optional(v.number()),
-    ingestStatus: v.union(
-      v.literal("pending"),
-      v.literal("extracting"),
-      v.literal("ready"),
-      v.literal("failed"),
-    ),
+    ingestStatus,
     ingestError: v.optional(v.string()),
     addedBy: v.id("users"),
   })
     .index("by_lab", ["labId"])
-    .index("by_lab_and_doi", ["labId", "doi"]),
+    .index("by_lab_and_doi", ["labId", "doi"])
+    /**
+     * "Is any paper using this blob?" — the question `discardUpload` asks
+     * before deleting a file the browser uploaded and then failed to attach.
+     * Without it that check would be a full scan of the table, which is a
+     * strange price to pay for cleaning up after a dropped connection.
+     */
+    .index("by_pdf_storage", ["storageId"]),
+
+  /**
+   * One page of pdf.js-extracted text, the surface anchors resolve against.
+   *
+   * A row per page rather than an array on `papers` for two reasons: the 1 MiB
+   * document limit, and the fact that the reader only ever needs the pages it
+   * is showing. `pageIndex` is 0-based and matches the `anchor.pageIndex` an
+   * annotation records.
+   */
+  paperPages: defineTable({
+    paperId: v.id("papers"),
+    pageIndex: v.number(),
+    text: v.string(),
+  })
+    .index("by_paper", ["paperId"])
+    .index("by_paper_and_page", ["paperId", "pageIndex"]),
 
   /** One journal-club meeting: a lab reads one paper, someone presents, then it gets synthesized. */
   sessions: defineTable({
