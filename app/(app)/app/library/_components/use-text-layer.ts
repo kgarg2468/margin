@@ -26,11 +26,38 @@ export type TextLayerPhase =
   | { kind: "done" }
   | { kind: "failed"; message: string };
 
+const IDLE: TextLayerPhase = { kind: "idle" };
+
 export function useTextLayer() {
   const convex = useConvex();
   const saveExtractedText = useMutation(api.papers.saveExtractedText);
   const markIngestFailed = useMutation(api.papers.markIngestFailed);
-  const [phase, setPhase] = useState<TextLayerPhase>({ kind: "idle" });
+
+  /**
+   * A phase per paper, not one for the hook.
+   *
+   * Two reads can be in flight at once — paste a DOI, then paste another while
+   * the first paper's pages are still going through pdf.js — and a single
+   * unkeyed phase would let whichever finished first speak for whichever the
+   * screen is currently showing. That is not a cosmetic mix-up: the DOI panel
+   * turns "done" into a link straight to the reader, so the wrong paper would
+   * be declared ready and opened before its own text layer existed.
+   */
+  const [phases, setPhases] = useState<ReadonlyMap<string, TextLayerPhase>>(
+    new Map(),
+  );
+
+  const phaseFor = useCallback(
+    (paperId: Id<"papers">): TextLayerPhase => phases.get(paperId) ?? IDLE,
+    [phases],
+  );
+
+  // Stable, so `read` is too — `PdfPanel` starts extraction from an effect and
+  // a `read` that changed identity every render would be a loop.
+  const setPhase = useCallback((paperId: Id<"papers">, phase: TextLayerPhase) => {
+    setPhases((previous) => new Map(previous).set(paperId, phase));
+  }, []);
+
   // Extraction is idempotent but not cheap — eighteen pages of pdf.js — and
   // the callers below are reactive, so they will ask more than once for the
   // same paper. One attempt each.
@@ -46,7 +73,7 @@ export function useTextLayer() {
       attempted.current.add(paperId);
 
       try {
-        setPhase({ kind: "working", message: "Fetching the PDF…" });
+        setPhase(paperId, { kind: "working", message: "Fetching the PDF…" });
         const url = await convex.query(api.papers.getPdfUrl, { paperId });
         if (url === null || url === undefined) {
           throw new Error("The stored file has gone missing.");
@@ -60,17 +87,17 @@ export function useTextLayer() {
         const data = await response.arrayBuffer();
         const extraction = await extractPdf(data, {
           onProgress: (pagesDone, pages) =>
-            setPhase({
+            setPhase(paperId, {
               kind: "working",
               message: `Reading page ${pagesDone} of ${pages}…`,
             }),
         });
         await saveExtractedText({ paperId, pages: extraction.pages });
-        setPhase({ kind: "done" });
+        setPhase(paperId, { kind: "done" });
         return true;
       } catch (caught) {
         const message = readableError(caught, "That PDF wouldn't open.");
-        setPhase({ kind: "failed", message });
+        setPhase(paperId, { kind: "failed", message });
         try {
           // Otherwise it sits at "text pending" forever, indistinguishable
           // from a paper nobody has opened yet.
@@ -82,8 +109,8 @@ export function useTextLayer() {
         return false;
       }
     },
-    [convex, saveExtractedText, markIngestFailed],
+    [convex, saveExtractedText, markIngestFailed, setPhase],
   );
 
-  return { phase, read };
+  return { phaseFor, read };
 }

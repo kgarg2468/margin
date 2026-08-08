@@ -137,10 +137,10 @@ export function PdfPanel({
 
   // Attaching a file and reading a stored one are two routes to the same two
   // sentences, so they share them rather than each drawing their own.
+  const phase = textLayer.phaseFor(paperId);
   const busyMessage =
-    status ?? (textLayer.phase.kind === "working" ? textLayer.phase.message : null);
-  const problem =
-    error ?? (textLayer.phase.kind === "failed" ? textLayer.phase.message : null);
+    status ?? (phase.kind === "working" ? phase.message : null);
+  const problem = error ?? (phase.kind === "failed" ? phase.message : null);
 
   return (
     <section className="flex flex-col gap-4">

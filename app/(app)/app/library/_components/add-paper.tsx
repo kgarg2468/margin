@@ -205,8 +205,14 @@ function DoiTab({
         </button>
       </form>
 
+      {/* Keyed to this result's own paper: a second DOI can be submitted while
+          the first one's pages are still being read, and the sentence below
+          turns "done" into a link to the reader. */}
       {result !== null && (
-        <DoiOutcome result={result} textLayer={textLayer.phase} />
+        <DoiOutcome
+          result={result}
+          textLayer={textLayer.phaseFor(result.paperId)}
+        />
       )}
     </div>
   );
