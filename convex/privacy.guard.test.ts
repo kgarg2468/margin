@@ -1,3 +1,4 @@
+import type { ValidatorJSON } from "convex/values";
 import { describe, expect, it } from "vitest";
 import schema from "./schema";
 
@@ -40,6 +41,26 @@ type Json = unknown;
 
 function isRecord(node: Json): node is Record<string, Json> {
   return typeof node === "object" && node !== null && !Array.isArray(node);
+}
+
+/**
+ * The wire form of a validator.
+ *
+ * `ValidatorJSON` is public API and `.json` is what Convex itself pushes to a
+ * deployment, but the property is absent from the declared type of the wide
+ * `VUnion | VObject | …` union that `schema.tables[x].validator` resolves to.
+ * One narrow accessor, asserted at runtime, rather than a cast at each of the
+ * three call sites — if a future convex release moves it, this throws here
+ * with a name instead of silently walking `undefined` and passing.
+ */
+function wireForm(validator: unknown): ValidatorJSON {
+  const json = (validator as { json?: unknown }).json;
+  if (!isRecord(json)) {
+    throw new Error(
+      "Convex validator has no `.json` wire form; this guard cannot introspect the schema and must not be assumed to pass.",
+    );
+  }
+  return json as ValidatorJSON;
 }
 
 /** Every field declared anywhere under `node`, as `a.b.c` paths. */
@@ -88,7 +109,7 @@ function literals(node: Json): string[] {
 const tableNames = Object.keys(schema.tables);
 
 const tableValidators = Object.entries(schema.tables).map(
-  ([name, table]) => [name, table.validator.json] as const,
+  ([name, table]) => [name, wireForm(table.validator)] as const,
 );
 
 /** `field` → the `table.a.b.field` paths it appears at, across the schema. */
@@ -174,7 +195,7 @@ describe("no dwell or read-timing field", () => {
 // --- 3. The ledger has no read event, and never copies an annotation body --
 
 describe("the events ledger", () => {
-  const eventsValidator = schema.tables.events.validator.json;
+  const eventsValidator = wireForm(schema.tables.events.validator);
 
   it("has no read/view event type", () => {
     // Event types are dotted names like `annotation.created`; compare per
@@ -230,19 +251,22 @@ describe("the events ledger", () => {
 
 describe("annotation visibility", () => {
   it("admits exactly private and lab", () => {
-    const annotations = schema.tables.annotations.validator.json;
-    expect(isRecord(annotations) && annotations.type === "object").toBe(true);
+    const annotations = wireForm(schema.tables.annotations.validator);
+    if (annotations.type !== "object") {
+      throw new Error("annotations is no longer an object validator");
+    }
 
-    const fields = isRecord(annotations) ? annotations.value : undefined;
-    const visibility =
-      isRecord(fields) && isRecord(fields.visibility)
-        ? fields.visibility
-        : undefined;
+    const visibility = annotations.value.visibility;
+    if (visibility === undefined) {
+      throw new Error("annotations.visibility has disappeared from the schema");
+    }
 
-    expect(visibility, "annotations.visibility must exist").toBeDefined();
-    expect(visibility?.optional, "visibility is never absent").toBe(false);
+    // Not optional: an annotation with no visibility is an annotation whose
+    // audience the code has to guess, and the safe guess is the one that
+    // leaks.
+    expect(visibility.optional, "visibility is never absent").toBe(false);
 
-    expect([...literals(visibility?.fieldType)].sort()).toEqual([
+    expect([...literals(visibility.fieldType)].sort()).toEqual([
       "lab",
       "private",
     ]);
