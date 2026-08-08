@@ -95,10 +95,13 @@
   /* keyboard focus, always the accent so it reads as "interactive" */
   --ring: var(--accent);
 
-  /* a highlighter pass over a passage of text */
+  /* a highlighter pass over a passage of text — also the ::selection wash,
+   * which is why it is stronger than a background tint wants to be: at 16%
+   * over sand a selection was functionally invisible (the co-founder review
+   * that prompted this said "you can't even highlight"). */
   --highlight: light-dark(
-    color-mix(in oklab, var(--wedgwood-500) 16%, transparent),
-    color-mix(in oklab, var(--wedgwood-300) 22%, transparent)
+    color-mix(in oklab, var(--wedgwood-500) 30%, transparent),
+    color-mix(in oklab, var(--wedgwood-300) 32%, transparent)
   );
 
   /* --- annotation ontology ------------------------------------

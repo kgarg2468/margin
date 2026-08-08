@@ -99,6 +99,17 @@
   top: 0;
 }
 
-.textLayer ::selection {
-  background-color: var(--highlight);
+/*
+ * The selection wash is a literal, not a token, twice over. The canvas under
+ * these spans is the paper's own white in either colour scheme, so the theme
+ * has no say in what reads on it; and `::selection` is a highlight
+ * pseudo-element, where custom properties have a history of resolving to
+ * nothing at all once Lightning CSS has lowered `light-dark()` into variable
+ * toggles — which is exactly how this rule shipped as an invisible highlight.
+ * Wedgwood at 40% over white is unmistakably a selection and still leaves
+ * the ink beneath it legible.
+ */
+.textLayer :global(span)::selection,
+.textLayer :global(br)::selection {
+  background-color: rgba(64, 104, 160, 0.4);
 }

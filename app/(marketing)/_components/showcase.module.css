@@ -1,0 +1,61 @@
+/*
+ * The Fig. 1 build-up.
+ *
+ * The scroll wrapper decides *which* notes are on (a number), and these rules
+ * decide what "off" looks like and how "on" arrives: the wash sweeps across
+ * the passage left to right the way a highlighter does, the underline settles
+ * a beat later, and the note fades up in the margin. All of it is state the
+ * server renders as "on", so a reader without JavaScript — or without the
+ * patience for scroll theatre — still gets the finished figure.
+ *
+ * Transitions only exist under no-preference; with reduced motion the wrapper
+ * never switches anything off, and these rules do nothing at all.
+ */
+
+.mark {
+  background-repeat: no-repeat;
+  background-position: 0 0;
+  background-size: 100% 100%;
+  box-shadow: inset 0 -0.09em 0 0 var(--mark-ink);
+}
+
+.marker {
+  opacity: 1;
+}
+
+.note {
+  opacity: 1;
+  translate: 0 0;
+}
+
+[data-active="false"] .mark,
+.mark[data-active="false"] {
+  background-size: 0% 100%;
+  box-shadow: inset 0 -0.09em 0 0 transparent;
+}
+
+[data-active="false"] .marker,
+.marker[data-active="false"] {
+  opacity: 0;
+}
+
+.note[data-active="false"] {
+  opacity: 0;
+  translate: 0 12px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .mark {
+    transition:
+      background-size 0.6s cubic-bezier(0.16, 1, 0.3, 1),
+      box-shadow 0.45s ease 0.2s;
+  }
+  .marker {
+    transition: opacity 0.4s ease 0.3s;
+  }
+  .note {
+    transition:
+      opacity 0.55s cubic-bezier(0.16, 1, 0.3, 1) 0.15s,
+      translate 0.55s cubic-bezier(0.16, 1, 0.3, 1) 0.15s;
+  }
+}
