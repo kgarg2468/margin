@@ -20,15 +20,30 @@ const DOI_PREFIXES = [
 
 /** Lowercase, unwrapped, trimmed. Returns `""` for input that holds no DOI. */
 export function normalizeDoi(input: string): string {
-  let doi = input.trim().toLowerCase();
+  let doi = input.trim();
+
+  // Email clients and reference managers wrap bare URLs in angle brackets:
+  // `<https://doi.org/10.1038/nature12373>`. The brackets are the wrapper's,
+  // never the DOI's.
+  while (doi.startsWith("<") && doi.endsWith(">")) {
+    doi = doi.slice(1, -1).trim();
+  }
+
+  // A DOI that travelled through a URL comes back with its slash percent-
+  // encoded. Decoding before anything else is what stops `10.1000%2fabc` and
+  // `10.1000/abc` from landing as two papers. Only the slash: a real DOI
+  // suffix may legitimately contain a literal `%`.
+  doi = doi.replace(/%2f/gi, "/").toLowerCase();
+
   for (const prefix of DOI_PREFIXES) {
     if (doi.startsWith(prefix)) {
       doi = doi.slice(prefix.length);
       break;
     }
   }
+
   // Publishers love a trailing period, and copy-paste loves a trailing slash.
-  return doi.replace(/[.\s]+$/, "").trim();
+  return doi.replace(/[./\s]+$/, "").trim();
 }
 
 /**
