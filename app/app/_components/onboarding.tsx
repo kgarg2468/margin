@@ -115,6 +115,7 @@ function CreateLabCard() {
 
 export function JoinLabCard() {
   const redeemInvite = useMutation(api.invites.redeemInvite);
+  const { selectLab } = useLabs();
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
@@ -135,7 +136,13 @@ export function JoinLabCard() {
           setError(null);
           setPending(true);
           try {
-            await redeemInvite({ code: String(formData.get("code") ?? "") });
+            const { labId } = await redeemInvite({
+              code: String(formData.get("code") ?? ""),
+            });
+            // Land in the lab you just joined. Without this you arrive in
+            // whichever lab sorts first, which for anyone in two labs is the
+            // wrong one — and this card is also reachable from inside a lab.
+            selectLab(labId);
           } catch (caught) {
             setError(readableError(caught, "That invite code is not valid."));
           } finally {

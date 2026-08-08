@@ -5,25 +5,27 @@ import { eyebrowClass } from "@/lib/ui";
 import { useAuthActions } from "@convex-dev/auth/react";
 import { useQuery } from "convex/react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import type { LabSummary } from "./lab-provider";
 import { useLabs } from "./lab-provider";
 
 /**
- * Nav destinations that don't exist yet. They are listed rather than hidden
- * because the shape of the product should be legible from the first screen —
- * but they are inert, not links to a 404.
+ * Sections that exist, and sections that don't yet. The unbuilt ones are
+ * listed rather than hidden because the shape of the product should be legible
+ * from the first screen — but they are inert, not links to a 404.
  */
-const upcoming = [
-  { label: "Library", note: "Papers the lab is reading" },
-  { label: "Sessions", note: "Journal club meetings" },
+const sections = [
+  { label: "Library", href: "/app/library", note: "Papers the lab is reading" },
 ];
+
+const upcoming = [{ label: "Sessions", note: "Journal club meetings" }];
 
 export function Sidebar() {
   const { labs, currentLab, selectLab } = useLabs();
   const viewer = useQuery(api.users.viewer);
   const { signOut } = useAuthActions();
   const router = useRouter();
+  const pathname = usePathname();
 
   return (
     <aside className="flex shrink-0 flex-col gap-8 border-b border-rule bg-surface-sunken px-6 py-6 md:h-screen md:w-64 md:border-b-0 md:border-r md:py-8">
@@ -65,6 +67,26 @@ export function Sidebar() {
       <nav className="flex flex-col gap-4">
         <span className={eyebrowClass}>Sections</span>
         <ul className="flex flex-col gap-3">
+          {sections.map((item) => {
+            const active = pathname.startsWith(item.href);
+            return (
+              <li key={item.label} className="flex flex-col gap-0.5">
+                <Link
+                  href={item.href}
+                  aria-current={active ? "page" : undefined}
+                  className={
+                    "font-sans text-sm underline-offset-4 hover:underline " +
+                    (active ? "text-ink-strong" : "text-ink-muted")
+                  }
+                >
+                  {item.label}
+                </Link>
+                <span className="font-sans text-xs text-ink-faint">
+                  {item.note}
+                </span>
+              </li>
+            );
+          })}
           {upcoming.map((item) => (
             <li key={item.label} className="flex flex-col gap-0.5">
               <span className="flex items-baseline gap-2">

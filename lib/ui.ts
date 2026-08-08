@@ -33,5 +33,10 @@ export const cardClass = "rounded-md border border-rule bg-surface p-6";
 export const errorClass =
   "border-l-2 border-accent-strong pl-3 font-sans text-sm text-ink";
 
+/** A state marker in the chrome typeface: a librarian's pencil note, not a badge. */
+export const chipClass =
+  "inline-flex items-center rounded-sm border border-rule px-1.5 py-0.5 " +
+  "font-sans text-[10px] uppercase tracking-[0.14em] text-ink-faint";
+
 export const eyebrowClass =
   "font-sans text-xs font-medium uppercase tracking-[0.18em] text-ink-faint";
