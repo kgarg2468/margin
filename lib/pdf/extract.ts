@@ -198,6 +198,39 @@ export async function extractPdfFile(
   return await extractPdf(await file.arrayBuffer(), options);
 }
 
+/**
+ * Say what pdf.js actually objected to, when it objected to something we can
+ * name.
+ *
+ * Every failure to open a file used to arrive at the member as one sentence
+ * that hedged across all of them — "it may be encrypted, try re-saving it" —
+ * which is the right advice for roughly one case and noise for the rest. The
+ * two cases worth separating are the two a member can do something about: a
+ * PDF that wants a password, and a file that isn't a readable PDF at all. Both
+ * have a different fix, and neither is guessable from the hedge.
+ *
+ * pdf.js signals them with its own exception classes, but they arrive here
+ * across a worker boundary and through a `BaseException` whose prototype is a
+ * plain `Error`, so `instanceof` is not something to rely on — the class name
+ * is carried deliberately on `name`, and that is what this reads. Anything
+ * else is a genuine surprise: it returns `undefined` and the call site keeps
+ * whatever it was going to say, because a wrong specific is worse than a
+ * vague true one.
+ */
+export function describePdfOpenError(caught: unknown): string | undefined {
+  if (typeof caught !== "object" || caught === null || !("name" in caught)) {
+    return undefined;
+  }
+  switch ((caught as { name: unknown }).name) {
+    case "PasswordException":
+      return "This PDF is password-protected, so Margin can't read it. Open it with the password, save or print a fresh copy without one, and drop that in instead.";
+    case "InvalidPDFException":
+      return "This file is damaged, or it isn't a PDF underneath. If it opens elsewhere, re-download or re-save it and try again.";
+    default:
+      return undefined;
+  }
+}
+
 /** Does this file look like something pdf.js can open? Checked before we bother reading it. */
 export function isPdfFile(file: File): boolean {
   return (
