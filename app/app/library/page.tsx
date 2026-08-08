@@ -1,0 +1,127 @@
+"use client";
+
+import { api } from "@/convex/_generated/api";
+import { eyebrowClass, secondaryButtonClass } from "@/lib/ui";
+import { useQuery } from "convex/react";
+import Link from "next/link";
+import { useState } from "react";
+import type { LabSummary } from "../_components/lab-provider";
+import { useLabs } from "../_components/lab-provider";
+import { AddPaper } from "./_components/add-paper";
+import { StatusChip, byline } from "./_components/paper-meta";
+
+export default function LibraryPage() {
+  const { labs, currentLab } = useLabs();
+
+  if (labs === undefined) {
+    return <p className="font-sans text-sm text-ink-faint">Loading…</p>;
+  }
+
+  if (currentLab === null) {
+    return (
+      <div className="flex flex-col gap-3 border-l border-rule pl-6">
+        <h1 className="font-serif text-4xl tracking-tight text-ink-strong">
+          Library
+        </h1>
+        <p className="max-w-prose font-serif text-base leading-relaxed text-ink-muted">
+          A library belongs to a lab, and you aren&rsquo;t in one yet.
+        </p>
+        <Link
+          href="/app"
+          className="font-sans text-sm text-accent underline-offset-4 hover:underline"
+        >
+          Start or join a lab
+        </Link>
+      </div>
+    );
+  }
+
+  return <Library lab={currentLab} />;
+}
+
+function Library({ lab }: { lab: LabSummary }) {
+  const papers = useQuery(api.papers.listPapers, { labId: lab._id });
+  const [adding, setAdding] = useState(false);
+
+  const isEmpty = papers !== undefined && papers.length === 0;
+
+  return (
+    <div className="flex flex-col gap-10">
+      <header className="flex flex-col gap-3 border-l border-rule pl-6">
+        <h1 className="font-serif text-4xl tracking-tight text-ink-strong">
+          Library
+        </h1>
+        <p className="font-sans text-sm text-ink-muted">
+          What {lab.name} is reading
+          {papers !== undefined && papers.length > 0
+            ? ` · ${papers.length} ${papers.length === 1 ? "paper" : "papers"}`
+            : ""}
+        </p>
+      </header>
+
+      {/* An empty library has nothing to hide the form behind. */}
+      {isEmpty || adding ? (
+        <div className="flex flex-col gap-3">
+          <AddPaper labId={lab._id} />
+          {!isEmpty && (
+            <button
+              type="button"
+              onClick={() => setAdding(false)}
+              className="self-start font-sans text-sm text-accent underline-offset-4 hover:underline"
+            >
+              Done adding
+            </button>
+          )}
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setAdding(true)}
+          className={`${secondaryButtonClass} self-start`}
+        >
+          Add a paper
+        </button>
+      )}
+
+      <section className="flex flex-col gap-5">
+        <h2 className={eyebrowClass}>Papers</h2>
+
+        {papers === undefined ? (
+          <p className="font-sans text-sm text-ink-faint">Loading…</p>
+        ) : papers.length === 0 ? (
+          <p className="max-w-prose font-serif text-base leading-relaxed text-ink-muted">
+            Nothing on the shelf yet. A library starts with one paper: paste a
+            DOI and Margin fetches the record, or drop in a PDF and it reads the
+            text so the margins have something to hold on to.
+          </p>
+        ) : (
+          <ul className="flex flex-col divide-y divide-rule border-y border-rule">
+            {papers.map((paper) => {
+              const line = byline(paper);
+              return (
+                <li key={paper._id}>
+                  <Link
+                    href={`/app/library/${paper._id}`}
+                    className="group flex flex-col gap-1 py-4"
+                  >
+                    <span className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                      <span className="font-serif text-xl leading-snug text-ink-strong underline-offset-4 group-hover:underline">
+                        {paper.title}
+                      </span>
+                      <StatusChip status={paper.ingestStatus} />
+                    </span>
+                    {line.length > 0 && (
+                      <span className="font-sans text-sm text-ink-muted">
+                        {line}
+                      </span>
+                    )}
+                  </Link>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+    </div>
+  );
+}
