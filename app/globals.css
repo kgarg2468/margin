@@ -168,6 +168,31 @@
   color-scheme: light dark;
 }
 
+/*
+ * Which branch of every `light-dark()` above is used follows from the used
+ * value of `color-scheme` — but only where `light-dark()` is native. This file
+ * is compiled by Lightning CSS (via Turbopack), whose browser targets predate
+ * `light-dark()`, so it lowers each one to a pair of toggle custom properties
+ * and then wires those toggles up from the `color-scheme` declarations it can
+ * see. It emits them for `:root`, `.light` and `.dark` — and for nothing else,
+ * so with `color-scheme: light dark` alone the light branch won every time and
+ * `prefers-color-scheme: dark` did nothing at all.
+ *
+ * Restating the scheme under the media query is enough: Lightning CSS lowers
+ * this rule exactly like the two below it, which is precisely the toggle that
+ * was missing. It is also true on its own terms — a system that asks for dark,
+ * absent an explicit opt-out, is dark — so it stays correct, rather than merely
+ * harmless, once the polyfill is no longer needed.
+ *
+ * `:not(.light)` rather than source order, so the opt-out below cannot be
+ * defeated by where this block happens to sit. It matches the `dark:` variant.
+ */
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) {
+    color-scheme: dark;
+  }
+}
+
 .light {
   color-scheme: light;
 }
@@ -202,6 +227,40 @@
   /* Serif leads (reading + headings); sans is for UI chrome only. */
   --font-serif: var(--font-source-serif), ui-serif, Georgia, serif;
   --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+}
+
+/*
+ * A comfortable hit area on a control that has no business being 44px tall.
+ *
+ * Margin's chrome is deliberately small — a filter chip, a `Reply`, an `Edit`
+ * under a note — because the paper is the thing being looked at and the
+ * controls are marginalia. Padding those up to the 44px a thumb wants would
+ * turn the margin into a toolbar. So the hit box is grown instead of the
+ * control: a transparent ::after, centred on the element, floored at 44px in
+ * both axes and taking no part in layout. The label stays exactly as small as
+ * it was drawn and the tap lands anyway.
+ *
+ * Only for controls that are statically positioned (it claims `position` for
+ * itself) and not clipped by an `overflow: hidden` ancestor. Where two of them
+ * sit side by side, keep roughly a 44px rhythm between their centres — the
+ * boxes may overlap, and the later one in paint order takes the overlap.
+ */
+@utility tap-target {
+  position: relative;
+  /* No 300ms double-tap-zoom wait on a control this small. */
+  touch-action: manipulation;
+
+  &::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    translate: -50% -50%;
+    width: 100%;
+    height: 100%;
+    min-width: 44px;
+    min-height: 44px;
+  }
 }
 
 body {

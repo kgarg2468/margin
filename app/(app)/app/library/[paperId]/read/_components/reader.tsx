@@ -413,7 +413,11 @@ export function Reader({
         {/* No notes, no filter: a "Show" with nothing after it reads like a
             control that failed to load. */}
         <div
-          className={`${counts.size === 0 ? "hidden" : "flex"} w-full flex-wrap items-center gap-1.5 lg:w-auto`}
+          // gap-y-2 rather than gap-1.5 all round: these wrap to two or three
+          // rows on a phone, and each chip's hit box is taller than the chip.
+          // At this pitch the overlap between rows falls in the gutter, not on
+          // anything drawn.
+          className={`${counts.size === 0 ? "hidden" : "flex"} w-full flex-wrap items-center gap-x-1.5 gap-y-2 lg:w-auto`}
         >
           <span className={`${eyebrowClass} mr-1`}>Show</span>
           {ANNOTATION_TYPES.filter(
@@ -432,7 +436,7 @@ export function Reader({
                 onClick={() => toggleFilter(style.value)}
                 style={{ color: on ? style.ink : undefined }}
                 className={
-                  "rounded-sm border px-1.5 py-0.5 font-sans text-[10px] uppercase tracking-[0.1em] transition-colors " +
+                  "tap-target rounded-sm border px-1.5 py-1.5 font-sans text-[10px] uppercase tracking-[0.1em] transition-colors " +
                   (on
                     ? "border-current"
                     : "border-rule text-ink-faint hover:border-ink-faint")
@@ -446,7 +450,7 @@ export function Reader({
             <button
               type="button"
               onClick={() => setFilter(new Set())}
-              className="font-sans text-[11px] text-accent underline-offset-4 hover:underline"
+              className="tap-target font-sans text-[11px] text-accent underline-offset-4 hover:underline"
             >
               All
             </button>

@@ -8,6 +8,7 @@ import { useMutation, useQuery } from "convex/react";
 import Link from "next/link";
 import { useState } from "react";
 import { SessionStatusChip } from "../sessions/_components/session-row";
+import { ConfirmAction } from "./confirm-action";
 import { DigestInbox } from "./digest";
 import { readableError } from "./errors";
 import type { LabSummary } from "./lab-provider";
@@ -20,18 +21,6 @@ function formatDate(ms: number): string {
     year: "numeric",
   });
 }
-
-/**
- * Destructive actions are quiet text, not red buttons — but they arm before
- * they fire, so nothing irreversible is ever one stray click away.
- */
-const quietActionClass =
-  "font-sans text-xs text-accent underline-offset-4 hover:underline " +
-  "disabled:cursor-not-allowed disabled:opacity-50";
-
-const quietConfirmClass =
-  "font-sans text-xs font-medium text-accent-strong underline underline-offset-4 " +
-  "disabled:cursor-not-allowed disabled:opacity-50";
 
 export function LabOverview({ lab }: { lab: LabSummary }) {
   return (
@@ -66,64 +55,6 @@ export function LabOverview({ lab }: { lab: LabSummary }) {
 
       <LeaveLab lab={lab} />
     </div>
-  );
-}
-
-/**
- * A two-step affordance for anything that can't be undone: the first click
- * arms it, the second one commits.
- */
-function ConfirmAction({
-  label,
-  confirmLabel,
-  run,
-}: {
-  label: string;
-  confirmLabel: string;
-  run: () => Promise<void>;
-}) {
-  const [armed, setArmed] = useState(false);
-  const [pending, setPending] = useState(false);
-
-  if (!armed) {
-    return (
-      <button
-        type="button"
-        className={quietActionClass}
-        onClick={() => setArmed(true)}
-      >
-        {label}
-      </button>
-    );
-  }
-
-  return (
-    <span className="flex items-baseline gap-3">
-      <button
-        type="button"
-        disabled={pending}
-        className={quietConfirmClass}
-        onClick={async () => {
-          setPending(true);
-          try {
-            await run();
-          } finally {
-            setPending(false);
-            setArmed(false);
-          }
-        }}
-      >
-        {pending ? "Working…" : confirmLabel}
-      </button>
-      <button
-        type="button"
-        disabled={pending}
-        className={quietActionClass}
-        onClick={() => setArmed(false)}
-      >
-        Cancel
-      </button>
-    </span>
   );
 }
 

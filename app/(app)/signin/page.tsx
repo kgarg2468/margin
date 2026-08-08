@@ -2,7 +2,7 @@
 
 import { useAuthActions } from "@convex-dev/auth/react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
 import {
   errorClass,
@@ -14,12 +14,62 @@ import {
 
 type Flow = "signIn" | "signUp";
 
+/**
+ * Which half of the world broke.
+ *
+ * A rejected credential is the only failure that comes back as an answer: the
+ * `/api/auth` proxy catches what `auth:signIn` threw and replies 400 with a
+ * JSON `{ error }`, which @convex-dev/auth rethrows as an Error carrying that
+ * message. Everything between the browser and that answer fails earlier and
+ * differently — an unreachable server rejects `fetch` with a TypeError, and a
+ * 404/405/5xx answers with HTML or bare text, so reading it as JSON throws a
+ * SyntaxError before there is any message to carry.
+ *
+ * Worth telling apart, because the credential copy is an accusation. Saying
+ * the password may be too short when the route is simply down sends a reader
+ * off to change a password that was never wrong — which is exactly what this
+ * screen did when `/api/auth` was 404ing.
+ */
+function isServiceFailure(error: unknown): boolean {
+  if (error instanceof TypeError || error instanceof SyntaxError) {
+    return true;
+  }
+  // A proxied Convex error always has something to say. An Error with nothing
+  // in it came from a response that had no `error` field to read.
+  return !(error instanceof Error) || error.message.trim().length === 0;
+}
+
+function flowFromParam(value: string | null): Flow {
+  return value === "signup" ? "signUp" : "signIn";
+}
+
 export default function SignInPage() {
   const { signIn } = useAuthActions();
   const router = useRouter();
-  const [flow, setFlow] = useState<Flow>("signIn");
+  const searchParams = useSearchParams();
+  // The landing CTAs promise an account, so they arrive at `?flow=signup` and
+  // land on the form that makes one. Seeded once: after that the toggle owns
+  // the mode, and mirrors it back into the URL below.
+  const [flow, setFlow] = useState<Flow>(() =>
+    flowFromParam(searchParams.get("flow")),
+  );
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+
+  function switchFlow() {
+    const next: Flow = flow === "signIn" ? "signUp" : "signIn";
+    setFlow(next);
+    setError(null);
+    // history rather than the router: the mode is a detail of this screen, and
+    // a re-render is not worth a round trip for the RSC payload. Keeps a
+    // refresh — and anything the reader copies out of the address bar — on the
+    // form they were actually looking at.
+    window.history.replaceState(
+      null,
+      "",
+      next === "signUp" ? "/signin?flow=signup" : "/signin",
+    );
+  }
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -32,13 +82,15 @@ export default function SignInPage() {
     try {
       await signIn("password", formData);
       router.push("/app");
-    } catch {
-      // Convex Auth deliberately does not say which half of the credential
-      // was wrong, and neither do we.
+    } catch (caught) {
       setError(
-        flow === "signIn"
-          ? "That email and password don't match an account."
-          : "We couldn't create that account. It may already exist, or the password may be shorter than 8 characters.",
+        isServiceFailure(caught)
+          ? "We couldn't reach the sign-in service — that's on us, not on what you typed. Try again in a moment."
+          : // Convex Auth deliberately does not say which half of the
+            // credential was wrong, and neither do we.
+            flow === "signIn"
+            ? "That email and password don't match an account."
+            : "We couldn't create that account. It may already exist, or the password may be shorter than 8 characters.",
       );
       setPending(false);
     }
@@ -54,11 +106,16 @@ export default function SignInPage() {
           >
             margin
           </Link>
-          <p className="font-serif text-base leading-relaxed text-ink-muted">
+          {/* The sentence, not the wordmark, is what this page is called: it
+              says which of the two things you are here to do, and it changes
+              when you switch. The wordmark above it stays what it looks like
+              — the way home. Sized as it was drawn; a heading level is not a
+              type scale. */}
+          <h1 className="font-serif text-base leading-relaxed text-ink-muted">
             {flow === "signIn"
               ? "Pick up where your lab left off."
               : "Start reading with your lab."}
-          </p>
+          </h1>
         </header>
 
         <form onSubmit={handleSubmit} className="flex flex-col gap-5">
@@ -117,7 +174,11 @@ export default function SignInPage() {
             </p>
           )}
 
-          <button type="submit" disabled={pending} className={primaryButtonClass}>
+          <button
+            type="submit"
+            disabled={pending}
+            className={`${primaryButtonClass} tap-target`}
+          >
             {pending
               ? "One moment…"
               : flow === "signIn"
@@ -130,11 +191,8 @@ export default function SignInPage() {
           {flow === "signIn" ? "New to Margin? " : "Already have an account? "}
           <button
             type="button"
-            className={linkButtonClass}
-            onClick={() => {
-              setFlow(flow === "signIn" ? "signUp" : "signIn");
-              setError(null);
-            }}
+            className={`${linkButtonClass} tap-target`}
+            onClick={switchFlow}
           >
             {flow === "signIn" ? "Create an account" : "Sign in"}
           </button>

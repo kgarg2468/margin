@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnnotationCard } from "./annotation-card";
+import { typeStyle } from "./ontology";
 import { eyebrowClass } from "@/lib/ui";
 import type { AnchorState, AnnotationId, AnnotationView } from "./types";
 
@@ -16,6 +17,13 @@ export type RailCard = {
 
 /** Breathing room between two cards that want the same line. */
 const GAP = 10;
+
+/**
+ * How far a card has to be pushed before the gap between it and its passage
+ * needs explaining. Below this it still reads as "beside", and a tether would
+ * be a line drawn to somewhere the eye already was.
+ */
+const TETHER_MIN = 12;
 
 /**
  * The margin.
@@ -110,12 +118,15 @@ export function MarginRail({
     sizes.current?.observe(element);
   }, []);
 
-  const placed: { card: RailCard; top: number }[] = [];
+  const placed: { card: RailCard; top: number; drift: number }[] = [];
   if (aligned) {
     let floor = 0;
     for (const card of [...cards].sort((a, b) => a.top - b.top)) {
-      const top = Math.max(card.top - originTop, floor);
-      placed.push({ card, top });
+      const wanted = card.top - originTop;
+      const top = Math.max(wanted, floor);
+      // How far the pass above had to move it. Everything the reader needs to
+      // be told about the gap is already known here.
+      placed.push({ card, top, drift: top - wanted });
       floor = top + (heights.get(card.annotation._id) ?? 90) + GAP;
     }
   }
@@ -175,6 +186,34 @@ export function MarginRail({
               {card(entry)}
             </div>
           ))}
+
+          {/* A tether for a card that could not have the line it asked for.
+              A crowded passage pushes later cards a long way down — far enough
+              that "the note beside the passage" stops being literally true and
+              type colour is left doing all the work. This runs in the card's
+              own ink from the line it belongs to down to where it ended up.
+
+              In the gutter, and drawn after the cards, because the space it
+              has to cross is by definition occupied: the reason a card moved
+              is that another one is sitting where it wanted to be, and a
+              tether at the cards' own left edge is hidden behind exactly the
+              card that displaced it. Decorative — the card already quotes its
+              passage in words, and clicking it still goes there. */}
+          {placed.map(({ card: entry, top, drift }) =>
+            drift < TETHER_MIN ? null : (
+              <span
+                key={`${entry.annotation._id}-tether`}
+                aria-hidden
+                className="pointer-events-none absolute -left-2 w-px motion-safe:transition-opacity"
+                style={{
+                  top: top - drift,
+                  height: drift,
+                  backgroundColor: typeStyle(entry.annotation.type).ink,
+                  opacity: activeId === entry.annotation._id ? 0.8 : 0.3,
+                }}
+              />
+            ),
+          )}
         </div>
       ) : (
         <div className="flex flex-col gap-2.5">
