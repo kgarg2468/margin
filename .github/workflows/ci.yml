@@ -5,6 +5,12 @@ on:
   push:
     branches: [main]
 
+# A push to a branch with an open PR triggers both events. Only the newest run
+# of either matters, and a superseded run holds a runner for nothing.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   ci:
     name: ci
@@ -27,10 +33,72 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
+      # The app's tsconfig and the Convex functions' tsconfig are different
+      # projects: `convex/tsconfig.json` has no DOM lib and its own module
+      # resolution, so a Convex function can reference `window` — or drift from
+      # the settings the deployment actually compiles under — and pass the step
+      # above. Convex's own preflight is `npx convex codegen --typecheck enable`,
+      # but codegen pulls the deployment config before it does anything and so
+      # cannot run without a live deployment (convex 1.43); this is the half of
+      # it that works offline.
+      - name: Typecheck Convex functions
+        run: npm run typecheck:convex
+
       # Unit tests for the modules whose bugs are silent: anchoring, the
-      # digest engine, and the synthesis sanitizer.
+      # digest engine, the synthesis sanitizer — and the privacy constitution,
+      # which is asserted against the schema in convex/privacy.guard.test.ts.
       - name: Test
         run: npm test
 
       - name: Build
         run: npm run build
+
+  # Runs in parallel with `ci` rather than after it: it repeats the build, but
+  # a second runner is cheaper than serializing two minutes onto every PR, and
+  # a red X here should say "the app is broken in a browser" without having to
+  # read which step of a long job failed.
+  smoke:
+    name: browser smoke
+    runs-on: ubuntu-latest
+
+    # No Convex deployment exists in CI, and none is wanted: this suite is
+    # about the Next.js artifact and `middleware.ts`, both of which answer
+    # before Convex is reached. `NEXT_PUBLIC_CONVEX_URL` still has to be set —
+    # `ConvexReactClient` is constructed at module scope and throws without it —
+    # so `playwright.config.ts` supplies a well-formed URL that deliberately
+    # does not resolve, for the build and the server both. It is set there
+    # rather than here so the two can never drift apart.
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Chromium
+        # Chromium only. The suite asserts routing and server responses, not
+        # rendering quirks, so a second engine would double the runtime and
+        # find nothing.
+        run: npx playwright install --with-deps chromium
+
+      # `playwright.config.ts` owns the build and the server both: `NEXT_PUBLIC_*`
+      # is inlined at build time, so building in a step here and starting over
+      # there is exactly how the artifact under test comes to disagree with the
+      # environment it was built for. The `ci` job already proves `npm run
+      # build` succeeds on its own.
+      - name: Build and browser smoke
+        run: npm run test:e2e
+
+      - name: Upload Playwright traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: coverage/playwright/
+          retention-days: 7
+          if-no-files-found: ignore
