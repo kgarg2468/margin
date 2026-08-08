@@ -41,6 +41,19 @@ export const annotationVisibility = v.union(
 export const membershipRole = v.union(v.literal("pi"), v.literal("member"));
 
 /**
+ * Where a journal-club meeting is in its life: `scheduled → live → ended →
+ * synthesized`, with `scheduled → cancelled` as the one way out. Every other
+ * transition is refused (see `convex/sessions.ts`).
+ */
+export const sessionStatus = v.union(
+  v.literal("scheduled"),
+  v.literal("live"),
+  v.literal("ended"),
+  v.literal("synthesized"),
+  v.literal("cancelled"),
+);
+
+/**
  * Where a paper is on its way to being readable:
  *
  * - `needs-pdf` — metadata only. A DOI lookup found the record but no
@@ -199,6 +212,28 @@ export const eventDoc = v.union(
     scheduledAt: v.number(),
     presenterId: v.id("users"),
   }),
+  /**
+   * A session moved to a different time. Recorded as its own fact rather than
+   * folded into `session.scheduled` because the prep digest is computed from a
+   * boundary two hours before `scheduledAt` — when that boundary moves, the
+   * ledger has to be able to say when it moved and who moved it.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("session.rescheduled"),
+    paperId: v.id("papers"),
+    sessionId: v.id("sessions"),
+    /** The time the session was moved *to*. */
+    scheduledAt: v.number(),
+  }),
+  v.object({
+    ...eventBase,
+    type: v.literal("session.presenter_changed"),
+    paperId: v.id("papers"),
+    sessionId: v.id("sessions"),
+    /** The member who is presenting *now*. */
+    presenterId: v.id("users"),
+  }),
   v.object({
     ...eventBase,
     type: v.literal("session.started"),
@@ -212,6 +247,17 @@ export const eventDoc = v.union(
   v.object({
     ...eventBase,
     type: v.literal("session.synthesized"),
+    sessionId: v.id("sessions"),
+  }),
+  /**
+   * A meeting that was scheduled and then wasn't held. The row stays — a
+   * cancelled session is a fact about the lab's history, and annotations
+   * written during its prep still point at it.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("session.cancelled"),
+    paperId: v.id("papers"),
     sessionId: v.id("sessions"),
   }),
 );
@@ -319,24 +365,38 @@ export default defineSchema({
     .index("by_paper", ["paperId"])
     .index("by_paper_and_page", ["paperId", "pageIndex"]),
 
-  /** One journal-club meeting: a lab reads one paper, someone presents, then it gets synthesized. */
+  /**
+   * One journal-club meeting: a lab reads one paper, someone presents, then it
+   * gets synthesized.
+   *
+   * The lifecycle is `scheduled → live → ended → synthesized`, with
+   * `scheduled → cancelled` as the one way out. A cancelled session is kept
+   * rather than deleted: annotations written during its prep still point at it,
+   * and the ledger already says it existed.
+   */
   sessions: defineTable({
     labId: v.id("labs"),
     paperId: v.id("papers"),
     title: v.optional(v.string()),
     scheduledAt: v.number(),
     presenterId: v.id("users"),
-    status: v.union(
-      v.literal("scheduled"),
-      v.literal("live"),
-      v.literal("ended"),
-      v.literal("synthesized"),
-    ),
+    status: sessionStatus,
     presenterNotes: v.optional(v.string()),
     synthesis: v.optional(v.string()),
     synthesisApprovedAt: v.optional(v.number()),
     startedAt: v.optional(v.number()),
     endedAt: v.optional(v.number()),
+    cancelledAt: v.optional(v.number()),
+    /**
+     * The scheduled job that builds this session's T−2h prep digest.
+     *
+     * Stored because the boundary moves: rescheduling has to cancel the job
+     * aimed at the old time and replace it, and cancelling the session has to
+     * call it off entirely. Without the handle there is no way to reach a job
+     * once it is queued, and a lab that moved its meeting would get a digest
+     * for the time it moved away from.
+     */
+    prepDigestJobId: v.optional(v.id("_scheduled_functions")),
     createdBy: v.id("users"),
   })
     .index("by_lab", ["labId"])

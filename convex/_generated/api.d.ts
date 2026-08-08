@@ -14,6 +14,7 @@ import type {
   FunctionReference,
 } from "convex/server";
 import type * as auth from "../auth.js";
+import type * as digests from "../digests.js";
 import type * as http from "../http.js";
 import type * as invites from "../invites.js";
 import type * as labs from "../labs.js";
@@ -22,6 +23,7 @@ import type * as lib_doi from "../lib/doi.js";
 import type * as lib_ledger from "../lib/ledger.js";
 import type * as lib_scholarly from "../lib/scholarly.js";
 import type * as papers from "../papers.js";
+import type * as sessions from "../sessions.js";
 import type * as users from "../users.js";
 
 /**
@@ -34,6 +36,7 @@ import type * as users from "../users.js";
  */
 declare const fullApi: ApiFromModules<{
   auth: typeof auth;
+  digests: typeof digests;
   http: typeof http;
   invites: typeof invites;
   labs: typeof labs;
@@ -42,6 +45,7 @@ declare const fullApi: ApiFromModules<{
   "lib/ledger": typeof lib_ledger;
   "lib/scholarly": typeof lib_scholarly;
   papers: typeof papers;
+  sessions: typeof sessions;
   users: typeof users;
 }>;
 export declare const api: FilterApi<
