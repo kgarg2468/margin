@@ -137,7 +137,14 @@ export function MarginRail({
   return (
     <div className="w-full shrink-0 lg:w-80">
       {aligned ? (
-        <div className="relative" style={{ height: Math.max(height, 1) }}>
+        // The spacer is only as tall as the pages when there is something to
+        // place against them; an empty rail must not push its own empty state
+        // eighteen pages down.
+        <div
+          className="relative"
+          style={{ height: placed.length === 0 ? 0 : Math.max(height, 1) }}
+        >
+
           {placed.map(({ card: entry, top }) => (
             <div
               key={entry.annotation._id}

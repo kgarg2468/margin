@@ -261,12 +261,16 @@ export function Reader({
     return map;
   }, [rows]);
 
+  // A withdrawn note that people answered stays in the margin as a tombstone.
+  // Its body is gone from the database, but the thread hanging off it is other
+  // people's writing, and dropping the parent would silently drop all of it.
+  // A withdrawn note nobody answered was deleted outright and never arrives.
   const visible = useMemo(
     () =>
       rows.filter(
         (row) =>
           row.parentId === undefined &&
-          !row.deleted &&
+          (!row.deleted || row.replyCount > 0) &&
           (filter.size === 0 || filter.has(row.type)),
       ),
     [rows, filter],
@@ -389,7 +393,11 @@ export function Reader({
           {pageCount > 0 ? `Page ${currentPage + 1} of ${pageCount}` : "…"}
         </span>
 
-        <div className="flex w-full flex-wrap items-center gap-1.5 lg:w-auto">
+        {/* No notes, no filter: a "Show" with nothing after it reads like a
+            control that failed to load. */}
+        <div
+          className={`${counts.size === 0 ? "hidden" : "flex"} w-full flex-wrap items-center gap-1.5 lg:w-auto`}
+        >
           <span className={`${eyebrowClass} mr-1`}>Show</span>
           {ANNOTATION_TYPES.filter(
             (style) => (counts.get(style.value) ?? 0) > 0,
