@@ -65,7 +65,7 @@ export const createInvite = mutation({
     const code = await generateUniqueCode(ctx);
     const expiresAt = Date.now() + ttlDays * DAY_MS;
 
-    await ctx.db.insert("invites", {
+    const inviteId = await ctx.db.insert("invites", {
       code,
       labId: args.labId,
       createdBy: membership.userId,
@@ -77,6 +77,7 @@ export const createInvite = mutation({
       labId: args.labId,
       type: "invite.created",
       actorId: membership.userId,
+      inviteId,
     });
 
     return { code, expiresAt };
@@ -176,7 +177,8 @@ export const redeemInvite = mutation({
       type: "member.joined",
       actorId: userId,
       subjectUserId: userId,
-      meta: { role: "member", via: "invite" },
+      role: "member",
+      via: "invite",
     });
 
     return { labId: lab._id, labName: lab.name, alreadyMember: false };

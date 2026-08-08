@@ -56,23 +56,133 @@ export const anchor = v.object({
   pageIndex: v.number(),
 });
 
-/** Every kind of thing that can happen in a lab. Note the absence of any "read"/"viewed" event — that is intentional. */
-export const eventType = v.union(
-  v.literal("lab.created"),
-  v.literal("member.joined"),
-  v.literal("member.left"),
-  v.literal("invite.created"),
-  v.literal("paper.added"),
-  v.literal("paper.ingested"),
-  v.literal("annotation.created"),
-  v.literal("annotation.edited"),
-  v.literal("annotation.deleted"),
-  v.literal("annotation.visibility_changed"),
-  v.literal("annotation.replied"),
-  v.literal("session.scheduled"),
-  v.literal("session.started"),
-  v.literal("session.ended"),
-  v.literal("session.synthesized"),
+/**
+ * Fields every ledger row carries, whatever kind of fact it records.
+ *
+ * `paperId` and `sessionId` live here rather than only on the variants that
+ * need them because an index field has to exist on every document in the
+ * table: `by_paper_and_at` and `by_session_and_at` read them. Variants that
+ * always have one narrow it back to required (see `paper.added` below).
+ */
+const eventBase = {
+  labId: v.id("labs"),
+  actorId: v.id("users"),
+  at: v.number(),
+  paperId: v.optional(v.id("papers")),
+  sessionId: v.optional(v.id("sessions")),
+};
+
+/**
+ * Every kind of thing that can happen in a lab, as a discriminated union on
+ * `type`. Note the absence of any "read"/"viewed" variant — that is
+ * intentional and permanent.
+ *
+ * Each variant declares its own payload as real, typed columns instead of a
+ * stringly `Record<string, string>` bag. The ledger is the provenance record
+ * the whole product reads back from, so a mistyped payload key should be a
+ * compile error, not a silently-missing digest line.
+ */
+export const eventDoc = v.union(
+  v.object({
+    ...eventBase,
+    type: v.literal("lab.created"),
+    name: v.string(),
+  }),
+  v.object({
+    ...eventBase,
+    type: v.literal("member.joined"),
+    subjectUserId: v.id("users"),
+    role: membershipRole,
+    /** `founding` is the PI who created the lab; `invite` redeemed a code. */
+    via: v.union(v.literal("founding"), v.literal("invite")),
+  }),
+  v.object({
+    ...eventBase,
+    type: v.literal("member.left"),
+    subjectUserId: v.id("users"),
+    /** `left` is self-initiated; `removed` was done by the PI. */
+    reason: v.union(v.literal("left"), v.literal("removed")),
+  }),
+  v.object({
+    ...eventBase,
+    type: v.literal("invite.created"),
+    inviteId: v.id("invites"),
+  }),
+  v.object({
+    ...eventBase,
+    type: v.literal("invite.revoked"),
+    inviteId: v.id("invites"),
+  }),
+  v.object({
+    ...eventBase,
+    type: v.literal("paper.added"),
+    paperId: v.id("papers"),
+    title: v.string(),
+  }),
+  v.object({
+    ...eventBase,
+    type: v.literal("paper.ingested"),
+    paperId: v.id("papers"),
+    pageCount: v.number(),
+  }),
+  v.object({
+    ...eventBase,
+    type: v.literal("annotation.created"),
+    paperId: v.id("papers"),
+    annotationId: v.id("annotations"),
+    annotationType,
+    visibility: annotationVisibility,
+  }),
+  v.object({
+    ...eventBase,
+    type: v.literal("annotation.edited"),
+    paperId: v.id("papers"),
+    annotationId: v.id("annotations"),
+  }),
+  v.object({
+    ...eventBase,
+    type: v.literal("annotation.deleted"),
+    paperId: v.id("papers"),
+    annotationId: v.id("annotations"),
+  }),
+  v.object({
+    ...eventBase,
+    type: v.literal("annotation.visibility_changed"),
+    paperId: v.id("papers"),
+    annotationId: v.id("annotations"),
+    /** The visibility the annotation was moved *to*. */
+    visibility: annotationVisibility,
+  }),
+  v.object({
+    ...eventBase,
+    type: v.literal("annotation.replied"),
+    paperId: v.id("papers"),
+    annotationId: v.id("annotations"),
+    parentId: v.id("annotations"),
+  }),
+  v.object({
+    ...eventBase,
+    type: v.literal("session.scheduled"),
+    paperId: v.id("papers"),
+    sessionId: v.id("sessions"),
+    scheduledAt: v.number(),
+    presenterId: v.id("users"),
+  }),
+  v.object({
+    ...eventBase,
+    type: v.literal("session.started"),
+    sessionId: v.id("sessions"),
+  }),
+  v.object({
+    ...eventBase,
+    type: v.literal("session.ended"),
+    sessionId: v.id("sessions"),
+  }),
+  v.object({
+    ...eventBase,
+    type: v.literal("session.synthesized"),
+    sessionId: v.id("sessions"),
+  }),
 );
 
 export default defineSchema({
@@ -181,6 +291,7 @@ export default defineSchema({
   })
     .index("by_paper", ["paperId"])
     .index("by_paper_and_member", ["paperId", "memberId"])
+    .index("by_paper_and_visibility", ["paperId", "visibility"])
     .index("by_member", ["memberId"])
     .index("by_parent", ["parentId"])
     .index("by_session", ["sessionId"])
@@ -191,23 +302,13 @@ export default defineSchema({
    * fact with full provenance (who, what, where, when). Collision detection
    * and "since you were away" deltas both read from here.
    */
-  events: defineTable({
-    labId: v.id("labs"),
-    type: eventType,
-    actorId: v.id("users"),
-    at: v.number(),
-    paperId: v.optional(v.id("papers")),
-    sessionId: v.optional(v.id("sessions")),
-    annotationId: v.optional(v.id("annotations")),
-    subjectUserId: v.optional(v.id("users")),
-    // Small, event-specific payload (e.g. the annotation type at time of
-    // write) so the ledger stays readable without joining live documents.
-    meta: v.optional(v.record(v.string(), v.string())),
-  })
+  events: defineTable(eventDoc)
     .index("by_lab", ["labId"])
     .index("by_lab_and_at", ["labId", "at"])
     .index("by_paper", ["paperId"])
+    .index("by_paper_and_at", ["paperId", "at"])
     .index("by_session", ["sessionId"])
+    .index("by_session_and_at", ["sessionId", "at"])
     .index("by_actor", ["actorId"]),
 
   /** Per-recipient staleness: how far into the ledger a member has caught up, per paper or per session. */

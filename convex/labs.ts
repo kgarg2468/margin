@@ -42,14 +42,15 @@ export const createLab = mutation({
       labId,
       type: "lab.created",
       actorId: userId,
-      meta: { name },
+      name,
     });
     await recordEvent(ctx, {
       labId,
       type: "member.joined",
       actorId: userId,
       subjectUserId: userId,
-      meta: { role: "pi" },
+      role: "pi",
+      via: "founding",
     });
 
     return labId;
