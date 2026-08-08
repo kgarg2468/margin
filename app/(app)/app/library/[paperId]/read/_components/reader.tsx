@@ -136,6 +136,13 @@ export function Reader({
 
   // One boolean, so this flips once (when the paper and the token have both
   // arrived) rather than tracking either of them.
+  //
+  // The token half is what keeps the reader out of the trap the text-layer
+  // hook had to be dug out of: opening without one gets a 401, and a 401 read
+  // as a verdict on the file is a good paper called broken. Here it only ever
+  // meant a wrong sentence on screen — this component records nothing — but
+  // waiting is still the honest thing, and it costs a few milliseconds on a
+  // cold load.
   const canFetch = paper?.hasPdf === true && token !== null;
 
   useEffect(() => {
@@ -146,10 +153,17 @@ export function Reader({
     let task: PDFDocumentLoadingTask | null = null;
 
     const run = async () => {
+      // Stated rather than defaulted: `canFetch` is the guarantee that this
+      // is here, and an empty bearer smuggled in behind a `??` would turn a
+      // broken invariant into a puzzling 401 instead of a loud failure.
+      const authToken = tokenRef.current;
+      if (authToken === null) {
+        return;
+      }
       const pdfjs = await loadPdfjs();
       task = pdfjs.getDocument({
         url: pdfEndpoint(paperId),
-        httpHeaders: pdfAuthHeaders(tokenRef.current ?? ""),
+        httpHeaders: pdfAuthHeaders(authToken),
       });
       const loaded = await task.promise;
       if (cancelled) {

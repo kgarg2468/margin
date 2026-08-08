@@ -49,20 +49,39 @@ export function pdfAuthHeaders(token: string): Record<string, string> {
 }
 
 /**
+ * The session is the problem, not the file.
+ *
+ * Worth its own type because of what a caller does next. `useTextLayer`
+ * answers a failed extraction by calling `markIngestFailed`, which writes
+ * "this PDF cannot be read" onto the paper for good — the right response to
+ * an encrypted or truncated file, and precisely the wrong one to a token that
+ * aged out mid-session. A perfectly readable paper would be condemned, and
+ * nothing retries a paper that has already failed.
+ */
+export class PdfAuthError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PdfAuthError";
+  }
+}
+
+/**
  * Say what a refused fetch means in a sentence a researcher can act on.
  *
  * A 401 is not the member's fault and not the file's — it is a token that
  * aged out — and telling them the PDF is broken would send them to re-upload
  * a perfectly good file.
  */
-function describeStatus(status: number): string {
+function refusal(status: number): Error {
   if (status === 401) {
-    return "Your session has expired. Sign in again and the paper will open.";
+    return new PdfAuthError(
+      "Your session has expired. Sign in again and the paper will open.",
+    );
   }
   if (status === 404) {
-    return "That paper's file isn't in a library you can see.";
+    return new Error("That paper's file isn't in a library you can see.");
   }
-  return `The stored file came back ${status}.`;
+  return new Error(`The stored file came back ${status}.`);
 }
 
 /**
@@ -74,7 +93,10 @@ export async function fetchPdfBytes(
   token: string | null,
 ): Promise<ArrayBuffer> {
   if (token === null) {
-    throw new Error("Sign in again and the paper will open.");
+    // Callers are expected to wait for a token rather than get here — see the
+    // guard in `useTextLayer` — but a caller that doesn't must still not read
+    // this as a verdict on the file.
+    throw new PdfAuthError("Sign in again and the paper will open.");
   }
   const response = await fetch(pdfEndpoint(paperId), {
     headers: pdfAuthHeaders(token),
@@ -82,7 +104,7 @@ export async function fetchPdfBytes(
   if (!response.ok) {
     // Without this, an error page's body goes to pdf.js and comes back as
     // "couldn't read that PDF" — which blames the file for the fetch.
-    throw new Error(describeStatus(response.status));
+    throw refusal(response.status);
   }
   return await response.arrayBuffer();
 }

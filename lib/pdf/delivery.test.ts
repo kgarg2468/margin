@@ -1,5 +1,10 @@
-import { describe, expect, it } from "vitest";
-import { pdfAuthHeaders, siteOriginFrom } from "./delivery";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  PdfAuthError,
+  fetchPdfBytes,
+  pdfAuthHeaders,
+  siteOriginFrom,
+} from "./delivery";
 
 /**
  * The one piece of PDF delivery that is worth a test rather than a browser:
@@ -43,5 +48,79 @@ describe("pdfAuthHeaders", () => {
     expect(pdfAuthHeaders("abc.def.ghi")).toEqual({
       Authorization: "Bearer abc.def.ghi",
     });
+  });
+});
+
+/**
+ * Which failures are the *session's* fault and which are the *file's*.
+ *
+ * This is not a taxonomy for its own sake. `useTextLayer` answers a failed
+ * extraction by calling `markIngestFailed`, which writes "this PDF cannot be
+ * read" onto the paper permanently — and nothing ever retries a paper that
+ * has already failed. So a token that had not arrived yet, or one that aged
+ * out mid-read, must be distinguishable from a PDF that is genuinely
+ * unreadable, or a perfectly good paper gets condemned by a race with
+ * sign-in. `PdfAuthError` is that distinction, and these are the cases that
+ * have to keep landing on the right side of it.
+ */
+describe("fetchPdfBytes", () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    process.env.NEXT_PUBLIC_CONVEX_URL = originalUrl;
+  });
+
+  /** Stand in for the endpoint, answering with one status. */
+  function respondWith(status: number) {
+    process.env.NEXT_PUBLIC_CONVEX_URL = "https://elegant-lemur-123.convex.cloud";
+    const fetchMock = vi.fn(async () =>
+      status === 200
+        ? new Response(new Uint8Array([37, 80, 68, 70]), { status })
+        : new Response("no", { status }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    return fetchMock;
+  }
+
+  it("refuses without a token, and does not even reach the network", async () => {
+    const fetchMock = respondWith(200);
+    await expect(fetchPdfBytes("paper1", null)).rejects.toBeInstanceOf(
+      PdfAuthError,
+    );
+    // The point of the guard: a request with no bearer would come back 401
+    // and read as a broken file.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("calls an expired session a session problem, not a file problem", async () => {
+    respondWith(401);
+    await expect(fetchPdfBytes("paper1", "stale")).rejects.toBeInstanceOf(
+      PdfAuthError,
+    );
+  });
+
+  it("leaves every other refusal a plain failure", async () => {
+    // A 404 or a 500 says nothing good about the file's availability, and
+    // recording that the ingest failed is the correct response to both.
+    for (const status of [404, 500]) {
+      respondWith(status);
+      const caught = await fetchPdfBytes("paper1", "good").catch(
+        (error: unknown) => error,
+      );
+      expect(caught).toBeInstanceOf(Error);
+      expect(caught).not.toBeInstanceOf(PdfAuthError);
+    }
+  });
+
+  it("hands back the bytes when the endpoint answers", async () => {
+    const fetchMock = respondWith(200);
+    const bytes = await fetchPdfBytes("paper1", "good");
+    expect(new Uint8Array(bytes)).toEqual(new Uint8Array([37, 80, 68, 70]));
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://elegant-lemur-123.convex.site/pdf?paperId=paper1",
+      { headers: { Authorization: "Bearer good" } },
+    );
   });
 });

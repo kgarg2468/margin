@@ -3,7 +3,7 @@
 import { readableError } from "@/app/(app)/app/_components/errors";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { fetchPdfBytes } from "@/lib/pdf/delivery";
+import { PdfAuthError, fetchPdfBytes } from "@/lib/pdf/delivery";
 import { describePdfOpenError, extractPdf } from "@/lib/pdf/extract";
 import { useAuthToken } from "@convex-dev/auth/react";
 import { useMutation } from "convex/react";
@@ -36,10 +36,17 @@ export function useTextLayer() {
   const saveExtractedText = useMutation(api.papers.saveExtractedText);
   const markIngestFailed = useMutation(api.papers.markIngestFailed);
 
-  // Held in a ref rather than closed over, so that a token rotating does not
-  // change `read`'s identity. `PdfPanel` starts extraction from an effect that
-  // depends on `read`, and a `read` that changed under it would ask again.
+  // The token's *value* is held in a ref rather than closed over, so that a
+  // rotation does not change `read`'s identity — `PdfPanel` starts extraction
+  // from an effect that depends on `read`, and a `read` that changed under it
+  // would ask again.
+  //
+  // Its *presence* is a different question and is deliberately not hidden in
+  // the ref: `read` refuses to start without one, so it must get a new
+  // identity when auth arrives or the paper that was skipped is never picked
+  // up. Presence flips once per sign-in; the value changes every hour.
   const token = useAuthToken();
+  const hasToken = token !== null;
   const tokenRef = useRef(token);
   useEffect(() => {
     tokenRef.current = token;
@@ -79,6 +86,35 @@ export function useTextLayer() {
     /** `force` is somebody pressing the button again; the guard is for the
      *  callers that ask automatically. */
     async (paperId: Id<"papers">, force = false): Promise<boolean> => {
+      /**
+       * No token yet means "not signed in *yet*", not "cannot be read".
+       *
+       * This runs from an effect the moment a paper with no text layer comes
+       * on screen, and on a cold load that can be a beat before Convex Auth
+       * has a token. Falling through would fetch without one, land in the
+       * catch, and call `markIngestFailed` — writing "this PDF cannot be
+       * read" onto a file nothing has even looked at, permanently, since
+       * nothing retries a paper that has already failed.
+       *
+       * So: bail before `attempted` records anything, leaving this paper
+       * untouched and its phase idle. `hasToken` is in this callback's deps,
+       * so `read` gets a new identity the moment auth arrives and the
+       * caller's effect fires again — that run is the real first attempt.
+       */
+      if (!hasToken) {
+        if (force) {
+          // Except when somebody pressed the button, where silence would read
+          // as a dead control. A phase, deliberately — it says so in the
+          // panel without touching the paper's stored ingest state, because
+          // there is still nothing wrong with the file.
+          setPhase(paperId, {
+            kind: "failed",
+            message: "Still signing you in. Try that again in a moment.",
+          });
+        }
+        return false;
+      }
+
       if (!force && attempted.current.has(paperId)) {
         return false;
       }
@@ -98,6 +134,18 @@ export function useTextLayer() {
         setPhase(paperId, { kind: "done" });
         return true;
       } catch (caught) {
+        // A session that expired between the guard above and the fetch is the
+        // same story as one that had not started: the file is fine, and
+        // recording an ingest failure would condemn it over an hour of
+        // reading rather than anything about the PDF. It carries its own
+        // sentence too — the generic classifiers below would flatten "your
+        // session has expired" into "that PDF wouldn't open", which is the
+        // one reading that sends a member off to re-upload a working file.
+        if (caught instanceof PdfAuthError) {
+          setPhase(paperId, { kind: "failed", message: caught.message });
+          return false;
+        }
+
         // A stored file can be password-protected or damaged too — every
         // open-access copy fetched by DOI lands here unread. Same order as the
         // attach flows: the pdf.js classifier speaks for the failures it
@@ -106,6 +154,7 @@ export function useTextLayer() {
           describePdfOpenError(caught) ??
           readableError(caught, "That PDF wouldn't open.");
         setPhase(paperId, { kind: "failed", message });
+
         try {
           // Otherwise it sits at "text pending" forever, indistinguishable
           // from a paper nobody has opened yet.
@@ -117,7 +166,7 @@ export function useTextLayer() {
         return false;
       }
     },
-    [saveExtractedText, markIngestFailed, setPhase],
+    [hasToken, saveExtractedText, markIngestFailed, setPhase],
   );
 
   return { phaseFor, read };
