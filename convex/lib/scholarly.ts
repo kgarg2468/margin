@@ -21,14 +21,28 @@ export type PaperMetadata = {
   abstract?: string;
   /** Where a human should go to read it — the publisher's landing page. */
   sourceUrl?: string;
-  /** A direct link to an open-access PDF, when one is known to exist. */
-  pdfUrl?: string;
+  /**
+   * Every place OpenAlex thinks an open-access PDF lives, best first.
+   *
+   * A list rather than a link because the first one is wrong often enough to
+   * matter: the "best" OA location is chosen for licence and version, not for
+   * whether the host will actually serve the bytes to a robot. The caller
+   * walks it until something returns a PDF.
+   */
+  pdfUrls?: string[];
 };
 
 const USER_AGENT = "Margin/0.1 (https://github.com/kgarg2468/margin)";
 
 const MAX_ABSTRACT_LENGTH = 4000;
 const MAX_AUTHORS = 60;
+
+/**
+ * A well-indexed paper can list a dozen repositories holding the same file.
+ * Past the first handful they are mirrors of mirrors, and every one is a
+ * network round trip the member is waiting through, so the list stops here.
+ */
+const MAX_PDF_CANDIDATES = 6;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -74,6 +88,72 @@ function readHttpUrl(value: unknown): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Whether a hostname names a site or a machine.
+ *
+ * The same paranoia as `readHttpUrl`, one step further out. A scheme check
+ * says the string is a URL we can fetch; this says the thing on the other end
+ * is somewhere on the public web rather than something wearing our own
+ * network's address. Convex actions run inside infrastructure with a private
+ * network around them, and `fetch` will resolve `localhost`, `127.0.0.1`, or
+ * `169.254.169.254` into a request that originates from in there — which is
+ * how a text box becomes a way to read an internal service through us.
+ *
+ * A free copy of a paper lives at a hostname, so this costs a member nothing.
+ * It is also only half the problem: a public name that resolves to a private
+ * address still passes, and closing that means resolving DNS ourselves and
+ * checking the address before connecting.
+ */
+export function isFetchableHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  // `URL.hostname` keeps the brackets on an IPv6 literal, which is the only
+  // thing that can start with one.
+  if (host.startsWith("[")) {
+    return false;
+  }
+  // Dotted-quad, and the decimal and hex spellings of the same address.
+  if (/^(?:\d|0x)[0-9a-fx.]*$/i.test(host)) {
+    return false;
+  }
+  // `localhost`, and every other name with no public suffix on it.
+  return host.includes(".");
+}
+
+/**
+ * Where a `Location` header actually points, or `null` if we won't go there.
+ *
+ * A redirect is the second place a URL gets chosen, and the check we ran on
+ * the first one does not travel with it: a perfectly public host can answer
+ * 302 with an internal address, and a fetch that follows redirects by itself
+ * will have made that request before anything gets a look at it. So the hop
+ * is resolved here — `Location` is allowed to be relative — and put through
+ * the same two rules the typed URL passed.
+ *
+ * Pure, so the resolution and the refusals are testable without a server on
+ * the other end willing to redirect.
+ */
+export function nextRedirectHop(
+  currentUrl: string,
+  location: string | null,
+): string | null {
+  const raw = location?.trim();
+  if (raw === undefined || raw.length === 0) {
+    return null;
+  }
+
+  let next: URL;
+  try {
+    next = new URL(raw, currentUrl);
+  } catch {
+    return null;
+  }
+
+  if (next.protocol !== "https:" || !isFetchableHost(next.hostname)) {
+    return null;
+  }
+  return next.toString();
 }
 
 function readYear(value: unknown): number | undefined {
@@ -283,9 +363,104 @@ function openAlexVenue(work: Record<string, unknown>): string | undefined {
 }
 
 /**
+ * `readHttpUrl`, minus plaintext.
+ *
+ * The distinction earns its keep in exactly one place. `sourceUrl` is a link
+ * a human clicks, and http is an unfortunate but real answer for one. A PDF
+ * candidate is handed to a fetcher that refuses anything but https before it
+ * opens a socket — so an `http://` entry is not a weaker candidate, it is a
+ * guaranteed dead attempt, and the DOI walk only gets four of those before it
+ * gives up on the paper. Better it never occupies a slot.
+ */
+function readHttpsUrl(value: unknown): string | undefined {
+  const url = readHttpUrl(value);
+  if (url === undefined) {
+    return undefined;
+  }
+  // `readHttpUrl` parsed it already, so this cannot throw.
+  return new URL(url).protocol === "https:" ? url : undefined;
+}
+
+/**
+ * Every PDF an OpenAlex work record points at, best first, no duplicates.
+ *
+ * Margin used to read exactly one field — `best_oa_location.pdf_url` — and
+ * call the paper unavailable when it was empty. It is empty a lot: OpenAlex
+ * picks the "best" location by licence and version, and the record routinely
+ * carries a perfectly good PDF one field over, in `primary_location`, in
+ * `open_access.oa_url`, or in the `locations[]` list those two are drawn from.
+ * One empty field was deciding an outcome that four fields had an opinion on.
+ *
+ * The order is confidence, not preference: the curated pick first, the
+ * publisher's own copy next, then the OA landing link, then the long tail of
+ * repository mirrors. Every URL goes through `readHttpsUrl` because these come
+ * from a third party and end up in `fetch`, and duplicates are dropped because
+ * the same file is usually listed two or three ways and the caller pays a
+ * request per entry.
+ *
+ * Pure and exported so the ordering can be tested without a network.
+ */
+export function openAlexPdfCandidates(work: unknown): string[] {
+  if (!isRecord(work)) {
+    return [];
+  }
+
+  const bestOa = isRecord(work.best_oa_location) ? work.best_oa_location : undefined;
+  const primary = isRecord(work.primary_location) ? work.primary_location : undefined;
+  const openAccess = isRecord(work.open_access) ? work.open_access : undefined;
+
+  const ordered: unknown[] = [
+    bestOa?.pdf_url,
+    primary?.pdf_url,
+    openAccess?.oa_url,
+  ];
+  if (Array.isArray(work.locations)) {
+    for (const location of work.locations) {
+      if (isRecord(location)) {
+        ordered.push(location.pdf_url);
+      }
+    }
+  }
+
+  const candidates: string[] = [];
+  for (const value of ordered) {
+    const url = readHttpsUrl(value);
+    if (url === undefined || candidates.includes(url)) {
+      continue;
+    }
+    candidates.push(url);
+    if (candidates.length === MAX_PDF_CANDIDATES) {
+      break;
+    }
+  }
+  return candidates;
+}
+
+/**
+ * arXiv mints DOIs of the form `10.48550/arxiv.2103.00020`, and the PDF for
+ * one is always at `https://arxiv.org/pdf/<id>`. That is worth knowing on its
+ * own: arXiv's OpenAlex records are frequently listed as open access with no
+ * `pdf_url` anywhere in them, so the one preprint server everybody can read is
+ * also the one Margin was most likely to declare unavailable.
+ *
+ * The identifier grammar is spelled out rather than matched loosely because
+ * the captured text is pasted into a URL we then fetch — `../..` in a DOI
+ * suffix should get an `undefined`, not a request. Both arXiv schemes: the
+ * modern `2103.00020v2` and the pre-2007 `hep-th/9901001`.
+ */
+const ARXIV_DOI =
+  /^10\.48550\/arxiv\.((?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[a-z]{2})?\/\d{7})(?:v\d+)?)$/;
+
+/** Takes a DOI already through `normalizeDoi` — lowercase, unwrapped, trimmed. */
+export function arxivPdfUrl(normalizedDoi: string): string | undefined {
+  const id = ARXIV_DOI.exec(normalizedDoi)?.[1];
+  return id === undefined ? undefined : `https://arxiv.org/pdf/${id}`;
+}
+
+/**
  * OpenAlex's view of the same DOI. Used two ways: as the metadata fallback
  * when Crossref has no record, and — always — as the source of the
- * open-access PDF link, which Crossref does not carry.
+ * open-access PDF links, which Crossref does not carry.
  */
 export async function fetchOpenAlex(doi: string): Promise<PaperMetadata | null> {
   const body = await fetchJson(
@@ -314,6 +489,6 @@ export async function fetchOpenAlex(doi: string): Promise<PaperMetadata | null> 
       readHttpUrl(bestOa?.landing_page_url) ??
       readHttpUrl(primary?.landing_page_url) ??
       readHttpUrl(body.doi),
-    pdfUrl: readHttpUrl(bestOa?.pdf_url),
+    pdfUrls: openAlexPdfCandidates(body),
   };
 }
