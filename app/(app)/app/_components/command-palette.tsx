@@ -157,6 +157,9 @@ function Palette({ close }: { close: () => void }) {
   const listRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
+  /** What the reader is asking for right now, as against what was last asked. */
+  const query = text.trim();
+
   useEffect(() => {
     const timer = setTimeout(() => setDebounced(text.trim()), DEBOUNCE_MS);
     return () => clearTimeout(timer);
@@ -169,33 +172,53 @@ function Palette({ close }: { close: () => void }) {
       : "skip",
   );
 
-  // Convex hands back `undefined` while a new argument is in flight, so a list
-  // that rendered `results` directly would blink empty on every keystroke. The
-  // previous answer stays on screen, dimmed, until the next one lands — the
-  // drawer does not empty itself while you are still typing into it.
-  const settled = useRef<SearchResults | null>(null);
-  if (results !== undefined) {
-    settled.current = results;
+  /**
+   * The last answer, and — the part that matters — the question it answered.
+   *
+   * Convex hands back `undefined` while a new argument is in flight, so a list
+   * that rendered `results` directly would blink empty on every keystroke. The
+   * previous answer stays on screen instead, dimmed, until the next one lands:
+   * the drawer does not empty itself while you are still typing into it.
+   *
+   * But an answer to the previous question must never be *actionable*. Between
+   * a keystroke and the response there is a window — the debounce, then the
+   * round trip — where the rows on screen belong to text the reader has already
+   * moved on from, and an Enter in that window used to open whatever the old
+   * top hit was. Landing somewhere you did not ask for is worse than waiting,
+   * so the text each response answered is carried alongside it and compared
+   * against what is in the field right now. Everything that acts hangs off
+   * `current`; only what is *drawn* hangs off `shown`.
+   */
+  const settled = useRef<{ text: string; results: SearchResults } | null>(null);
+  if (results !== undefined && settled.current?.results !== results) {
+    settled.current = { text: debounced, results };
   }
-  const shown = debounced.length === 0 ? null : settled.current;
-  const searching = debounced.length > 0 && results === undefined;
+  const answered = settled.current;
+  const shown = query.length === 0 ? null : (answered?.results ?? null);
+  /** The rows on screen are the answer to the text in the field. */
+  const current = answered !== null && answered.text === query;
+  const searching = query.length > 0 && !current;
 
   const hits = useMemo(() => flatten(shown), [shown]);
   const total = hits.length;
+  /** Stale rows are shown but inert: nothing selects, clicks, or opens them. */
+  const actionable = current && total > 0;
 
   useEffect(() => {
     setActive(0);
   }, [debounced]);
 
+  // The single door out of the palette, for the pointer and the keyboard
+  // alike, and therefore the single place the staleness check has to hold.
   const go = useCallback(
     (hit: Hit | undefined) => {
-      if (hit === undefined) {
+      if (hit === undefined || !current) {
         return;
       }
       close();
       router.push(hit.href);
     },
-    [close, router],
+    [close, current, router],
   );
 
   // The page behind must not scroll under the drawer, and focus must come back
@@ -243,7 +266,10 @@ function Palette({ close }: { close: () => void }) {
         close();
         return;
       }
-      if (total === 0) {
+      // Not `total > 0`: a list that answers the previous keystroke has no
+      // row worth selecting and no row worth opening. The keys go quiet for
+      // the couple of hundred milliseconds it takes to catch up.
+      if (!actionable) {
         return;
       }
       if (event.key === "ArrowDown") {
@@ -259,7 +285,7 @@ function Palette({ close }: { close: () => void }) {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [active, close, go, hits, total]);
+  }, [actionable, active, close, go, hits, total]);
 
   function onInputKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
     // The input is the only focusable thing in the sheet, so a trap that keeps
@@ -273,6 +299,12 @@ function Palette({ close }: { close: () => void }) {
   const paperOffset = 0;
   const annotationOffset = shown?.papers.length ?? 0;
   const sessionOffset = annotationOffset + (shown?.annotations.length ?? 0);
+  /**
+   * Which row carries the mark, and `-1` — no row — while the list is stale.
+   * The mark means "press Enter and you go here", so drawing it on a list
+   * Enter refuses to act on would be the interface telling a small lie.
+   */
+  const marked = actionable ? active : -1;
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center px-4 pt-[9vh] sm:pt-[13vh]">
@@ -300,10 +332,10 @@ function Palette({ close }: { close: () => void }) {
             ref={inputRef}
             type="text"
             role="combobox"
-            aria-expanded={total > 0}
+            aria-expanded={actionable}
             aria-controls="command-palette-results"
             aria-activedescendant={
-              total > 0 ? `command-palette-hit-${active}` : undefined
+              actionable ? `command-palette-hit-${active}` : undefined
             }
             aria-autocomplete="list"
             aria-label="Search this lab"
@@ -325,26 +357,32 @@ function Palette({ close }: { close: () => void }) {
           ref={listRef}
           role="listbox"
           aria-label="Results"
+          // Stale rows fade back and stop taking the pointer, which is the
+          // same refusal the arrow keys make above — a row you can still click
+          // is a row that can still open the wrong thing.
+          aria-busy={searching}
           className={
-            "min-h-0 flex-1 overflow-y-auto py-2 " +
+            "min-h-0 flex-1 overflow-y-auto py-2 transition-opacity duration-200 " +
             (searching && shown !== null
-              ? "opacity-55 transition-opacity duration-200"
-              : "transition-opacity duration-200")
+              ? "pointer-events-none opacity-55"
+              : "")
           }
         >
           {currentLab === null ? (
             <Aside>
               A search belongs to a lab, and you aren&rsquo;t in one yet.
             </Aside>
-          ) : debounced.length === 0 ? (
+          ) : query.length === 0 ? (
             <Aside>
               Type a word from a title, or something somebody wrote in a margin.
             </Aside>
-          ) : searching && shown === null ? (
+          ) : total === 0 && !current ? (
+            // Nothing on screen and nothing settled: the honest state is "still
+            // looking", not "found nothing".
             <ResultsSkeleton />
           ) : total === 0 ? (
             <Aside>
-              Nothing in {currentLab.name} answers to &ldquo;{debounced}
+              Nothing in {currentLab.name} answers to &ldquo;{query}
               &rdquo;.
               <span className="mt-2 block font-sans text-xs text-ink-faint">
                 Margin looks through paper titles, the notes your lab has
@@ -359,7 +397,7 @@ function Palette({ close }: { close: () => void }) {
                   <Row
                     key={paper._id}
                     index={paperOffset + i}
-                    active={active === paperOffset + i}
+                    active={marked === paperOffset + i}
                     onPoint={setActive}
                     onPick={() => go(hits[paperOffset + i])}
                   >
@@ -386,7 +424,7 @@ function Palette({ close }: { close: () => void }) {
                     <Row
                       key={annotation._id}
                       index={annotationOffset + i}
-                      active={active === annotationOffset + i}
+                      active={marked === annotationOffset + i}
                       onPoint={setActive}
                       onPick={() => go(hits[annotationOffset + i])}
                     >
@@ -428,7 +466,7 @@ function Palette({ close }: { close: () => void }) {
                     <Row
                       key={session._id}
                       index={sessionOffset + i}
-                      active={active === sessionOffset + i}
+                      active={marked === sessionOffset + i}
                       onPoint={setActive}
                       onPick={() => go(hits[sessionOffset + i])}
                     >
