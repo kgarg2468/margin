@@ -267,6 +267,14 @@
  * so the affordance is restored once, here, rather than remembered per
  * component. In the base layer: any utility (`disabled:cursor-not-allowed`,
  * `cursor-text`) still wins without a fight.
+ *
+ * This is the *only* place cursor policy is stated, which is what makes both
+ * directions safe. The two rules have identical specificity and are resolved by
+ * source order, so `not-allowed` wins on a disabled control — but that is only
+ * true while nothing in the utilities layer also has an opinion. A `cursor` in
+ * `@utility pressable` would beat both of these on layer order regardless of
+ * specificity, and a disabled control wearing the press grammar would promise a
+ * press it will not honour. See the note on `pressable` below.
  */
 @layer base {
   button:not(:disabled),
@@ -295,9 +303,16 @@
  * enlist layout properties into the same transition and put it back on the
  * main thread. `scale` (not `transform`) so a component can still translate
  * itself without clobbering the press.
+ *
+ * Deliberately no `cursor` here. It belongs to exactly one owner — the base
+ * layer above — and stating it in a utility as well would silently override the
+ * disabled case: utilities outrank base whatever the selectors say, so a
+ * `<button disabled class="pressable">` would show a pointer. Utilities are also
+ * the wrong altitude for it; a control's cursor follows from *what it is*, not
+ * from which motion grammar it opted into. Apply `pressable` to real controls
+ * and the base layer has already answered the pointer.
  */
 @utility pressable {
-  cursor: pointer;
   user-select: none;
   transition:
     color var(--dur-hover) ease-out,
