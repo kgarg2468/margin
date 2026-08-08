@@ -1,10 +1,258 @@
-import { defineSchema } from "convex/server";
+import { authTables } from "@convex-dev/auth/server";
+import { defineSchema, defineTable } from "convex/server";
+import { v } from "convex/values";
 
 /**
  * Margin's Convex schema.
  *
- * Placeholder for now — the real data model (groups, papers, threads,
- * annotations, members) is designed in a follow-up. Convex runs schemaless
- * until tables are declared here, so an empty schema is safe to ship.
+ * The data model is the contract for the whole product, so every table is
+ * declared here up front even though the functions that write some of them
+ * land in later PRs (papers, reader/annotations, sessions, digests).
+ *
+ * Two invariants come from `.context/architecture-decision.md` and are worth
+ * stating where the schema can enforce them:
+ *
+ * 1. `events` is an APPEND-ONLY ledger. Nothing updates or deletes a row in
+ *    it. It is the provenance record that makes point-in-time queries and
+ *    typed-pair collision detection possible.
+ * 2. The privacy constitution forbids read/dwell tracking. There is
+ *    deliberately no `reads` table and no `viewedAt` field anywhere; the only
+ *    evidence of engagement Margin ever stores is an authored annotation.
  */
-export default defineSchema({});
+
+/** The 7-type annotation ontology. `note` is the untyped default; typing is one tap and never required. */
+export const annotationType = v.union(
+  v.literal("note"),
+  v.literal("hypothesis"),
+  v.literal("method-note"),
+  v.literal("critique"),
+  v.literal("definition"),
+  v.literal("connection-to-own-work"),
+  v.literal("open-question"),
+);
+
+/** Annotations are lab-visible inside a session context and private outside one; both are one tap to flip. */
+export const annotationVisibility = v.union(
+  v.literal("private"),
+  v.literal("lab"),
+);
+
+/** Two roles only: the PI (owner/admin) and everyone else. */
+export const membershipRole = v.union(v.literal("pi"), v.literal("member"));
+
+/**
+ * W3C Web Annotation-style redundant selector: a TextQuoteSelector
+ * (`quote` + `prefix`/`suffix` context) plus a TextPositionSelector
+ * (`start`/`end` character offsets into the page's extracted text). The
+ * redundancy is what lets us fuzzy re-anchor when a preprint and the
+ * publisher PDF disagree about layout.
+ */
+export const anchor = v.object({
+  quote: v.string(),
+  prefix: v.string(),
+  suffix: v.string(),
+  start: v.number(),
+  end: v.number(),
+  pageIndex: v.number(),
+});
+
+/** Every kind of thing that can happen in a lab. Note the absence of any "read"/"viewed" event — that is intentional. */
+export const eventType = v.union(
+  v.literal("lab.created"),
+  v.literal("member.joined"),
+  v.literal("member.left"),
+  v.literal("invite.created"),
+  v.literal("paper.added"),
+  v.literal("paper.ingested"),
+  v.literal("annotation.created"),
+  v.literal("annotation.edited"),
+  v.literal("annotation.deleted"),
+  v.literal("annotation.visibility_changed"),
+  v.literal("annotation.replied"),
+  v.literal("session.scheduled"),
+  v.literal("session.started"),
+  v.literal("session.ended"),
+  v.literal("session.synthesized"),
+);
+
+export default defineSchema({
+  // Auth-owned tables: users, authAccounts, authSessions, authRefreshTokens,
+  // authVerificationCodes, authVerifiers, authRateLimits. `users` is the
+  // canonical person record (name, email) that memberships point at.
+  ...authTables,
+
+  /** A research group. Created by its PI; everything else in the product hangs off a lab. */
+  labs: defineTable({
+    name: v.string(),
+    institution: v.optional(v.string()),
+    createdBy: v.id("users"),
+  }).index("by_creator", ["createdBy"]),
+
+  /** Join table between users and labs; the single source of truth for authorization. */
+  memberships: defineTable({
+    labId: v.id("labs"),
+    userId: v.id("users"),
+    role: membershipRole,
+    joinedAt: v.number(),
+  })
+    .index("by_lab", ["labId"])
+    .index("by_user", ["userId"])
+    .index("by_lab_and_user", ["labId", "userId"]),
+
+  /** A shareable 8-character code that grants `member` access to one lab; reusable until it expires or is revoked. */
+  invites: defineTable({
+    code: v.string(),
+    labId: v.id("labs"),
+    createdBy: v.id("users"),
+    expiresAt: v.number(),
+    usedBy: v.array(v.id("users")),
+    revokedAt: v.optional(v.number()),
+  })
+    .index("by_code", ["code"])
+    .index("by_lab", ["labId"]),
+
+  /**
+   * A paper in a lab's library. `pageText` holds pdf.js-extracted text per
+   * page and is what anchors resolve against; it stays on the document
+   * because Convex documents are generous but not unbounded — if we ever hit
+   * the 1 MiB limit on book-length PDFs this moves to its own table.
+   */
+  papers: defineTable({
+    labId: v.id("labs"),
+    title: v.string(),
+    authors: v.optional(v.array(v.string())),
+    year: v.optional(v.number()),
+    venue: v.optional(v.string()),
+    doi: v.optional(v.string()),
+    sourceUrl: v.optional(v.string()),
+    storageId: v.optional(v.id("_storage")),
+    pageText: v.optional(v.array(v.string())),
+    pageCount: v.optional(v.number()),
+    ingestStatus: v.union(
+      v.literal("pending"),
+      v.literal("extracting"),
+      v.literal("ready"),
+      v.literal("failed"),
+    ),
+    ingestError: v.optional(v.string()),
+    addedBy: v.id("users"),
+  })
+    .index("by_lab", ["labId"])
+    .index("by_lab_and_doi", ["labId", "doi"]),
+
+  /** One journal-club meeting: a lab reads one paper, someone presents, then it gets synthesized. */
+  sessions: defineTable({
+    labId: v.id("labs"),
+    paperId: v.id("papers"),
+    title: v.optional(v.string()),
+    scheduledAt: v.number(),
+    presenterId: v.id("users"),
+    status: v.union(
+      v.literal("scheduled"),
+      v.literal("live"),
+      v.literal("ended"),
+      v.literal("synthesized"),
+    ),
+    presenterNotes: v.optional(v.string()),
+    synthesis: v.optional(v.string()),
+    synthesisApprovedAt: v.optional(v.number()),
+    startedAt: v.optional(v.number()),
+    endedAt: v.optional(v.number()),
+    createdBy: v.id("users"),
+  })
+    .index("by_lab", ["labId"])
+    .index("by_paper", ["paperId"])
+    .index("by_lab_and_scheduled", ["labId", "scheduledAt"])
+    .index("by_lab_and_status", ["labId", "status"]),
+
+  /** A typed, anchored note on a passage — the atom of the product. `parentId` makes threads. */
+  annotations: defineTable({
+    labId: v.id("labs"),
+    paperId: v.id("papers"),
+    sessionId: v.optional(v.id("sessions")),
+    memberId: v.id("users"),
+    anchor,
+    type: annotationType,
+    body: v.string(),
+    visibility: annotationVisibility,
+    parentId: v.optional(v.id("annotations")),
+    editedAt: v.optional(v.number()),
+    deletedAt: v.optional(v.number()),
+  })
+    .index("by_paper", ["paperId"])
+    .index("by_paper_and_member", ["paperId", "memberId"])
+    .index("by_member", ["memberId"])
+    .index("by_parent", ["parentId"])
+    .index("by_session", ["sessionId"])
+    .index("by_lab", ["labId"]),
+
+  /**
+   * The Ledger: append-only, never updated, never deleted. Every row is a
+   * fact with full provenance (who, what, where, when). Collision detection
+   * and "since you were away" deltas both read from here.
+   */
+  events: defineTable({
+    labId: v.id("labs"),
+    type: eventType,
+    actorId: v.id("users"),
+    at: v.number(),
+    paperId: v.optional(v.id("papers")),
+    sessionId: v.optional(v.id("sessions")),
+    annotationId: v.optional(v.id("annotations")),
+    subjectUserId: v.optional(v.id("users")),
+    // Small, event-specific payload (e.g. the annotation type at time of
+    // write) so the ledger stays readable without joining live documents.
+    meta: v.optional(v.record(v.string(), v.string())),
+  })
+    .index("by_lab", ["labId"])
+    .index("by_lab_and_at", ["labId", "at"])
+    .index("by_paper", ["paperId"])
+    .index("by_session", ["sessionId"])
+    .index("by_actor", ["actorId"]),
+
+  /** Per-recipient staleness: how far into the ledger a member has caught up, per paper or per session. */
+  seenCursors: defineTable({
+    userId: v.id("users"),
+    labId: v.id("labs"),
+    paperId: v.optional(v.id("papers")),
+    sessionId: v.optional(v.id("sessions")),
+    lastSeenAt: v.number(),
+  })
+    .index("by_user_and_paper", ["userId", "paperId"])
+    .index("by_user_and_session", ["userId", "sessionId"])
+    .index("by_user_and_lab", ["userId", "labId"]),
+
+  /**
+   * A materialized digest for one member at one boundary, built by the
+   * sim-validated `digest_gold5` policy: gold typed-pair collisions become
+   * individual passage-addressed lines, everything else coalesces to one line
+   * per paper, hard cap 5 items.
+   */
+  digests: defineTable({
+    userId: v.id("users"),
+    labId: v.id("labs"),
+    sessionId: v.optional(v.id("sessions")),
+    boundary: v.union(
+      v.literal("session-prep"),
+      v.literal("session-start"),
+      v.literal("since-away"),
+    ),
+    generatedAt: v.number(),
+    deliveredAt: v.optional(v.number()),
+    acknowledgedAt: v.optional(v.number()),
+    items: v.array(
+      v.object({
+        kind: v.union(v.literal("collision"), v.literal("coalesced")),
+        paperId: v.id("papers"),
+        annotationIds: v.array(v.id("annotations")),
+        // e.g. "hypothesis x critique" — the cell of the type-pair matrix
+        // that fired. Absent for coalesced lines.
+        pairType: v.optional(v.string()),
+        line: v.string(),
+      }),
+    ),
+  })
+    .index("by_user", ["userId"])
+    .index("by_user_and_lab", ["userId", "labId"])
+    .index("by_session", ["sessionId"]),
+});
