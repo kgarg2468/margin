@@ -4,7 +4,10 @@ import {
   WITHDRAWN_ITEM_TEXT,
   annotationRefs,
   applyWithdrawals,
+  assembleMarkdown,
   buildUserPrompt,
+  collectCitations,
+  countWithdrawn,
   extractJson,
   fence,
   isStillShared,
@@ -23,6 +26,11 @@ import {
  * keeps moving, so `isStillShared` and `applyWithdrawals` decide what a
  * synthesis is still allowed to say once the notes behind it have been
  * withdrawn or made private.
+ *
+ * Then the handover to a person: `assembleMarkdown` is the one-way door from
+ * checkable sections to editable prose, and `countWithdrawn` is what tells a
+ * lab its approved copy has stopped being current — the two halves of a
+ * write-up that is a human artifact without pretending to be a live one.
  */
 
 const id = (n: number) => `annotation_${n}` as Id<"annotations">;
@@ -408,6 +416,151 @@ describe("applyWithdrawals", () => {
       "open-questions",
       "summary",
     ]);
+  });
+});
+
+describe("collectCitations", () => {
+  it("reads every citation once, however many items repeat it", () => {
+    const cited = collectCitations([
+      {
+        key: "summary" as const,
+        heading: "What the discussion covered",
+        items: [
+          { text: "One.", attribution: ["Ana Ruiz"], annotationIds: [id(1), id(2)] },
+          { text: "Two.", attribution: ["Ana Ruiz"], annotationIds: [id(2)] },
+        ],
+      },
+      {
+        key: "open-questions" as const,
+        heading: "Open questions",
+        items: [
+          { text: "Three.", attribution: ["Ben Okafor"], annotationIds: [id(2), id(3)] },
+        ],
+      },
+    ]);
+    expect([...cited]).toEqual([id(1), id(2), id(3)]);
+  });
+
+  it("is empty for a write-up with no items", () => {
+    expect(
+      collectCitations([
+        { key: "summary" as const, heading: "What the discussion covered", items: [] },
+      ]).size,
+    ).toBe(0);
+  });
+});
+
+describe("assembleMarkdown", () => {
+  const covered = {
+    key: "summary" as const,
+    heading: "What the discussion covered",
+    items: [
+      {
+        text: "The ablation is the whole result.",
+        attribution: ["Ana Ruiz"],
+        annotationIds: [id(1)],
+      },
+      {
+        text: "Nobody could reproduce table 3.",
+        attribution: ["Ana Ruiz", "Ben Okafor"],
+        annotationIds: [id(2), id(3)],
+      },
+    ],
+  };
+  const empty = {
+    key: "open-questions" as const,
+    heading: "Open questions",
+    items: [],
+  };
+
+  it("writes a heading and a bullet an item, attribution kept as text", () => {
+    // Once this is prose, attribution is only what the prose says. A draft
+    // that dropped the names would hand the approver the lab's thinking with
+    // nobody's name on it, which is the one thing the whole feature refuses.
+    expect(assembleMarkdown([covered])).toBe(
+      [
+        "## What the discussion covered",
+        "",
+        "- The ablation is the whole result. — Ana Ruiz",
+        "- Nobody could reproduce table 3. — Ana Ruiz, Ben Okafor",
+      ].join("\n"),
+    );
+  });
+
+  it("leaves an empty section out rather than heading nothing", () => {
+    const markdown = assembleMarkdown([covered, empty]);
+    expect(markdown).not.toContain("Open questions");
+  });
+
+  it("separates the sections it does write with a blank line", () => {
+    const markdown = assembleMarkdown([
+      covered,
+      { ...empty, items: [{ text: "Does it hold at scale?", attribution: [], annotationIds: [id(1)] }] },
+    ]);
+    expect(markdown).toContain("— Ana Ruiz, Ben Okafor\n\n## Open questions");
+  });
+
+  it("drops the dash entirely when an item is attributed to nobody", () => {
+    // The partial-withdrawal case: the sentence stands, the names don't.
+    const markdown = assembleMarkdown([
+      { ...covered, items: [{ text: "Still true.", attribution: [], annotationIds: [id(1)] }] },
+    ]);
+    expect(markdown).toContain("- Still true.");
+    expect(markdown).not.toContain("—");
+  });
+
+  it("flattens an item that arrived with line breaks in it", () => {
+    // A newline inside a bullet ends the bullet, and the rest of the sentence
+    // would read as a paragraph somebody typed.
+    const markdown = assembleMarkdown([
+      {
+        ...covered,
+        items: [
+          {
+            text: "A claim,\nand   its qualifier.",
+            attribution: ["Ana Ruiz"],
+            annotationIds: [id(1)],
+          },
+        ],
+      },
+    ]);
+    expect(markdown).toContain("- A claim, and its qualifier. — Ana Ruiz");
+  });
+
+  it("hands the approver the redaction, never the sentence it replaced", () => {
+    // The draft is assembled from the redacted sections. Assembling from the
+    // stored ones would put a withdrawn member's writing into a textarea and
+    // then into the lab's official record — the neatest imaginable way around
+    // `visibility: "private"`.
+    const markdown = assembleMarkdown(applyWithdrawals([covered], new Set()));
+    expect(markdown).toContain(`- ${WITHDRAWN_ITEM_TEXT}`);
+    expect(markdown).not.toContain("ablation");
+  });
+
+  it("is empty for a write-up with nothing in any section", () => {
+    expect(assembleMarkdown([empty])).toBe("");
+  });
+});
+
+describe("countWithdrawn", () => {
+  const live = (...ns: number[]) => new Set(ns.map(id));
+
+  it("is zero while every note the copy was checked against is still shared", () => {
+    expect(countWithdrawn([id(1), id(2)], live(1, 2))).toBe(0);
+  });
+
+  it("counts the notes that have gone since approval", () => {
+    expect(countWithdrawn([id(1), id(2), id(3)], live(2))).toBe(2);
+  });
+
+  it("ignores notes that are shared but were never in the snapshot", () => {
+    // The snapshot is the question. A note written after the approval has
+    // nothing to say about whether the approved copy is still current.
+    expect(countWithdrawn([id(1)], live(1, 2, 3))).toBe(0);
+  });
+
+  it("is zero for a copy approved against nothing at all", () => {
+    expect(countWithdrawn([], live())).toBe(0);
   });
 });
 

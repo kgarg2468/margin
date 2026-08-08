@@ -5,6 +5,7 @@ import {
   action,
   internalMutation,
   internalQuery,
+  mutation,
   query,
   type MutationCtx,
   type QueryCtx,
@@ -12,6 +13,7 @@ import {
 import { annotationType, synthesisSectionKey } from "./schema";
 import { getMembership, requireUserId } from "./lib/authz";
 import { recordEvent } from "./lib/ledger";
+import { canApprove } from "./sessions";
 
 /**
  * The post-meeting synthesis.
@@ -46,6 +48,24 @@ import { recordEvent } from "./lib/ledger";
  * re-checks every citation on the way out and redacts what no longer holds
  * (see `applyWithdrawals`). Privacy here is a property of the read, not of the
  * stored row.
+ *
+ * ## The draft and the copy
+ *
+ * What the model produces is a draft, and it stays one. The lab's official
+ * write-up is `sessions.synthesis`: markdown a person assembled from the draft
+ * (`assembleMarkdown`), edited however they liked, and approved (`approve`).
+ * Two artifacts with two different authors, and the code never lets one stand
+ * in for the other — re-generating replaces the draft and leaves the approved
+ * copy exactly where it was, because a model does not get to overwrite
+ * something a person put their name to.
+ *
+ * The price of a human artifact is that it cannot self-redact: nobody can tell
+ * which sentence of somebody's prose came from which note, so the withdrawal
+ * machinery above has nothing to work on. Approval therefore stores the
+ * citation snapshot it was checked against (`synthesisCitedAnnotationIds`),
+ * and the copy is marked stale — loudly, on the page — the moment one of those
+ * notes stops being shared. Not silently rewritten, and not silently left
+ * alone either.
  */
 
 /* -------------------------------------------------------------------------
@@ -131,6 +151,17 @@ const MAX_OUTPUT_TOKENS = 16_000;
 const REASONING_EFFORT = "low";
 
 const MAX_ANNOTATIONS = 400;
+
+/**
+ * How long the approved write-up may be.
+ *
+ * Generous — several times what a generated draft runs to — because this is
+ * the one field in the product a person writes freely, and a lab that wants to
+ * paste the whole discussion into it should be able to. Refused rather than
+ * truncated, for the reason `cleanNotes` gives in `convex/sessions.ts`: a
+ * silent `slice` hands somebody a success and eats the end of their write-up.
+ */
+const MAX_APPROVED_LENGTH = 40_000;
 
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 
@@ -247,6 +278,35 @@ async function requireManageableSession(
     );
   }
   return { session, membership, userId };
+}
+
+/**
+ * The presenter or the PI — the gate on approving, which is narrower than the
+ * gate on generating.
+ *
+ * The rule itself comes from `canApprove` in `convex/sessions.ts` rather than
+ * being restated here: this is a permission, and a permission with two
+ * definitions has one that is out of date. (`requireManageableSession` above
+ * still carries its twin; folding both into one import is a change to session
+ * code this work has no other reason to make.)
+ */
+async function requireApprover(
+  ctx: QueryCtx | MutationCtx,
+  sessionId: Id<"sessions">,
+): Promise<{ session: Doc<"sessions">; userId: Id<"users"> }> {
+  const userId = await requireUserId(ctx);
+  const session = await ctx.db.get(sessionId);
+  const membership =
+    session === null ? null : await getMembership(ctx, session.labId, userId);
+  if (session === null || membership === null) {
+    throw new ConvexError(NO_SUCH_SESSION);
+  }
+  if (!canApprove(session, membership)) {
+    throw new ConvexError(
+      "Only the presenter or the lab's PI can approve this write-up.",
+    );
+  }
+  return { session, userId };
 }
 
 /* -------------------------------------------------------------------------
@@ -1162,6 +1222,58 @@ export function applyWithdrawals<A extends string = string>(
   }));
 }
 
+/** Every annotation a write-up rests on, deduped, so each is read once. */
+export function collectCitations<A extends string = string>(
+  sections: readonly Section<A>[],
+): Set<A> {
+  const cited = new Set<A>();
+  for (const section of sections) {
+    for (const item of section.items) {
+      for (const annotationId of item.annotationIds) cited.add(annotationId);
+    }
+  }
+  return cited;
+}
+
+/**
+ * Which of these citations the lab may still be shown.
+ *
+ * One read per distinct annotation, and the set is what both the redaction and
+ * the staleness check are computed from — so a write-up and its approved copy
+ * can never disagree about which notes are still there.
+ */
+async function stillSharedAmong(
+  ctx: QueryCtx | MutationCtx,
+  labId: Id<"labs">,
+  citations: Iterable<Id<"annotations">>,
+): Promise<Set<Id<"annotations">>> {
+  const stillShared = new Set<Id<"annotations">>();
+  for (const annotationId of citations) {
+    const annotation = await ctx.db.get(annotationId);
+    if (isStillShared(annotation, labId)) {
+      stillShared.add(annotationId);
+    }
+  }
+  return stillShared;
+}
+
+/**
+ * How much of what an approved copy was checked against has since gone.
+ *
+ * The snapshot is the list of notes that were still shared at the moment
+ * somebody approved the text, so anything missing from `stillShared` now is a
+ * note withdrawn, deleted, or made private *since* — which is exactly the
+ * claim the reader's banner makes. Zero is the ordinary answer and means the
+ * copy is still current.
+ */
+export function countWithdrawn<A extends string = string>(
+  snapshot: readonly A[],
+  stillShared: ReadonlySet<A>,
+): number {
+  return snapshot.filter((annotationId) => !stillShared.has(annotationId))
+    .length;
+}
+
 /**
  * The stored write-up for a session, for anyone in the lab.
  *
@@ -1188,6 +1300,23 @@ export const getForSession = query({
       sections: v.array(synthesisSection),
       model: v.string(),
       generatedAt: v.number(),
+      /**
+       * The state of the approved copy, when there is one. Computed here
+       * rather than on the session read because this is where the citations
+       * are already being re-checked — one pass answers both questions.
+       */
+      approval: v.union(
+        v.null(),
+        v.object({
+          approvedAt: v.number(),
+          /**
+           * How many of the notes the copy was checked against are no longer
+           * shared. Above zero, the approved copy is out of date and the
+           * reader is told so.
+           */
+          withdrawnSince: v.number(),
+        }),
+      ),
     }),
   ),
   handler: async (ctx, args) => {
@@ -1210,20 +1339,13 @@ export const getForSession = query({
     // this lab. Deduped first, so an item cited by three sections costs one
     // read; `visibility` is re-read from the row rather than assumed, because
     // flipping a note back to private is one tap and leaves the write-up
-    // untouched.
-    const cited = new Set<Id<"annotations">>();
-    for (const section of synthesis.sections) {
-      for (const item of section.items) {
-        for (const annotationId of item.annotationIds) cited.add(annotationId);
-      }
-    }
-    const stillShared = new Set<Id<"annotations">>();
-    for (const annotationId of cited) {
-      const annotation = await ctx.db.get(annotationId);
-      if (isStillShared(annotation, session.labId)) {
-        stillShared.add(annotationId);
-      }
-    }
+    // untouched. The approved copy's own snapshot joins the same pass — the
+    // two lists overlap almost entirely, and reading them separately would
+    // double the work to answer one question twice.
+    const snapshot = session.synthesisCitedAnnotationIds ?? [];
+    const cited = collectCitations(synthesis.sections);
+    for (const annotationId of snapshot) cited.add(annotationId);
+    const stillShared = await stillSharedAmong(ctx, session.labId, cited);
 
     return {
       _id: synthesis._id,
@@ -1231,6 +1353,172 @@ export const getForSession = query({
       sections: applyWithdrawals(synthesis.sections, stillShared),
       model: synthesis.model,
       generatedAt: synthesis.generatedAt,
+      approval:
+        session.synthesis === undefined ||
+        session.synthesisApprovedAt === undefined
+          ? null
+          : {
+              approvedAt: session.synthesisApprovedAt,
+              withdrawnSince: countWithdrawn(snapshot, stillShared),
+            },
     };
+  },
+});
+
+/* -------------------------------------------------------------------------
+ * Signing it off
+ * ---------------------------------------------------------------------- */
+
+/**
+ * The generated draft as markdown a person can edit.
+ *
+ * The structured sections are what makes the draft checkable, and a textarea
+ * is what makes it editable; this is the one-way door between them. Headings
+ * become `##`, items become bullets, and each item keeps the names it was
+ * attributed to as plain text after an em dash — because once this is prose,
+ * attribution is only what the prose says, and dropping it here would quietly
+ * turn the lab's writing into the lab's anonymous writing.
+ *
+ * Sections with nothing in them are left out entirely rather than emitted as
+ * empty headings, which is what the reader does with them too.
+ *
+ * Item text is flattened to one line. The model writes a sentence or two and
+ * ordinarily has no newlines in it, but one stray line break would silently
+ * end the bullet and leave the rest of the sentence looking like a paragraph
+ * somebody typed.
+ */
+export function assembleMarkdown<A extends string = string>(
+  sections: readonly Section<A>[],
+): string {
+  const blocks: string[] = [];
+  for (const section of sections) {
+    if (section.items.length === 0) continue;
+    const lines = [`## ${section.heading}`, ""];
+    for (const item of section.items) {
+      const text = item.text.replace(/\s+/g, " ").trim();
+      const names = item.attribution.join(", ");
+      lines.push(names.length > 0 ? `- ${text} — ${names}` : `- ${text}`);
+    }
+    blocks.push(lines.join("\n"));
+  }
+  return blocks.join("\n\n");
+}
+
+/**
+ * The draft, as the editable markdown the approval form opens on.
+ *
+ * Presenter or PI only, because nobody else can act on it — and assembled from
+ * the *redacted* sections rather than the stored ones, so a line whose notes
+ * have all been withdrawn reaches the editor as the redaction marker the
+ * reader sees, not as the sentence it replaced. Handing an approver the
+ * original text to paste into the lab's official record would be the neatest
+ * way imaginable around `visibility: "private"`.
+ */
+export const draftForApproval = query({
+  args: { sessionId: v.id("sessions") },
+  returns: v.union(
+    v.null(),
+    v.object({ markdown: v.string(), generatedAt: v.number() }),
+  ),
+  handler: async (ctx, args) => {
+    const { session } = await requireApprover(ctx, args.sessionId);
+    const synthesis = await ctx.db
+      .query("syntheses")
+      .withIndex("by_session", (q) => q.eq("sessionId", args.sessionId))
+      .unique();
+    if (synthesis === null) {
+      return null;
+    }
+    const stillShared = await stillSharedAmong(
+      ctx,
+      session.labId,
+      collectCitations(synthesis.sections),
+    );
+    return {
+      markdown: assembleMarkdown(
+        applyWithdrawals(synthesis.sections, stillShared),
+      ),
+      generatedAt: synthesis.generatedAt,
+    };
+  },
+});
+
+/**
+ * Approve a write-up: this text, edited by this person, is the lab's record of
+ * the meeting.
+ *
+ * Three things happen in one transaction, and they belong together.
+ *
+ * **The text is stored as given.** Whatever the approver typed is what the lab
+ * publishes — they may have rewritten every line of the draft, and it is not
+ * this mutation's business to check their prose against the model's. The
+ * guarantee that survives is the one about the *draft*: every claim in it was
+ * traceable when it was generated, and the person approving it read that.
+ *
+ * **The citations are re-checked and snapshotted.** Only the ones still shared
+ * at this instant go into the snapshot, so approving a write-up whose notes are
+ * already partly withdrawn does not mark it stale the moment it is saved. From
+ * here on the snapshot is what staleness is measured against.
+ *
+ * **The ledger records it**, with the actor, because this is the moment a
+ * person took responsibility for a version of the text and that is exactly the
+ * kind of fact the ledger exists to hold.
+ *
+ * There has to be a generated draft first. Not because the text must come from
+ * it — it need not — but because the approved copy's staleness is measured
+ * against the draft's citations, and a write-up with nothing behind it is the
+ * unfalsifiable prose this whole feature is built to refuse.
+ */
+export const approve = mutation({
+  args: { sessionId: v.id("sessions"), text: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const { session, userId } = await requireApprover(ctx, args.sessionId);
+
+    const text = args.text.trim();
+    if (text.length === 0) {
+      throw new ConvexError(
+        "An approved write-up can't be empty — this is the version the lab keeps.",
+      );
+    }
+    if (text.length > MAX_APPROVED_LENGTH) {
+      throw new ConvexError(
+        `That write-up is ${text.length} characters. Approved write-ups stop at ${MAX_APPROVED_LENGTH}.`,
+      );
+    }
+
+    const synthesis = await ctx.db
+      .query("syntheses")
+      .withIndex("by_session", (q) => q.eq("sessionId", args.sessionId))
+      .unique();
+    if (synthesis === null) {
+      throw new ConvexError(
+        "There's no draft to approve yet. Generate the write-up first — an approved copy is a version of something the lab's own notes back.",
+      );
+    }
+
+    const stillShared = await stillSharedAmong(
+      ctx,
+      session.labId,
+      collectCitations(synthesis.sections),
+    );
+    const reapproved = session.synthesisApprovedAt !== undefined;
+
+    await ctx.db.patch(args.sessionId, {
+      synthesis: text,
+      synthesisApprovedAt: Date.now(),
+      synthesisCitedAnnotationIds: [...stillShared],
+    });
+
+    await recordEvent(ctx, {
+      labId: session.labId,
+      actorId: userId,
+      paperId: session.paperId,
+      sessionId: args.sessionId,
+      type: "synthesis.approved",
+      citationCount: stillShared.size,
+      reapproved,
+    });
+    return null;
   },
 });
