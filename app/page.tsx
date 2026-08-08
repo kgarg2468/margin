@@ -91,7 +91,6 @@ export default function Home() {
           <code className="rounded-sm bg-surface-sunken px-1 py-0.5 text-ink-muted">
             app/globals.css
           </code>
-          .
         </footer>
       </main>
     </div>
