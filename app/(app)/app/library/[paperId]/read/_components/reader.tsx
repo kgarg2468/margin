@@ -96,6 +96,31 @@ export function Reader({
     new Map(),
   );
 
+  // In dark mode the sheet is developed dark by default (see reader.module.css)
+  // and this is the way back to print-white — figures only read faithfully in
+  // their printed colours. A preference about your own eyes, so it is kept on
+  // this device and nowhere else.
+  const [sheet, setSheet] = useState<"dark" | "white">("dark");
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem("margin:sheet") === "white") {
+        setSheet("white");
+      }
+    } catch {
+      // Storage can be denied; the default is the right answer then.
+    }
+  }, []);
+  const toggleSheet = () =>
+    setSheet((previous) => {
+      const next = previous === "dark" ? "white" : "dark";
+      try {
+        window.localStorage.setItem("margin:sheet", next);
+      } catch {
+        // Session-only, then.
+      }
+      return next;
+    });
+
   // --- the document ------------------------------------------------------
   useEffect(() => {
     if (pdfUrl === undefined || pdfUrl === null) {
@@ -400,7 +425,10 @@ export function Reader({
   }
 
   return (
-    <div className="fixed inset-0 z-20 flex flex-col bg-page md:left-64">
+    <div
+      data-sheet={sheet}
+      className="fixed inset-0 z-20 flex flex-col bg-page md:left-64"
+    >
       {/* Two fixed-height rows rather than one wrapping one: the old header
           grew two or three chip rows tall on a laptop and the margin's cards
           sheared off against its border — the "gross cutoff" of the co-founder
@@ -430,6 +458,21 @@ export function Reader({
               In session
             </Link>
           )}
+          {/* Only rendered where it does anything: in light mode the sheet is
+              print-white and a "White page" control would be a lie. */}
+          <button
+            type="button"
+            aria-pressed={sheet === "white"}
+            onClick={toggleSheet}
+            className={
+              "hidden shrink-0 rounded-full border px-2 py-0.5 font-sans text-[10px] uppercase tracking-[0.14em] transition-colors dark:inline-flex " +
+              (sheet === "white"
+                ? "border-ink-faint text-ink"
+                : "border-rule text-ink-faint hover:border-ink-faint hover:text-accent")
+            }
+          >
+            White page
+          </button>
           <span className="shrink-0 font-sans text-xs tabular-nums text-ink-faint">
             {pageCount > 0 ? `Page ${currentPage + 1} of ${pageCount}` : "…"}
           </span>

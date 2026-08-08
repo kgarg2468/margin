@@ -25,6 +25,32 @@
 }
 
 /*
+ * The paper at night.
+ *
+ * In dark mode a PDF renders as a full-screen slab of print-white, and every
+ * warm surface around it reads as dead black by contrast — the one square of
+ * daylight in a candlelit room. So the sheet is developed like a negative:
+ * `invert(0.9)` turns the paper down to near-black and the ink up to
+ * near-white, `hue-rotate(180deg)` puts figure colours back on the right side
+ * of the wheel, and `sepia(0.4)` warms the result onto the app's own palette —
+ * the filtered page lands within a few RGB points of `--surface`, and the
+ * lifted ink within a few of `--ink`.
+ *
+ * Only the canvas is filtered. Highlights, underlines, and the selection wash
+ * live in sibling layers and keep their dark-mode token values, which were
+ * already chosen against dark grounds.
+ *
+ * `data-sheet` is the reader's opt-out: figures read faithfully only in their
+ * printed colours, and someone checking a heat map can ask for the white page
+ * back. Scoped under the dark media query so the light scheme never filters.
+ */
+@media (prefers-color-scheme: dark) {
+  :global([data-sheet="dark"]) .canvas {
+    filter: invert(0.9) hue-rotate(180deg) sepia(0.4);
+  }
+}
+
+/*
  * Highlights sit above the canvas and below the text layer. Both are z-index 0,
  * so document order decides, which keeps the text layer selectable — a
  * highlight that swallowed pointer events would make the passage it marks the
@@ -101,8 +127,8 @@
 
 /*
  * The selection wash is a literal, not a token, twice over. The canvas under
- * these spans is the paper's own white in either colour scheme, so the theme
- * has no say in what reads on it; and `::selection` is a highlight
+ * these spans is print-white in light mode and the dimmed sheet above in dark,
+ * and wedgwood at 40% reads as a selection on both; and `::selection` is a highlight
  * pseudo-element, where custom properties have a history of resolving to
  * nothing at all once Lightning CSS has lowered `light-dark()` into variable
  * toggles — which is exactly how this rule shipped as an invisible highlight.
