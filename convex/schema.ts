@@ -221,6 +221,7 @@ export const eventDoc = v.union(
   v.object({
     ...eventBase,
     type: v.literal("session.rescheduled"),
+    paperId: v.id("papers"),
     sessionId: v.id("sessions"),
     /** The time the session was moved *to*. */
     scheduledAt: v.number(),
@@ -228,6 +229,7 @@ export const eventDoc = v.union(
   v.object({
     ...eventBase,
     type: v.literal("session.presenter_changed"),
+    paperId: v.id("papers"),
     sessionId: v.id("sessions"),
     /** The member who is presenting *now*. */
     presenterId: v.id("users"),
@@ -255,6 +257,7 @@ export const eventDoc = v.union(
   v.object({
     ...eventBase,
     type: v.literal("session.cancelled"),
+    paperId: v.id("papers"),
     sessionId: v.id("sessions"),
   }),
 );
