@@ -384,78 +384,87 @@ export function Reader({
 
   return (
     <div className="fixed inset-0 z-20 flex flex-col bg-page md:left-64">
-      <header className="flex shrink-0 flex-wrap items-center gap-x-5 gap-y-2 border-b border-rule bg-surface px-4 py-2.5 sm:px-6">
-        <Link
-          href={`/app/library/${paperId}`}
-          className="font-sans text-sm text-accent underline-offset-4 hover:underline"
-        >
-          ← Paper
-        </Link>
-        <h1 className="min-w-0 flex-1 truncate font-serif text-lg leading-tight text-ink-strong">
-          {paper.title}
-        </h1>
-        {/* The chip is the way back to the meeting this reading is for, not
-            just a badge: somebody who followed "Read the paper" out of a
-            session needs one click to return to it. */}
-        {sessionId !== undefined && (
+      {/* Two fixed-height rows rather than one wrapping one: the old header
+          grew two or three chip rows tall on a laptop and the margin's cards
+          sheared off against its border — the "gross cutoff" of the co-founder
+          review. The title row never wraps; the chip band never wraps either,
+          it scrolls sideways instead, which on a phone is also a better
+          gesture than aiming at a stack. */}
+      <header className="shrink-0 border-b border-rule bg-surface">
+        <div className="flex items-center gap-x-4 px-4 py-2.5 sm:px-6">
           <Link
-            href={`/app/sessions/${sessionId}`}
-            aria-label="Back to the session"
-            className="rounded-sm border border-rule px-1.5 py-0.5 font-sans text-[10px] uppercase tracking-[0.14em] text-ink-faint transition-colors hover:border-ink-faint hover:text-accent"
+            href={`/app/library/${paperId}`}
+            className="shrink-0 font-sans text-sm text-accent underline-offset-4 hover:underline"
           >
-            In session
+            ← Paper
           </Link>
-        )}
-        <span className="font-sans text-xs tabular-nums text-ink-faint">
-          {pageCount > 0 ? `Page ${currentPage + 1} of ${pageCount}` : "…"}
-        </span>
+          <h1 className="min-w-0 flex-1 truncate font-serif text-lg leading-tight text-ink-strong">
+            {paper.title}
+          </h1>
+          {/* The chip is the way back to the meeting this reading is for, not
+              just a badge: somebody who followed "Read the paper" out of a
+              session needs one click to return to it. */}
+          {sessionId !== undefined && (
+            <Link
+              href={`/app/sessions/${sessionId}`}
+              aria-label="Back to the session"
+              className="shrink-0 rounded-full border border-rule px-2 py-0.5 font-sans text-[10px] uppercase tracking-[0.14em] text-ink-faint transition-colors hover:border-ink-faint hover:text-accent"
+            >
+              In session
+            </Link>
+          )}
+          <span className="shrink-0 font-sans text-xs tabular-nums text-ink-faint">
+            {pageCount > 0 ? `Page ${currentPage + 1} of ${pageCount}` : "…"}
+          </span>
+        </div>
 
         {/* No notes, no filter: a "Show" with nothing after it reads like a
             control that failed to load. */}
-        <div
-          // gap-y-2 rather than gap-1.5 all round: these wrap to two or three
-          // rows on a phone, and each chip's hit box is taller than the chip.
-          // At this pitch the overlap between rows falls in the gutter, not on
-          // anything drawn.
-          className={`${counts.size === 0 ? "hidden" : "flex"} w-full flex-wrap items-center gap-x-1.5 gap-y-2 lg:w-auto`}
-        >
-          <span className={`${eyebrowClass} mr-1`}>Show</span>
-          {ANNOTATION_TYPES.filter(
-            (style) => (counts.get(style.value) ?? 0) > 0,
-          ).map((style) => {
-            const on = filter.size === 0 || filter.has(style.value);
-            return (
+        {counts.size > 0 && (
+          <div className="flex items-center gap-x-1.5 overflow-x-auto border-t border-rule px-4 py-2 [scrollbar-width:none] sm:px-6 [&::-webkit-scrollbar]:hidden">
+            <span className={`${eyebrowClass} mr-1 shrink-0`}>Show</span>
+            {ANNOTATION_TYPES.filter(
+              (style) => (counts.get(style.value) ?? 0) > 0,
+            ).map((style) => {
+              const on = filter.size === 0 || filter.has(style.value);
+              return (
+                <button
+                  key={style.value}
+                  type="button"
+                  // The effective state, not the set membership: with no filter
+                  // at all every chip is on, and a row of "off" chips over a
+                  // margin showing everything is a lie a screen reader has no
+                  // way to see through.
+                  aria-pressed={on}
+                  onClick={() => toggleFilter(style.value)}
+                  style={
+                    on
+                      ? { color: style.ink, backgroundColor: style.wash }
+                      : undefined
+                  }
+                  className={
+                    "shrink-0 whitespace-nowrap rounded-full border px-2.5 py-1 font-sans text-[10px] uppercase tracking-[0.1em] " +
+                    "motion-safe:transition-[color,background-color,border-color,transform] motion-safe:duration-200 active:scale-[0.96] " +
+                    (on
+                      ? "border-transparent"
+                      : "border-rule text-ink-faint hover:border-ink-faint hover:text-ink-muted")
+                  }
+                >
+                  {style.label} {counts.get(style.value)}
+                </button>
+              );
+            })}
+            {filter.size > 0 && (
               <button
-                key={style.value}
                 type="button"
-                // The effective state, not the set membership: with no filter
-                // at all every chip is on, and a row of "off" chips over a
-                // margin showing everything is a lie a screen reader has no
-                // way to see through.
-                aria-pressed={on}
-                onClick={() => toggleFilter(style.value)}
-                style={{ color: on ? style.ink : undefined }}
-                className={
-                  "tap-target rounded-sm border px-1.5 py-1.5 font-sans text-[10px] uppercase tracking-[0.1em] transition-colors " +
-                  (on
-                    ? "border-current"
-                    : "border-rule text-ink-faint hover:border-ink-faint")
-                }
+                onClick={() => setFilter(new Set())}
+                className="shrink-0 px-1.5 font-sans text-[11px] text-accent underline-offset-4 hover:underline"
               >
-                {style.label} {counts.get(style.value)}
+                All
               </button>
-            );
-          })}
-          {filter.size > 0 && (
-            <button
-              type="button"
-              onClick={() => setFilter(new Set())}
-              className="tap-target font-sans text-[11px] text-accent underline-offset-4 hover:underline"
-            >
-              All
-            </button>
-          )}
-        </div>
+            )}
+          </div>
+        )}
       </header>
 
       <div
@@ -463,6 +472,12 @@ export function Reader({
         className="flex-1 overflow-y-auto overscroll-contain"
         onMouseDown={() => setDraft(null)}
       >
+        {/* A breath of page colour under the header, so cards slide beneath
+            it instead of shearing off against the border. */}
+        <div
+          aria-hidden
+          className="pointer-events-none sticky top-0 z-10 -mb-5 h-5 bg-gradient-to-b from-page to-transparent"
+        />
         <div
           ref={contentRef}
           className="relative mx-auto flex w-full max-w-[1500px] flex-col gap-6 px-4 py-6 lg:flex-row lg:px-8"

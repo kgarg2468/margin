@@ -569,7 +569,9 @@ export function PdfPage({
       tabIndex={0}
       role="group"
       aria-label={`Page ${pageIndex + 1}`}
-      className={`${styles.page} shrink-0 border border-rule bg-surface shadow-[0_1px_0_var(--rule)] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-accent`}
+      // A sheet of paper on the desk, not a rectangle in a void: a hair of
+      // radius and a soft drop shadow instead of the old hard 1px ledge.
+      className={`${styles.page} shrink-0 rounded-[3px] border border-rule bg-surface shadow-[0_4px_20px_-12px_rgba(42,33,29,0.4)] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-accent`}
       style={pageStyle}
       onMouseUp={captureSelection}
       onKeyUp={(event: KeyboardEvent<HTMLDivElement>) => {
@@ -656,7 +658,7 @@ export function PdfPage({
               pending.left - (wrapperRef.current?.offsetLeft ?? 0),
             ),
           }}
-          className="absolute z-10 rounded-sm border border-rule bg-surface px-2 py-1 font-sans text-[11px] text-accent shadow-[0_1px_2px_var(--rule)] hover:underline focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          className="pop-in absolute z-10 rounded-full border border-rule bg-surface px-2.5 py-1 font-sans text-[11px] text-accent shadow-[0_4px_12px_-6px_rgba(42,33,29,0.4)] hover:underline focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-accent"
         >
           Annotate selection
         </button>

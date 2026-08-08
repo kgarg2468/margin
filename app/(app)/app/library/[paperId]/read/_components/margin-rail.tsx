@@ -180,7 +180,10 @@ export function MarginRail({
           {placed.map(({ card: entry, top }) => (
             <div
               key={entry.annotation._id}
-              className="absolute inset-x-0"
+              // The typesetting pass moves cards when a thread expands or a
+              // filter changes; easing `top` turns those jumps into the
+              // margin re-flowing, which is what actually happened.
+              className="absolute inset-x-0 motion-safe:transition-[top] motion-safe:duration-300 motion-safe:ease-[cubic-bezier(0.16,1,0.3,1)]"
               style={{ top }}
             >
               {card(entry)}
