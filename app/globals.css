@@ -54,8 +54,11 @@
 
   /* Three more inks for the annotation ontology (see below). Chosen to sit
    * beside espresso on sand without turning the page into a highlighter set:
-   * a dry moss, an iron-oxide rust, a slate teal. */
+   * a dry moss, an iron-oxide rust, a slate teal, a dry ochre. */
   --moss-700: #4a5f3a;
+  --ochre-700: #6f5420;
+  --ochre-500: #b08a3e;
+  --ochre-300: #d4ad60;
   --moss-500: #6f8c58;
   --moss-300: #9cb489;
   --rust-700: #8a4a2f;
@@ -104,13 +107,14 @@
    * for the text and a highlighter wash for the passage. The wash is mixed
    * from the mid tone of the same hue rather than from the ink itself: at
    * 20% over sand the 700s lose their chroma and every mark comes out the
-   * same grey. Two of the five reuse the brand pair (accent = hypothesis,
+   * same grey. Two of the six reuse the brand pair (accent = hypothesis,
    * secondary = open question), which keeps the palette honest — the
    * ontology *is* the brand.
    *
-   * Every ink carries small sans-serif text, so all five clear AA on the
+   * Every ink carries small sans-serif text, so all six clear AA on the
    * grounds they land on. Light values on --surface (#fdfaf4): hypothesis
-   * 7.9:1, method 6.7:1, critique 6.5:1, connection 6.9:1, question 7.1:1.
+   * 7.9:1, method 6.7:1, critique 6.5:1, connection 6.9:1, question 7.1:1,
+   * definition 6.8:1.
    * Dark values on --surface-sunken (#251e1a): none below 6.2:1.
    *
    * An ink on its own wash is the tightest pairing, and it only occurs on
@@ -152,6 +156,12 @@
   --note-question-wash: light-dark(
     color-mix(in oklab, var(--violet-500) 20%, transparent),
     color-mix(in oklab, var(--violet-400) 20%, transparent)
+  );
+
+  --note-definition: light-dark(var(--ochre-700), var(--ochre-300));
+  --note-definition-wash: light-dark(
+    color-mix(in oklab, var(--ochre-500) 20%, transparent),
+    color-mix(in oklab, var(--ochre-300) 20%, transparent)
   );
 
   /* follow the system by default; the classes below force a mode */
