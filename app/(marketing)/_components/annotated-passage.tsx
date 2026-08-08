@@ -55,7 +55,13 @@ const TYPE_ORDER: NoteType[] = [
   "question",
 ];
 
-/** A highlighter pass plus a pen underline, in the ink of its note type. */
+/**
+ * A highlighter pass plus a pen underline, in the ink of its note type.
+ *
+ * The ink is decoration; the numeral is the actual key. It is announced as
+ * "note N" here and again on the note itself, so a reader who cannot see the
+ * colour still has the passage-to-margin link in the text.
+ */
 function Mark({
   type,
   n,
@@ -78,11 +84,11 @@ function Mark({
         {children}
       </mark>
       <sup
-        aria-hidden
         className="ml-[0.15em] font-sans text-[0.55em] font-medium"
         style={{ color: note.ink }}
       >
-        {n}
+        <span className="sr-only"> (note {n})</span>
+        <span aria-hidden>{n}</span>
       </sup>
     </>
   );
@@ -208,6 +214,7 @@ function MarginNote({ note }: { note: Note }) {
           className="inline-flex items-center gap-1.5 rounded-sm px-1.5 py-0.5 font-sans text-[0.65rem] font-medium uppercase tracking-[0.12em]"
           style={{ backgroundColor: meta.wash, color: meta.ink }}
         >
+          <span className="sr-only">note {note.n}, </span>
           <span aria-hidden>{note.n}</span>
           {meta.label}
         </span>
@@ -301,8 +308,15 @@ export function AnnotatedPassage() {
               {NOTE[type].label}
             </span>
           ))}
-          <span className="font-sans text-[0.7rem] text-ink-faint">
-            &amp; definition
+          {/* The ontology has a sixth type, and nothing in this excerpt is one.
+              A hollow swatch and a reason keeps the legend one coherent line
+              instead of trailing off into a fragment. */}
+          <span className="inline-flex items-center gap-1.5 font-sans text-[0.7rem] text-ink-faint">
+            <span
+              aria-hidden
+              className="h-2 w-2 rounded-full border border-current"
+            />
+            definition &mdash; none in this excerpt
           </span>
         </div>
       </div>
