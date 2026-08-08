@@ -1,0 +1,61 @@
+- generic [active] [ref=f5e1]:
+  - button "Open Next.js Dev Tools" [ref=f5e24] [cursor=pointer]
+  - alert [ref=f5e18]: margin
+  - generic [ref=f5e34]:
+    - complementary [ref=f5e35]:
+      - link "margin" [ref=f5e36] [cursor=pointer]:
+        - /url: /app
+      - generic [ref=f5e37]:
+        - generic [ref=f5e38]: Lab
+        - generic [ref=f5e39]: Coherence Lab
+      - navigation [ref=f5e40]:
+        - generic [ref=f5e41]: Sections
+        - list [ref=f5e42]:
+          - listitem [ref=f5e43]:
+            - link "Library" [ref=f5e44] [cursor=pointer]:
+              - /url: /app/library
+            - generic [ref=f5e45]: Papers the lab is reading
+          - listitem [ref=f5e46]:
+            - generic [ref=f5e47]:
+              - generic [ref=f5e48]: Sessions
+              - generic [ref=f5e49]: Soon
+            - generic [ref=f5e50]: Journal club meetings
+      - generic [ref=f5e51]:
+        - generic [ref=f5e52]: Test PI
+        - button "Sign out" [ref=f5e53]
+    - main [ref=f5e54]:
+      - generic [ref=f5e82]:
+        - generic [ref=f5e83]:
+          - heading "Coherence Lab" [level=1] [ref=f5e84]
+          - paragraph [ref=f5e85]: Rice University · 1 member · you are the PI
+        - generic [ref=f5e86]:
+          - heading "Members" [level=2] [ref=f5e87]
+          - list [ref=f5e88]:
+            - listitem [ref=f5e89]:
+              - generic [ref=f5e90]:
+                - generic [ref=f5e91]: Test PI
+                - generic [ref=f5e92]: PI
+              - generic [ref=f5e93]: testpi@margin.test · joined Aug 7, 2026
+        - generic [ref=f5e95]:
+          - heading "Invite codes" [level=2] [ref=f5e96]
+          - paragraph [ref=f5e97]: Anyone with a live code can join as a member. Codes last 14 days, admit up to 25 people, and can be revoked at any time.
+          - paragraph [ref=f5e98]: No live codes. Generate one to bring the lab in.
+          - button "New invite code" [ref=f5e99]
+        - generic [ref=f5e100]:
+          - heading "Coming next" [level=2] [ref=f5e101]
+          - generic [ref=f5e102]:
+            - generic [ref=f5e103]:
+              - generic [ref=f5e104]:
+                - heading "Library" [level=3] [ref=f5e105]
+                - generic [ref=f5e106]: Soon
+              - paragraph [ref=f5e107]: Papers your lab is reading. Upload a PDF or paste a DOI and Margin pulls the metadata, extracts the text, and puts it in front of the group.
+            - generic [ref=f5e108]:
+              - generic [ref=f5e109]:
+                - heading "Sessions" [level=3] [ref=f5e110]
+                - generic [ref=f5e111]: Soon
+              - paragraph [ref=f5e112]: Journal club meetings. Schedule one against a paper, prep in the margins beforehand, and run the live view of what the group flagged.
+        - group [ref=f5e114]:
+          - generic "Joining another lab?" [ref=f5e115] [cursor=pointer]
+        - generic [ref=f5e116]:
+          - heading "Leaving" [level=2] [ref=f5e117]
+          - paragraph [ref=f5e118]: You are the PI of Coherence Lab, so you can’t leave it — a lab has to have someone who can manage the roster. Handing the lab over comes later.

@@ -1,0 +1,60 @@
+- generic [active] [ref=f7e1]:
+  - generic [ref=f7e2]:
+    - complementary [ref=f7e3]:
+      - link "margin" [ref=f7e4] [cursor=pointer]:
+        - /url: /app
+      - generic [ref=f7e5]:
+        - generic [ref=f7e6]: Lab
+        - generic [ref=f7e7]: Coherence Lab
+      - navigation [ref=f7e8]:
+        - generic [ref=f7e9]: Sections
+        - list [ref=f7e10]:
+          - listitem [ref=f7e11]:
+            - link "Library" [ref=f7e12] [cursor=pointer]:
+              - /url: /app/library
+            - generic [ref=f7e13]: Papers the lab is reading
+          - listitem [ref=f7e14]:
+            - generic [ref=f7e15]:
+              - generic [ref=f7e16]: Sessions
+              - generic [ref=f7e17]: Soon
+            - generic [ref=f7e18]: Journal club meetings
+      - generic [ref=f7e19]:
+        - generic [ref=f7e25]: Test PI
+        - button "Sign out" [ref=f7e20]
+    - main [ref=f7e21]:
+      - generic [ref=f7e26]:
+        - link "← Library" [ref=f7e27] [cursor=pointer]:
+          - /url: /app/library
+        - generic [ref=f7e28]:
+          - generic [ref=f7e29]:
+            - heading "A Quick Introduction to Version Control with Git and GitHub" [level=1] [ref=f7e30]
+            - generic [ref=f7e31]: Text pending
+          - paragraph [ref=f7e32]: John D. Blischak, Emily R. Davenport, Greg Wilson · 2016 · PLOS Computational Biology
+          - paragraph [ref=f7e33]:
+            - link "10.1371/journal.pcbi.1004668" [ref=f7e34] [cursor=pointer]:
+              - /url: https://doi.org/10.1371/journal.pcbi.1004668
+            - link "Publisher page" [ref=f7e35] [cursor=pointer]:
+              - /url: https://doi.org/10.1371/journal.pcbi.1004668
+            - generic [ref=f7e36]: Added Aug 7, 2026 by Test PI
+        - generic [ref=f7e37]:
+          - heading "Abstract" [level=2] [ref=f7e38]
+          - paragraph [ref=f7e39]: No abstract
+        - generic [ref=f7e40]:
+          - heading "The file" [level=2] [ref=f7e41]
+          - generic [ref=f7e42]:
+            - paragraph [ref=f7e43]: PDF attached · text not read yet
+            - generic [ref=f7e44]:
+              - link "Open the PDF" [ref=f7e45] [cursor=pointer]:
+                - /url: https://festive-boar-562.convex.cloud/api/storage/4da92ccd-1aa4-40da-9df2-762bd04e81b9
+              - button "Read its text layer" [disabled] [ref=f7e46]
+            - paragraph [ref=f7e48]: Annotations anchor to passages of extracted text, so the reader needs this done once before anyone can write in the margins.
+            - group [ref=f7e49]:
+              - generic "Replace the file" [ref=f7e50] [cursor=pointer]
+          - paragraph [ref=f7e65]: Reading page 18 of 18…
+        - generic [ref=f7e51]:
+          - heading "Reading" [level=2] [ref=f7e52]
+          - generic [ref=f7e53]:
+            - paragraph [ref=f7e54]: "The reader lands here: the paper on the left, the lab’s annotations in the margin beside it, typed with a tap and threaded where people answer each other."
+            - paragraph [ref=f7e55]: It needs the PDF and its text layer first.
+  - button "Open Next.js Dev Tools" [ref=f7e61] [cursor=pointer]
+  - alert [ref=f7e24]

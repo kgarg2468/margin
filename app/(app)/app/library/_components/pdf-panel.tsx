@@ -1,6 +1,6 @@
 "use client";
 
-import { readableError } from "@/app/app/_components/errors";
+import { readableError } from "@/app/(app)/app/_components/errors";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { extractPdf, extractPdfFile } from "@/lib/pdf/extract";

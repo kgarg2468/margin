@@ -1,0 +1,22 @@
+- generic [active] [ref=f5e1]:
+  - generic [ref=f5e2]:
+    - main [ref=f5e3]:
+      - generic [ref=f5e4]:
+        - link "margin" [ref=f5e5] [cursor=pointer]:
+          - /url: /
+        - paragraph [ref=f5e6]: Pick up where your lab left off.
+      - generic [ref=f5e7]:
+        - generic [ref=f5e8]:
+          - generic [ref=f5e9]: Email
+          - textbox "Email" [ref=f5e10]:
+            - /placeholder: you@university.edu
+        - generic [ref=f5e11]:
+          - generic [ref=f5e12]: Password
+          - textbox "Password" [ref=f5e13]:
+            - /placeholder: At least 8 characters
+        - button "Sign in" [ref=f5e14]
+      - paragraph [ref=f5e15]:
+        - text: New to Margin?
+        - button "Create an account" [ref=f5e16]
+    - contentinfo [ref=f5e17]: Margin never tracks what you read. The only record it keeps is what you choose to write down.
+  - alert [ref=f5e18]
