@@ -31,6 +31,14 @@ export const metadata: Metadata = {
     description,
     locale: "en_US",
   },
+  // Twitter/X will fall back to the Open Graph tags, but only for a small
+  // card. Declaring the card type is what gets the OG image rendered full
+  // width, which is the whole point of shipping one.
+  twitter: {
+    card: "summary_large_image",
+    title,
+    description,
+  },
 };
 
 export const viewport: Viewport = {
