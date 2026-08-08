@@ -12,25 +12,23 @@ import { useState } from "react";
  * to look past, where `Reply` and `Edit` are already faint and the last thing
  * that should be the loudest word on the card is the one that removes it.
  * Either way the armed state gains contrast rather than colour.
+ *
+ * Two sizes for the same reason: `xs` beside chrome, `sm` beside prose.
  */
+const disabledClass = "disabled:cursor-not-allowed disabled:opacity-50";
+
 const toneClass = {
   accent: {
-    idle:
-      "font-sans text-xs text-accent underline-offset-4 hover:underline " +
-      "disabled:cursor-not-allowed disabled:opacity-50",
-    armed:
-      "font-sans text-xs font-medium text-accent-strong underline underline-offset-4 " +
-      "disabled:cursor-not-allowed disabled:opacity-50",
+    idle: `text-accent underline-offset-4 hover:underline ${disabledClass}`,
+    armed: `font-medium text-accent-strong underline underline-offset-4 ${disabledClass}`,
   },
   faint: {
-    idle:
-      "font-sans text-xs text-ink-faint underline-offset-4 hover:text-ink-muted " +
-      "hover:underline disabled:cursor-not-allowed disabled:opacity-50",
-    armed:
-      "font-sans text-xs font-medium text-ink underline underline-offset-4 " +
-      "disabled:cursor-not-allowed disabled:opacity-50",
+    idle: `text-ink-faint underline-offset-4 hover:text-ink-muted hover:underline ${disabledClass}`,
+    armed: `font-medium text-ink underline underline-offset-4 ${disabledClass}`,
   },
 } as const;
+
+const sizeClass = { xs: "text-xs", sm: "text-sm" } as const;
 
 /**
  * A two-step affordance for anything that can't be undone: the first click
@@ -45,6 +43,7 @@ export function ConfirmAction({
   confirmLabel,
   cancelLabel = "Cancel",
   tone = "accent",
+  size = "xs",
   disabled = false,
   run,
 }: {
@@ -58,19 +57,21 @@ export function ConfirmAction({
    */
   cancelLabel?: string;
   tone?: keyof typeof toneClass;
+  size?: keyof typeof sizeClass;
   disabled?: boolean;
   run: () => Promise<void>;
 }) {
   const [armed, setArmed] = useState(false);
   const [pending, setPending] = useState(false);
   const classes = toneClass[tone];
+  const scale = sizeClass[size];
 
   if (!armed) {
     return (
       <button
         type="button"
         disabled={disabled}
-        className={`${classes.idle} tap-target`}
+        className={`font-sans ${scale} ${classes.idle} tap-target`}
         onClick={() => setArmed(true)}
       >
         {label}
@@ -79,11 +80,13 @@ export function ConfirmAction({
   }
 
   return (
-    <span className="flex items-baseline gap-3">
+    // The armed pair settles in rather than teleporting into the row: the
+    // question deserves the reader's eye, and the entrance is what brings it.
+    <span className="pop-in flex items-baseline gap-3">
       <button
         type="button"
         disabled={disabled || pending}
-        className={`${classes.armed} tap-target`}
+        className={`font-sans ${scale} ${classes.armed} tap-target`}
         onClick={async () => {
           setPending(true);
           try {
@@ -99,7 +102,7 @@ export function ConfirmAction({
       <button
         type="button"
         disabled={pending}
-        className={`${classes.idle} tap-target`}
+        className={`font-sans ${scale} ${classes.idle} tap-target`}
         onClick={() => setArmed(false)}
       >
         {cancelLabel}

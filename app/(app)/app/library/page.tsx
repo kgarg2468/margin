@@ -7,6 +7,7 @@ import Link from "next/link";
 import { useState } from "react";
 import type { LabSummary } from "../_components/lab-provider";
 import { useLabs } from "../_components/lab-provider";
+import { ListSkeleton, PageSkeleton } from "../_components/skeletons";
 import { AddPaper } from "./_components/add-paper";
 import { StatusChip, byline } from "./_components/paper-meta";
 
@@ -14,7 +15,7 @@ export default function LibraryPage() {
   const { labs, currentLab } = useLabs();
 
   if (labs === undefined) {
-    return <p className="font-sans text-sm text-ink-faint">Loading…</p>;
+    return <PageSkeleton />;
   }
 
   if (currentLab === null) {
@@ -92,7 +93,7 @@ function Library({ lab }: { lab: LabSummary }) {
         <h2 className={eyebrowClass}>Papers</h2>
 
         {papers === undefined ? (
-          <p className="font-sans text-sm text-ink-faint">Loading…</p>
+          <ListSkeleton />
         ) : papers.length === 0 ? (
           <p className="max-w-prose font-serif text-base leading-relaxed text-ink-muted">
             Nothing on the shelf yet. A library starts with one paper: paste a

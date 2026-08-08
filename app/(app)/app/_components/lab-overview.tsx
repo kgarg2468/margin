@@ -3,7 +3,7 @@
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { formatWhen, isUpcoming, isoAt, relativeWhen } from "@/lib/sessions-ui";
-import { errorClass, eyebrowClass, secondaryButtonClass } from "@/lib/ui";
+import { errorClass, eyebrowClass, secondaryButtonClass, skeletonClass } from "@/lib/ui";
 import { useMutation, useQuery } from "convex/react";
 import Link from "next/link";
 import { useState } from "react";
@@ -76,7 +76,7 @@ function Members({ lab }: { lab: LabSummary }) {
     <section className="flex flex-col gap-5">
       <h2 className={eyebrowClass}>Members</h2>
       {members === undefined ? (
-        <p className="font-sans text-sm text-ink-faint">Loading…</p>
+        <span aria-label="Loading" role="status" className={`${skeletonClass} h-6 w-56`} />
       ) : (
         <ul className="flex flex-col divide-y divide-rule border-y border-rule">
           {members.map((member) => (
@@ -136,7 +136,7 @@ function Invites({ lab }: { lab: LabSummary }) {
       </p>
 
       {invites === undefined ? (
-        <p className="font-sans text-sm text-ink-faint">Loading…</p>
+        <span aria-label="Loading" role="status" className={`${skeletonClass} h-6 w-56`} />
       ) : invites.length === 0 ? (
         <p className="font-sans text-sm text-ink-faint">
           No live codes. Generate one to bring the lab in.
@@ -285,7 +285,7 @@ function NextSession({ lab }: { lab: LabSummary }) {
       <h2 className={eyebrowClass}>Next session</h2>
 
       {sessions === undefined ? (
-        <p className="font-sans text-sm text-ink-faint">Loading…</p>
+        <span aria-label="Loading" role="status" className={`${skeletonClass} h-6 w-56`} />
       ) : live === undefined ? (
         <>
           <p className="max-w-prose font-serif text-base leading-relaxed text-ink-muted">

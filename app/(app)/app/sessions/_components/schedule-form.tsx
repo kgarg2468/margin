@@ -11,7 +11,9 @@ import {
   errorClass,
   inputClass,
   labelClass,
+  panelClass,
   primaryButtonClass,
+  selectClass,
 } from "@/lib/ui";
 import { useMutation, useQuery } from "convex/react";
 import Link from "next/link";
@@ -63,7 +65,7 @@ export function ScheduleForm({
 
   if (papers !== undefined && papers.length === 0) {
     return (
-      <div className="flex max-w-prose flex-col gap-3 rounded-md border border-rule bg-surface p-6">
+      <div className={`${panelClass} flex max-w-prose flex-col gap-3`}>
         <p className="font-serif text-base leading-relaxed text-ink-muted">
           A session is a meeting about a paper, and the library is empty. Add
           the paper first and the calendar has something to point at.
@@ -80,7 +82,7 @@ export function ScheduleForm({
 
   return (
     <form
-      className="flex max-w-2xl flex-col gap-5 rounded-md border border-rule bg-surface p-6"
+      className={`${panelClass} flex max-w-2xl flex-col gap-5`}
       onSubmit={async (event) => {
         event.preventDefault();
         if (scheduledAt === null || chosenPaper.length === 0) {
@@ -120,7 +122,7 @@ export function ScheduleForm({
             required
             value={chosenPaper}
             onChange={(event) => setPaperId(event.target.value)}
-            className={inputClass}
+            className={selectClass}
           >
             {papers.map((paper) => (
               <option key={paper._id} value={paper._id}>
@@ -159,7 +161,7 @@ export function ScheduleForm({
               id="session-presenter"
               value={presenterId.length > 0 ? presenterId : (you?.userId ?? "")}
               onChange={(event) => setPresenterId(event.target.value)}
-              className={inputClass}
+              className={selectClass}
             >
               {members.map((member) => (
                 <option key={member.userId} value={member.userId}>

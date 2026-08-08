@@ -3,7 +3,12 @@
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { relativeWhen } from "@/lib/sessions-ui";
-import { errorClass, eyebrowClass, secondaryButtonClass } from "@/lib/ui";
+import {
+  errorClass,
+  eyebrowClass,
+  secondaryButtonClass,
+  skeletonClass,
+} from "@/lib/ui";
 import type { FunctionReturnType } from "convex/server";
 import { useAction, useQuery } from "convex/react";
 import { useState } from "react";
@@ -97,7 +102,11 @@ export function SessionSynthesis({
       </div>
 
       {synthesis === undefined ? (
-        <p className="font-sans text-sm text-ink-faint">Loading…</p>
+        <span
+          role="status"
+          aria-label="Loading"
+          className={`${skeletonClass} h-6 w-56`}
+        />
       ) : synthesis === null ? (
         <p className="max-w-prose font-serif text-base leading-relaxed text-ink-muted">
           No write-up yet. It is one pass over what the lab wrote, and it may
@@ -166,6 +175,30 @@ export function SessionSynthesis({
               One pass over the session&rsquo;s margin. This takes a minute.
             </span>
           )}
+        </div>
+      )}
+
+      {/* The write-up drafting itself, in the second voice's ink — the same
+          gesture as the landing's synthesis scene, at working scale. A ghost
+          of the paragraphs that are coming, breathing while the model reads. */}
+      {pending && (
+        <div
+          aria-hidden
+          className="pop-in flex max-w-prose flex-col gap-2.5 border-l-2 pl-4"
+          style={{ borderColor: "var(--secondary)" }}
+        >
+          {(["100%", "92%", "61%"] as const).map((width, i) => (
+            <span
+              key={width}
+              className={`${skeletonClass} h-4`}
+              style={{
+                width,
+                backgroundColor:
+                  "color-mix(in oklab, var(--secondary) 13%, transparent)",
+                animationDelay: `${i * 160}ms`,
+              }}
+            />
+          ))}
         </div>
       )}
 

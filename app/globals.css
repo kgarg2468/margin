@@ -167,6 +167,22 @@
     color-mix(in oklab, var(--ochre-300) 20%, transparent)
   );
 
+  /* --- elevation ----------------------------------------------
+   * Three shadows, tinted to the ink rather than to black, exactly as the
+   * landing's cards are. On the dark page an espresso shadow vanishes, so
+   * the dark branch leans on true black instead — same silhouette, right
+   * ground. Components must take shadows from here, never from a literal.
+   *
+   *   card  — a sheet resting on the desk (cards, list panels)
+   *   lift  — a sheet picked up (hover/active cards)
+   *   sheet — a sheet held above the page (popovers, composers)
+   */
+  --shadow-ink: light-dark(rgba(42, 33, 29, 0.45), rgba(0, 0, 0, 0.6));
+  --shadow-ink-strong: light-dark(rgba(42, 33, 29, 0.55), rgba(0, 0, 0, 0.78));
+  --shadow-card: 0 1px 3px -2px var(--shadow-ink), 0 12px 32px -28px var(--shadow-ink);
+  --shadow-lift: 0 8px 24px -16px var(--shadow-ink);
+  --shadow-sheet: 0 16px 44px -20px var(--shadow-ink-strong);
+
   /* follow the system by default; the classes below force a mode */
   color-scheme: light dark;
 }
@@ -283,6 +299,19 @@
 @utility pop-in {
   @media (prefers-reduced-motion: no-preference) {
     animation: margin-pop 180ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+}
+
+/*
+ * A placeholder breathing while data is on its way. Skeletons are drawn as
+ * sunken blocks in the shape of what will arrive (see `skeletonClass`), so
+ * the page composes itself once instead of reflowing as each subscription
+ * lands. The pulse is opacity only, slow, and off under reduced motion —
+ * a resting page, not a spinner.
+ */
+@keyframes margin-breathe {
+  50% {
+    opacity: 0.45;
   }
 }
 

@@ -2,6 +2,7 @@
 
 import type { Id } from "@/convex/_generated/dataModel";
 import { eyebrowClass } from "@/lib/ui";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import type { AnnotationType } from "../../../library/[paperId]/read/_components/ontology";
 import { typeStyle } from "../../../library/[paperId]/read/_components/ontology";
 import type { AnnotationView } from "../../../library/[paperId]/read/_components/types";
@@ -89,6 +90,10 @@ export function SessionSpine({ notes }: { notes: SessionNotes }) {
         {notes.counts.map(({ type, count }) => (
           <span
             key={type}
+            // Easing flex-grow makes a live session's spine breathe: a new
+            // note widens its band while the others give way, instead of the
+            // whole rule re-cutting itself in one frame.
+            className="motion-safe:transition-[flex-grow] motion-safe:duration-500 motion-safe:ease-[cubic-bezier(0.16,1,0.3,1)]"
             style={{
               flex: `${count} 0 0%`,
               backgroundColor: typeStyle(type).ink,
@@ -127,6 +132,8 @@ export function PassageBoard({
   notes: SessionNotes;
   readHref: string;
 }) {
+  const reduce = useReducedMotion();
+
   if (notes.passages.length === 0) {
     return (
       <p className="max-w-prose font-serif text-base leading-relaxed text-ink-muted">
@@ -145,9 +152,30 @@ export function PassageBoard({
           length of what the lab wrote on that passage, and a two-line note
           under a six-line one should not be given four lines of empty ink. */}
       <div className="grid items-start gap-x-8 gap-y-6 md:grid-cols-2 xl:grid-cols-3">
-        {shown.map((passage) => (
-          <PassageCard key={passage.key} passage={passage} />
-        ))}
+        {/* `initial={false}`: a session record composes at rest. During a
+            live meeting a newly marked passage takes its place in document
+            order and the board makes room — which is the product's whole
+            argument, happening on the projector. */}
+        <AnimatePresence initial={false}>
+          {shown.map((passage) => (
+            <motion.div
+              key={passage.key}
+              layout={reduce !== true}
+              {...(reduce === true
+                ? {}
+                : {
+                    initial: { opacity: 0, y: 6, scale: 0.985 },
+                    animate: { opacity: 1, y: 0, scale: 1 },
+                    transition: {
+                      duration: 0.24,
+                      ease: [0.16, 1, 0.3, 1] as const,
+                    },
+                  })}
+            >
+              <PassageCard passage={passage} />
+            </motion.div>
+          ))}
+        </AnimatePresence>
       </div>
       {hidden > 0 && (
         <p className="font-sans text-xs text-ink-faint">

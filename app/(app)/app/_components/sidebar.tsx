@@ -1,7 +1,7 @@
 "use client";
 
 import { api } from "@/convex/_generated/api";
-import { eyebrowClass } from "@/lib/ui";
+import { eyebrowClass, selectClass, skeletonClass } from "@/lib/ui";
 import { useAuthActions } from "@convex-dev/auth/react";
 import { useQuery } from "convex/react";
 import Link from "next/link";
@@ -26,7 +26,7 @@ export function Sidebar() {
     <aside className="flex shrink-0 flex-col gap-8 border-b border-rule bg-surface-sunken px-6 py-6 md:h-screen md:w-64 md:border-b-0 md:border-r md:py-8">
       <Link
         href="/app"
-        className="font-serif text-3xl lowercase tracking-tight text-ink-strong"
+        className="self-start font-serif text-3xl lowercase tracking-tight text-ink-strong transition-opacity hover:opacity-75"
       >
         margin
       </Link>
@@ -34,7 +34,7 @@ export function Sidebar() {
       <div className="flex flex-col gap-2">
         <span className={eyebrowClass}>Lab</span>
         {labs === undefined ? (
-          <span className="font-sans text-sm text-ink-faint">Loading…</span>
+          <span aria-hidden className={`${skeletonClass} h-6 w-32`} />
         ) : labs.length === 0 ? (
           <span className="font-sans text-sm text-ink-faint">No lab yet</span>
         ) : labs.length === 1 && currentLab !== null ? (
@@ -48,7 +48,7 @@ export function Sidebar() {
             onChange={(event) =>
               selectLab(event.target.value as LabSummary["_id"])
             }
-            className="w-full rounded-sm border border-rule bg-surface px-2 py-1.5 font-sans text-sm text-ink"
+            className={selectClass}
           >
             {labs.map((lab) => (
               <option key={lab._id} value={lab._id}>
@@ -61,24 +61,35 @@ export function Sidebar() {
 
       <nav className="flex flex-col gap-4">
         <span className={eyebrowClass}>Sections</span>
-        <ul className="flex flex-col gap-3">
+        {/* Each room is a passage in the rail's own margin: an accent rule
+            marks where you are, the way a mark anchors a note. */}
+        <ul className="flex flex-col gap-1">
           {sections.map((item) => {
             const active = pathname.startsWith(item.href);
             return (
-              <li key={item.label} className="flex flex-col gap-0.5">
+              <li key={item.label}>
                 <Link
                   href={item.href}
                   aria-current={active ? "page" : undefined}
                   className={
-                    "font-sans text-sm underline-offset-4 hover:underline " +
-                    (active ? "text-ink-strong" : "text-ink-muted")
+                    "-mx-3 flex flex-col gap-0.5 rounded-r-sm border-l-2 px-3 py-2 transition-colors " +
+                    (active
+                      ? "border-accent bg-surface"
+                      : "border-transparent hover:bg-surface/70")
                   }
                 >
-                  {item.label}
+                  <span
+                    className={
+                      "font-sans text-sm " +
+                      (active ? "text-ink-strong" : "text-ink-muted")
+                    }
+                  >
+                    {item.label}
+                  </span>
+                  <span className="font-sans text-xs text-ink-faint">
+                    {item.note}
+                  </span>
                 </Link>
-                <span className="font-sans text-xs text-ink-faint">
-                  {item.note}
-                </span>
               </li>
             );
           })}

@@ -7,6 +7,7 @@ import { relativeWhen } from "@/lib/sessions-ui";
 import { errorClass, eyebrowClass } from "@/lib/ui";
 import type { FunctionReturnType } from "convex/server";
 import { useMutation, useQuery } from "convex/react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import Link from "next/link";
 import { useState } from "react";
 import { readableError } from "./errors";
@@ -88,27 +89,58 @@ export function SessionDigest({
  */
 export function DigestInbox({ labId }: { labId: Id<"labs"> }) {
   const digests = useQuery(api.digests.listMine, { labId });
+  const reduce = useReducedMotion();
   const unread = (digests ?? []).filter(
     (digest) => digest.acknowledgedAt === undefined,
   );
 
-  if (unread.length === 0) {
-    return null;
-  }
-
+  // "Caught up" is a put-away, and it should read as one: the acknowledged
+  // card folds closed and the page settles, instead of everything below it
+  // snapping up a card-height. The outer presence does the same for the
+  // whole section when the last card goes. `AnimatePresence` stays mounted
+  // through the empty state, or there would be nothing to run the exit.
   return (
-    <section className="flex flex-col gap-4">
-      <h2 className={eyebrowClass}>Since you were away</h2>
-      <p className="max-w-prose font-sans text-xs text-ink-faint">
-        Delivered at a boundary — before a session, and as it starts — never on
-        every write. Only you see this.
-      </p>
-      <div className="flex flex-col gap-6">
-        {unread.map((digest) => (
-          <DigestCard key={digest._id} digest={digest} />
-        ))}
-      </div>
-    </section>
+    <AnimatePresence initial={false}>
+      {unread.length > 0 && (
+        <motion.section
+          key="inbox"
+          exit={
+            reduce === true
+              ? { opacity: 0, transition: { duration: 0 } }
+              : { opacity: 0, height: 0, transition: { duration: 0.28 } }
+          }
+          style={{ overflow: "hidden" }}
+          className="flex flex-col gap-4"
+        >
+          <h2 className={eyebrowClass}>Since you were away</h2>
+          <p className="max-w-prose font-sans text-xs text-ink-faint">
+            Delivered at a boundary — before a session, and as it starts —
+            never on every write. Only you see this.
+          </p>
+          <div className="flex flex-col gap-6">
+            <AnimatePresence initial={false}>
+              {unread.map((digest) => (
+                <motion.div
+                  key={digest._id}
+                  layout={reduce !== true}
+                  exit={
+                    reduce === true
+                      ? { opacity: 0, transition: { duration: 0 } }
+                      : {
+                          opacity: 0,
+                          scale: 0.985,
+                          transition: { duration: 0.2 },
+                        }
+                  }
+                >
+                  <DigestCard digest={digest} />
+                </motion.div>
+              ))}
+            </AnimatePresence>
+          </div>
+        </motion.section>
+      )}
+    </AnimatePresence>
   );
 }
 
@@ -122,7 +154,7 @@ function DigestCard({ digest }: { digest: Digest }) {
   const acknowledged = digest.acknowledgedAt !== undefined;
 
   return (
-    <article className="flex flex-col gap-3 rounded-md border border-rule bg-surface p-5">
+    <article className="flex flex-col gap-3 rounded-md border border-rule bg-surface p-5 shadow-[var(--shadow-card)]">
       <header className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
         <h3 className="font-serif text-lg text-ink-strong">
           {BOUNDARY_LABEL[digest.boundary]}

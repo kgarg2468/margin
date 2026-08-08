@@ -10,6 +10,7 @@ import {
 } from "@/lib/sessions-ui";
 import { eyebrowClass, primaryButtonClass } from "@/lib/ui";
 import { useQuery } from "convex/react";
+import { PageSkeleton } from "../../_components/skeletons";
 import Link from "next/link";
 import { use, useMemo } from "react";
 import { SessionDigest } from "../../_components/digest";
@@ -60,7 +61,7 @@ export default function SessionPage({
   const notes = useMemo(() => groupSessionNotes(rows, id), [rows, id]);
 
   if (session === undefined) {
-    return <p className="font-sans text-sm text-ink-faint">Loading…</p>;
+    return <PageSkeleton />;
   }
 
   if (session === null) {

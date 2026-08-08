@@ -140,8 +140,8 @@ export function AnnotationCard({
         "rounded-md border border-rule border-l-2 bg-surface py-2.5 pl-3 pr-2.5 " +
         "motion-safe:transition-[box-shadow,translate] motion-safe:duration-200 " +
         (active
-          ? "shadow-[0_0_0_1px_var(--rule),0_8px_24px_-16px_rgba(42,33,29,0.5)] motion-safe:-translate-y-px"
-          : "shadow-[0_1px_3px_-2px_rgba(42,33,29,0.25)]")
+          ? "shadow-[0_0_0_1px_var(--rule),var(--shadow-lift)] motion-safe:-translate-y-px"
+          : "shadow-[var(--shadow-card)]")
       }
     >
       <header className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
@@ -192,7 +192,7 @@ export function AnnotationCard({
           Withdrawn by its author.
         </p>
       ) : editing ? (
-        <div className="mt-2 flex flex-col gap-2">
+        <div className="pop-in mt-2 flex flex-col gap-2">
           <TypeChips
             size="small"
             value={annotation.type}
@@ -322,7 +322,7 @@ export function AnnotationCard({
       )}
 
       {replying ? (
-        <div className="mt-2 flex flex-col gap-2">
+        <div className="pop-in mt-2 flex flex-col gap-2">
           <textarea
             autoFocus
             rows={2}
