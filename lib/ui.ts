@@ -65,12 +65,12 @@ export const cardClass =
 export const panelClass = `${cardClass} pop-in`;
 
 /**
- * A block of what-is-coming: sunken, shaped like the content, breathing
- * slowly (see `margin-breathe`). Size it with width/height utilities.
+ * A block of what-is-coming: sunken, shaped like the content, with a sheen
+ * passing over it (see `skeleton-shimmer`). A sweep reads as a shorter wait
+ * than a pulse does. Size it with width/height utilities; stagger a list by
+ * setting `animationDelay` on the block, which the sheen inherits.
  */
-export const skeletonClass =
-  "rounded-sm bg-surface-sunken " +
-  "motion-safe:animate-[margin-breathe_1.8s_ease-in-out_infinite]";
+export const skeletonClass = "rounded-sm bg-surface-sunken skeleton-shimmer";
 
 /** An erratum in the margin: a rule down the left, plain ink, no shouting. */
 export const errorClass =

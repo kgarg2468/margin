@@ -383,15 +383,67 @@
 }
 
 /*
- * A placeholder breathing while data is on its way. Skeletons are drawn as
- * sunken blocks in the shape of what will arrive (see `skeletonClass`), so
- * the page composes itself once instead of reflowing as each subscription
- * lands. The pulse is opacity only, slow, and off under reduced motion —
- * a resting page, not a spinner.
+ * The pulse the skeletons used to breathe on. `skeletonClass` has moved to the
+ * shimmer below — a sheen reads as a shorter wait than a pulse does, which is
+ * the whole of the reason — and this is kept only so anything still reaching
+ * for `margin-breathe` by name keeps animating rather than freezing. Delete it
+ * once nothing does.
  */
 @keyframes margin-breathe {
   50% {
     opacity: 0.45;
+  }
+}
+
+/*
+ * A sheen passing over what-is-coming.
+ *
+ * Skeletons are drawn as sunken blocks in the shape of what will arrive (see
+ * `skeletonClass`), so the page composes itself once instead of reflowing as
+ * each subscription lands; the sweep is what says the wait is short.
+ *
+ * It is a translated ::after rather than a moving `background-position`.
+ * Position is not a composited property — it repaints the whole block every
+ * frame on the main thread, which is precisely the thread the page is waiting
+ * on — and a list of skeletons is where that shows. `translate` on a pseudo-
+ * element costs the compositor a layer and the main thread nothing.
+ *
+ * `animation-delay: inherit` comes after the shorthand because the shorthand
+ * resets it. Callers stagger a list by setting `animationDelay` on the block
+ * itself (`ListSkeleton`, the margin rail, the synthesis lines); the animation
+ * now lives on a child that would otherwise never hear about it, and the
+ * property is not inherited by default. Blocks that set no delay inherit the
+ * initial `0s` and start together, as before.
+ *
+ * Reduced motion keeps the static sunken block: the sheen parks off to the
+ * left of its own `overflow: hidden` and is never seen.
+ */
+@keyframes margin-shimmer {
+  to {
+    translate: 100% 0;
+  }
+}
+
+@utility skeleton-shimmer {
+  position: relative;
+  overflow: hidden;
+
+  &::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    translate: -100% 0;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      color-mix(in oklab, var(--ink) 5%, transparent),
+      transparent
+    );
+
+    @media (prefers-reduced-motion: no-preference) {
+      animation: margin-shimmer 1.6s var(--ease-settle) infinite;
+      animation-delay: inherit;
+    }
   }
 }
 
