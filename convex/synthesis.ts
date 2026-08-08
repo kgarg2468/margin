@@ -757,10 +757,17 @@ export const generate = action({
       });
     } catch (error) {
       // `store` releases the claim on the way through; every other exit is
-      // this one. A session must not be left holding a lease it will never use.
-      await ctx.runMutation(internal.synthesis.releaseGeneration, {
-        sessionId: args.sessionId,
-      });
+      // this one. A session must not be left holding a lease it will never
+      // use — but the release must never become the error the caller sees.
+      // Whatever went wrong upstream is the more useful thing to report, and
+      // an unreleased lease expires on its own within three minutes anyway.
+      try {
+        await ctx.runMutation(internal.synthesis.releaseGeneration, {
+          sessionId: args.sessionId,
+        });
+      } catch (releaseError) {
+        console.error("Failed to release the synthesis lease:", releaseError);
+      }
       throw error;
     }
     return null;
