@@ -3,16 +3,32 @@
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { formatWhen, isUpcoming, isoAt, relativeWhen } from "@/lib/sessions-ui";
-import { errorClass, eyebrowClass, secondaryButtonClass, skeletonClass } from "@/lib/ui";
-import { useMutation, useQuery } from "convex/react";
+import {
+  errorClass,
+  eyebrowClass,
+  labelClass,
+  secondaryButtonClass,
+  skeletonClass,
+  textareaClass,
+} from "@/lib/ui";
+import { useAction, useMutation, useQuery } from "convex/react";
 import Link from "next/link";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { SessionStatusChip } from "../sessions/_components/session-row";
 import { ConfirmAction } from "./confirm-action";
 import { DigestInbox } from "./digest";
 import { readableError } from "./errors";
+import { InviteNotice } from "./lab-provider";
 import type { LabSummary } from "./lab-provider";
 import { JoinLabCard } from "./onboarding";
+
+/**
+ * Emailing an invitation needs a Resend key on the Convex deployment, which
+ * the browser cannot see. Set `NEXT_PUBLIC_AUTH_EMAIL=1` alongside it and the
+ * form appears; leave it unset and this section is the code list it has
+ * always been.
+ */
+const EMAIL_ENABLED = process.env.NEXT_PUBLIC_AUTH_EMAIL === "1";
 
 function formatDate(ms: number): string {
   return new Date(ms).toLocaleDateString(undefined, {
@@ -25,6 +41,8 @@ function formatDate(ms: number): string {
 export function LabOverview({ lab }: { lab: LabSummary }) {
   return (
     <div className="flex flex-col gap-12">
+      <InviteNotice />
+
       <header className="flex flex-col gap-3 border-l border-rule pl-6">
         <h1 className="font-serif text-4xl tracking-tight text-ink-strong">
           {lab.name}
@@ -208,7 +226,134 @@ function Invites({ lab }: { lab: LabSummary }) {
       >
         {pending ? "Generating…" : "New invite code"}
       </button>
+
+      {EMAIL_ENABLED && <InviteByEmail lab={lab} />}
     </section>
+  );
+}
+
+/**
+ * The same code, delivered instead of dictated.
+ *
+ * A PI reading a code out in a lab meeting is fine; a PI trying to onboard a
+ * new postdoc who is not in the room is not. This mints a code sized to the
+ * batch and mails each address the link that carries it, so the recipient's
+ * first move is clicking, not typing. The code then appears in the list above
+ * like any other and can be revoked the same way.
+ *
+ * Margin does not keep the addresses. Who was invited is not a fact the
+ * product needs; who joined is, and the ledger already has it.
+ */
+function InviteByEmail({ lab }: { lab: LabSummary }) {
+  const inviteByEmail = useAction(api.invites.inviteByEmail);
+  const [error, setError] = useState<string | null>(null);
+  const [sent, setSent] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  // The field is read and rewritten directly rather than mirrored into state:
+  // what a half-delivered batch needs is for the addresses that failed to
+  // still be sitting there, which is a change to the box, not to a model of it.
+  const field = useRef<HTMLTextAreaElement>(null);
+  // The code a half-delivered batch is already riding on. Re-sending has to
+  // reuse it: minting a fresh one per retry would leave the lab holding
+  // several live credentials, each admitting the whole batch over again.
+  const [retryInviteId, setRetryInviteId] = useState<Id<"invites"> | null>(
+    null,
+  );
+
+  return (
+    <form
+      className="flex flex-col gap-3 border-t border-rule pt-6"
+      onSubmit={async (event) => {
+        event.preventDefault();
+        setError(null);
+        setSent(null);
+        setPending(true);
+        try {
+          const result = await inviteByEmail({
+            labId: lab._id,
+            emails: [field.current?.value ?? ""],
+            inviteId: retryInviteId ?? undefined,
+          });
+          if (result.failed.length === 0) {
+            setRetryInviteId(null);
+            if (field.current !== null) {
+              field.current.value = "";
+            }
+            setSent(
+              `Sent to ${result.sent} ${result.sent === 1 ? "person" : "people"}. The code is in the list above.`,
+            );
+          } else {
+            // Everything that went through is gone from the box and everything
+            // that didn't is still in it, so "send again" means pressing the
+            // button again — not reconstructing the list from a count. The
+            // batch's own code comes with them, so pressing it re-delivers
+            // rather than granting a second helping of admissions.
+            setRetryInviteId(result.inviteId);
+            if (field.current !== null) {
+              field.current.value = result.failed.join(", ");
+            }
+            setError(
+              (result.sent > 0
+                ? `Sent to ${result.sent} of ${result.sent + result.failed.length}. `
+                : "None of those went through. ") +
+                `Still to send: ${result.failed.join(", ")} — left in the box so you can try again.`,
+            );
+          }
+        } catch (caught) {
+          // Nothing was delivered, so let go of the batch's code: it may be
+          // the thing that was refused (revoked between sends, or too full for
+          // the retry), and holding on would fail the same way forever. The
+          // next press mints cleanly, which is one spare code in the worst
+          // case rather than one per retry.
+          setRetryInviteId(null);
+          setError(
+            readableError(caught, "We couldn't send those invitations."),
+          );
+        } finally {
+          setPending(false);
+        }
+      }}
+    >
+      <label htmlFor="invite-emails" className={labelClass}>
+        Or send it by email
+      </label>
+      <textarea
+        ref={field}
+        id="invite-emails"
+        name="emails"
+        rows={2}
+        required
+        spellCheck={false}
+        placeholder="ada@university.edu, chen@university.edu"
+        className={`${textareaClass} font-sans`}
+      />
+      <p className="font-sans text-xs leading-relaxed text-ink-faint">
+        Commas, spaces or new lines. Each person gets a link that signs them in
+        and drops them straight into {lab.name}.
+      </p>
+
+      {error !== null && (
+        <p role="alert" className={`${errorClass} pop-in`}>
+          {error}
+        </p>
+      )}
+      {sent !== null && (
+        <p
+          role="status"
+          className="pop-in border-l-2 border-accent pl-3 font-sans text-sm text-ink"
+        >
+          {sent}
+        </p>
+      )}
+
+      <button
+        type="submit"
+        disabled={pending}
+        className={`${secondaryButtonClass} self-start`}
+      >
+        {pending ? "Sending…" : "Send invitations"}
+      </button>
+    </form>
   );
 }
 

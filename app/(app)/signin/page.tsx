@@ -8,13 +8,32 @@ import { PageSurface } from "@/app/(marketing)/_components/hero-surface";
 import {
   cardClass,
   errorClass,
+  eyebrowClass,
   inputClass,
   labelClass,
   linkButtonClass,
   primaryButtonClass,
+  secondaryButtonClass,
 } from "@/lib/ui";
 
-type Flow = "signIn" | "signUp";
+/**
+ * Three ways through this door, and which of them exist is a build-time fact.
+ *
+ * `link` is the one the product wants you to take: a member's first entry
+ * should be click link → reading the paper, with no password ceremony. The two
+ * password flows stay because a deployment with no Resend key still has to let
+ * a PI in, and because some people would simply rather have a password.
+ */
+type Flow = "link" | "signIn" | "signUp";
+
+/**
+ * The browser cannot read Convex deployment env, so it is told separately
+ * whether the deployment has the keys. These are inlined by Next at build
+ * time, which is why they are spelled out rather than looked up — set neither
+ * and this page is exactly the password form it has always been.
+ */
+const GOOGLE_ENABLED = process.env.NEXT_PUBLIC_AUTH_GOOGLE === "1";
+const EMAIL_ENABLED = process.env.NEXT_PUBLIC_AUTH_EMAIL === "1";
 
 /**
  * Which half of the world broke.
@@ -42,7 +61,67 @@ function isServiceFailure(error: unknown): boolean {
 }
 
 function flowFromParam(value: string | null): Flow {
-  return value === "signup" ? "signUp" : "signIn";
+  if (value === "signup") {
+    return "signUp";
+  }
+  // The link is the front door wherever it exists; a deployment without mail
+  // falls back to the form it has always had.
+  return EMAIL_ENABLED ? "link" : "signIn";
+}
+
+/** An invite code is eight of an unambiguous alphabet; anything else isn't one. */
+function inviteFromParam(value: string | null): string | null {
+  return value !== null && /^[A-Za-z0-9]{1,16}$/.test(value) ? value : null;
+}
+
+/**
+ * Google's mark, drawn rather than fetched.
+ *
+ * The four brand colours are the one place a foreign palette is allowed onto
+ * this page — a recoloured G is not a G, and a button people don't recognise
+ * is a button they don't press. Held to 16px so it reads as a stamp on the
+ * label rather than a splash of somebody else's brand on the notebook.
+ */
+function GoogleMark() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 18 18"
+      aria-hidden="true"
+      className="shrink-0"
+    >
+      <path
+        fill="#4285F4"
+        d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.7-1.57 2.68-3.88 2.68-6.62Z"
+      />
+      <path
+        fill="#34A853"
+        d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.8.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.03-3.7H.96v2.33A9 9 0 0 0 9 18Z"
+      />
+      <path
+        fill="#FBBC05"
+        d="M3.97 10.72a5.4 5.4 0 0 1 0-3.44V4.95H.96a9 9 0 0 0 0 8.1l3.01-2.33Z"
+      />
+      <path
+        fill="#EA4335"
+        d="M9 3.58c1.32 0 2.5.46 3.44 1.35l2.58-2.58C13.46.9 11.43 0 9 0A9 9 0 0 0 .96 4.95l3.01 2.33C4.68 5.16 6.66 3.58 9 3.58Z"
+      />
+    </svg>
+  );
+}
+
+/** A ruled line broken by a pencilled word, the way a notebook separates two things. */
+function OrRule() {
+  return (
+    <div className="flex items-center gap-4" aria-hidden="true">
+      <span className="h-px flex-1 bg-rule" />
+      <span className="font-sans text-[10px] uppercase tracking-[0.18em] text-ink-faint">
+        or
+      </span>
+      <span className="h-px flex-1 bg-rule" />
+    </div>
+  );
 }
 
 export default function SignInPage() {
@@ -57,20 +136,50 @@ export default function SignInPage() {
   );
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  // Set once a sign-in link is on its way: the card becomes the answer to
+  // "did it send?" rather than a form waiting to be filled in again.
+  const [linkSentTo, setLinkSentTo] = useState<string | null>(null);
 
-  function switchFlow() {
-    const next: Flow = flow === "signIn" ? "signUp" : "signIn";
+  // An emailed invitation lands here when its recipient has no session yet.
+  // The code is carried through the sign-in and redeemed on the other side by
+  // the app shell — this page only has to not lose it.
+  const invite = inviteFromParam(searchParams.get("invite"));
+  const destination = invite === null ? "/app" : `/app?invite=${invite}`;
+
+  function switchFlow(next: Flow) {
     setFlow(next);
     setError(null);
+    setLinkSentTo(null);
     // history rather than the router: the mode is a detail of this screen, and
     // a re-render is not worth a round trip for the RSC payload. Keeps a
     // refresh — and anything the reader copies out of the address bar — on the
     // form they were actually looking at.
-    window.history.replaceState(
-      null,
-      "",
-      next === "signUp" ? "/signin?flow=signup" : "/signin",
-    );
+    const params = new URLSearchParams();
+    if (next === "signUp") {
+      params.set("flow", "signup");
+    }
+    if (invite !== null) {
+      params.set("invite", invite);
+    }
+    const query = params.toString();
+    window.history.replaceState(null, "", query ? `/signin?${query}` : "/signin");
+  }
+
+  async function handleGoogle() {
+    setError(null);
+    setPending(true);
+    try {
+      // Full-page redirect out to Google; `redirectTo` is where its callback
+      // comes back to, which is how the invite code survives the round trip.
+      await signIn("google", { redirectTo: destination });
+    } catch (caught) {
+      setError(
+        isServiceFailure(caught)
+          ? "We couldn't reach Google just then. Try again in a moment."
+          : "Google sign-in didn't go through.",
+      );
+      setPending(false);
+    }
   }
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
@@ -79,24 +188,41 @@ export default function SignInPage() {
     setPending(true);
 
     const formData = new FormData(event.currentTarget);
-    formData.set("flow", flow);
+    // Normalized here because the sign-in link provider stores the address as
+    // given: `Ada@Uni.edu` and `ada@uni.edu` would otherwise be two accounts.
+    const email = String(formData.get("email") ?? "")
+      .trim()
+      .toLowerCase();
 
     try {
+      if (flow === "link") {
+        await signIn("sign-in-link", { email, redirectTo: destination });
+        setLinkSentTo(email);
+        setPending(false);
+        return;
+      }
+
+      formData.set("email", email);
+      formData.set("flow", flow);
       await signIn("password", formData);
-      router.push("/app");
+      router.push(destination);
     } catch (caught) {
       setError(
         isServiceFailure(caught)
           ? "We couldn't reach the sign-in service — that's on us, not on what you typed. Try again in a moment."
-          : // Convex Auth deliberately does not say which half of the
-            // credential was wrong, and neither do we.
-            flow === "signIn"
-            ? "That email and password don't match an account."
-            : "We couldn't create that account. It may already exist, or the password may be shorter than 8 characters.",
+          : flow === "link"
+            ? "We couldn't send a link to that address."
+            : // Convex Auth deliberately does not say which half of the
+              // credential was wrong, and neither do we.
+              flow === "signIn"
+              ? "That email and password don't match an account."
+              : "We couldn't create that account. It may already exist, or the password may be shorter than 8 characters.",
       );
       setPending(false);
     }
   }
+
+  const wantsPassword = flow !== "link";
 
   return (
     // The same desk the landing is ruled on, at its faintest: this is the
@@ -117,32 +243,67 @@ export default function SignInPage() {
                 looks like — the way home. Sized as it was drawn; a heading
                 level is not a type scale. */}
             <h1 className="font-serif text-base leading-relaxed text-ink-muted">
-              {flow === "signIn"
-                ? "Pick up where your lab left off."
-                : "Start reading with your lab."}
+              {invite !== null
+                ? "You've been invited to a lab. Sign in and Margin will take you straight there."
+                : flow === "signUp"
+                  ? "Start reading with your lab."
+                  : "Pick up where your lab left off."}
             </h1>
           </header>
 
-          <form
-            onSubmit={handleSubmit}
-            className={`${cardClass} flex flex-col gap-5`}
-          >
-            {/* The name field stays in the tree and folds open when the form
-                becomes a sign-up: rows and the swallowed flex gap ease
-                together, so the switch is a fold rather than a jump. The
-                input is disabled while folded — out of the tab order and out
-                of the submitted form. */}
-            <div
-              aria-hidden={flow !== "signUp"}
-              className={
-                "grid motion-safe:transition-[grid-template-rows,opacity,margin] motion-safe:duration-300 motion-safe:ease-[cubic-bezier(0.16,1,0.3,1)] " +
-                (flow === "signUp"
-                  ? "grid-rows-[1fr] opacity-100"
-                  : "-mt-5 grid-rows-[0fr] opacity-0")
-              }
+          {linkSentTo !== null ? (
+            <section
+              aria-live="polite"
+              className={`${cardClass} pop-in flex flex-col gap-4`}
             >
-              <div className="overflow-hidden">
-                <div className="flex flex-col gap-2 p-px">
+              <span className={eyebrowClass}>Check your inbox</span>
+              <p className="font-serif text-base leading-relaxed text-ink">
+                A sign-in link is on its way to{" "}
+                <span className="text-ink-strong">{linkSentTo}</span>. Open it
+                and you&rsquo;re in — the link works from any device, for the
+                next hour.
+              </p>
+              <p className="font-sans text-xs leading-relaxed text-ink-faint">
+                Nothing yet? Give it a minute, then look in spam.
+              </p>
+              <button
+                type="button"
+                className={`${linkButtonClass} tap-target self-start`}
+                onClick={() => {
+                  setLinkSentTo(null);
+                  setError(null);
+                }}
+              >
+                Use a different address
+              </button>
+            </section>
+          ) : (
+            <div className="flex flex-col gap-6">
+              {GOOGLE_ENABLED && (
+                <>
+                  <button
+                    type="button"
+                    disabled={pending}
+                    onClick={handleGoogle}
+                    className={`${secondaryButtonClass} tap-target w-full gap-2.5`}
+                  >
+                    <GoogleMark />
+                    Continue with Google
+                  </button>
+                  <OrRule />
+                </>
+              )}
+
+              <form
+                onSubmit={handleSubmit}
+                className={`${cardClass} flex flex-col gap-5`}
+              >
+                {/* The name and password fields stay in the tree and fold
+                    open when the form needs them: rows and the swallowed flex
+                    gap ease together, so switching mode is a fold rather than
+                    a jump. A folded input is disabled — out of the tab order
+                    and out of the submitted form. */}
+                <Fold open={flow === "signUp"}>
                   <label htmlFor="name" className={labelClass}>
                     Name
                   </label>
@@ -155,73 +316,124 @@ export default function SignInPage() {
                     disabled={flow !== "signUp"}
                     className={inputClass}
                   />
+                </Fold>
+
+                <div className="flex flex-col gap-2">
+                  <label htmlFor="email" className={labelClass}>
+                    Email
+                  </label>
+                  <input
+                    id="email"
+                    name="email"
+                    type="email"
+                    required
+                    autoComplete="email"
+                    placeholder="you@university.edu"
+                    className={inputClass}
+                  />
                 </div>
-              </div>
-            </div>
 
-            <div className="flex flex-col gap-2">
-              <label htmlFor="email" className={labelClass}>
-                Email
-              </label>
-              <input
-                id="email"
-                name="email"
-                type="email"
-                required
-                autoComplete="email"
-                placeholder="you@university.edu"
-                className={inputClass}
-              />
-            </div>
+                <Fold open={wantsPassword}>
+                  <label htmlFor="password" className={labelClass}>
+                    Password
+                  </label>
+                  <input
+                    id="password"
+                    name="password"
+                    type="password"
+                    required={wantsPassword}
+                    minLength={8}
+                    autoComplete={
+                      flow === "signIn" ? "current-password" : "new-password"
+                    }
+                    placeholder="At least 8 characters"
+                    disabled={!wantsPassword}
+                    className={inputClass}
+                  />
+                </Fold>
 
-            <div className="flex flex-col gap-2">
-              <label htmlFor="password" className={labelClass}>
-                Password
-              </label>
-              <input
-                id="password"
-                name="password"
-                type="password"
-                required
-                minLength={8}
-                autoComplete={
-                  flow === "signIn" ? "current-password" : "new-password"
-                }
-                placeholder="At least 8 characters"
-                className={inputClass}
-              />
-            </div>
+                {error !== null && (
+                  <p role="alert" className={`${errorClass} pop-in`}>
+                    {error}
+                  </p>
+                )}
 
-            {error !== null && (
-              <p role="alert" className={`${errorClass} pop-in`}>
-                {error}
-              </p>
+                <button
+                  type="submit"
+                  disabled={pending}
+                  className={`${primaryButtonClass} tap-target`}
+                >
+                  {pending
+                    ? "One moment…"
+                    : flow === "link"
+                      ? "Email me a sign-in link"
+                      : flow === "signIn"
+                        ? "Sign in"
+                        : "Create account"}
+                </button>
+
+                {flow === "link" && (
+                  <p className="font-sans text-xs leading-relaxed text-ink-faint">
+                    No password to make up, and none to forget. If you already
+                    have an account the link signs you into it.
+                  </p>
+                )}
+              </form>
+            </div>
+          )}
+
+          {/* The way to the other flows, kept as a sentence rather than a row
+              of tabs: this page has one thing it wants you to do and the rest
+              are asides. */}
+          <p className="font-sans text-sm leading-relaxed text-ink-muted">
+            {flow === "link" ? (
+              <>
+                Prefer a password?{" "}
+                <button
+                  type="button"
+                  className={`${linkButtonClass} tap-target`}
+                  onClick={() => switchFlow("signIn")}
+                >
+                  Sign in
+                </button>
+                {" or "}
+                <button
+                  type="button"
+                  className={`${linkButtonClass} tap-target`}
+                  onClick={() => switchFlow("signUp")}
+                >
+                  create an account
+                </button>
+                .
+              </>
+            ) : (
+              <>
+                {flow === "signIn"
+                  ? "New to Margin? "
+                  : "Already have an account? "}
+                <button
+                  type="button"
+                  className={`${linkButtonClass} tap-target`}
+                  onClick={() =>
+                    switchFlow(flow === "signIn" ? "signUp" : "signIn")
+                  }
+                >
+                  {flow === "signIn" ? "Create an account" : "Sign in"}
+                </button>
+                {EMAIL_ENABLED && (
+                  <>
+                    {" · "}
+                    <button
+                      type="button"
+                      className={`${linkButtonClass} tap-target`}
+                      onClick={() => switchFlow("link")}
+                    >
+                      Email me a link instead
+                    </button>
+                  </>
+                )}
+              </>
             )}
-
-            <button
-              type="submit"
-              disabled={pending}
-              className={`${primaryButtonClass} tap-target`}
-            >
-              {pending
-                ? "One moment…"
-                : flow === "signIn"
-                  ? "Sign in"
-                  : "Create account"}
-            </button>
-          </form>
-
-          <p className="font-sans text-sm text-ink-muted">
-            {flow === "signIn"
-              ? "New to Margin? "
-              : "Already have an account? "}
-            <button
-              type="button"
-              className={`${linkButtonClass} tap-target`}
-              onClick={switchFlow}
-            >
-              {flow === "signIn" ? "Create an account" : "Sign in"}
-            </button>
           </p>
         </main>
 
@@ -231,5 +443,35 @@ export default function SignInPage() {
         </footer>
       </div>
     </PageSurface>
+  );
+}
+
+/**
+ * A field that folds out of the form instead of appearing in it.
+ *
+ * `grid-template-rows` from 0fr to 1fr is the only way to ease to a height the
+ * content decides; the negative margin cancels the parent's flex gap while
+ * closed so the rows above and below meet cleanly. Both are motion-safe, so
+ * reduced motion gets the same layout without the travel.
+ */
+function Fold({
+  open,
+  children,
+}: {
+  open: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      aria-hidden={!open}
+      className={
+        "grid motion-safe:transition-[grid-template-rows,opacity,margin] motion-safe:duration-300 motion-safe:ease-[cubic-bezier(0.16,1,0.3,1)] " +
+        (open ? "grid-rows-[1fr] opacity-100" : "-mt-5 grid-rows-[0fr] opacity-0")
+      }
+    >
+      <div className="overflow-hidden">
+        <div className="flex flex-col gap-2 p-px">{children}</div>
+      </div>
+    </div>
   );
 }
