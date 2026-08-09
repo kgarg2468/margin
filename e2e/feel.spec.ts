@@ -68,4 +68,56 @@ test.describe("press feel", () => {
     // ...and the affordance is still there when the control is live.
     expect(cursors.enabled).toBe("pointer");
   });
+
+  /**
+   * The same invariant swept across a whole page rather than one control. The
+   * base layer answers the pointer for every `button` on the document, so a
+   * control that comes back with the default cursor is one that a utility has
+   * quietly overridden — the "dead button" a user hovers and cannot tell is
+   * live. The landing page is the one route with no auth and no backend, which
+   * is why it is the page swept.
+   */
+  test("landing has no dead buttons", async ({ page }) => {
+    await page.goto("/");
+    for (const el of await page.getByRole("button").all()) {
+      if (await el.isVisible()) {
+        await expect(el).toHaveCSS("cursor", "pointer");
+      }
+    }
+  });
+});
+
+/**
+ * Reduced motion, asserted on the effect rather than on the declaration.
+ *
+ * `pressable` states its `transition` unconditionally and guards only the
+ * movement:
+ *
+ *     transition: … scale var(--dur-press) ease-out;
+ *     @media (prefers-reduced-motion: no-preference) {
+ *       &:active:not(:disabled) { scale: 0.98; }
+ *     }
+ *
+ * So the computed `transition` still lists `scale 0.06s` under `reduce` — it
+ * is a transition with nothing left to animate — and asserting on that string
+ * would fail on a correct implementation. What a user with the preference set
+ * actually gets is the fact worth pinning: the control does not move when
+ * pressed. Driven with a real mouse press because `:active` answers trusted
+ * input, not a dispatched `pointerdown`.
+ */
+test.describe("reduced motion", () => {
+  test("a press moves nothing", async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.goto("/signin");
+    const button = page.getByRole("button").first();
+
+    await button.hover();
+    await page.mouse.down();
+    const pressed = await button.evaluate((el) => getComputedStyle(el).scale);
+    // Released off the control so holding it down cannot become a submit.
+    await page.mouse.move(0, 0);
+    await page.mouse.up();
+
+    expect(pressed).toBe("none");
+  });
 });
