@@ -2,7 +2,7 @@
 
 import { api } from "@/convex/_generated/api";
 import { eyebrowClass, secondaryButtonClass } from "@/lib/ui";
-import { useQuery } from "convex/react";
+import { useQuery } from "convex-helpers/react/cache/hooks";
 import Link from "next/link";
 import { useState } from "react";
 import type { LabSummary } from "../_components/lab-provider";

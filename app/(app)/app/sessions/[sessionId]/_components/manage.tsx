@@ -16,7 +16,8 @@ import {
   secondaryButtonClass,
   selectClass,
 } from "@/lib/ui";
-import { useMutation, useQuery } from "convex/react";
+import { useMutation } from "convex/react";
+import { useQuery } from "convex-helpers/react/cache/hooks";
 import { useState } from "react";
 import { ConfirmAction } from "../../../_components/confirm-action";
 import { readableError } from "../../../_components/errors";

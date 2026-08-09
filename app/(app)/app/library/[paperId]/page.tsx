@@ -4,7 +4,7 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { formatWhen, isUpcoming, isoAt, relativeWhen } from "@/lib/sessions-ui";
 import { eyebrowClass, primaryButtonClass } from "@/lib/ui";
-import { useQuery } from "convex/react";
+import { useQuery } from "convex-helpers/react/cache/hooks";
 import Link from "next/link";
 import { use } from "react";
 import { PageSkeleton } from "../../_components/skeletons";

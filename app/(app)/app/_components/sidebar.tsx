@@ -4,7 +4,7 @@ import { api } from "@/convex/_generated/api";
 import { shortcutLabel } from "@/lib/command";
 import { chipClass, eyebrowClass, skeletonClass } from "@/lib/ui";
 import { useAuthActions } from "@convex-dev/auth/react";
-import { useQuery } from "convex/react";
+import { useQuery } from "convex-helpers/react/cache/hooks";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
