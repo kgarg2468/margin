@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   MAX_SCALE,
   MIN_SCALE,
+  ZOOM_STEPS,
+  canStepZoom,
   holdFraction,
   parsePageJump,
   restoreDelta,
@@ -62,6 +64,80 @@ describe("stepping", () => {
 
   it("does not sit still on a stop because of a rounding hair", () => {
     expect(stepZoom(1.0000001, 1, COLUMN)).toBe(1.25);
+  });
+});
+
+describe("the stops and the bounds are one table", () => {
+  it("starts at the smallest the page is allowed to be", () => {
+    // They used to disagree: the floor was 0.4 and the lowest stop 0.5, so the
+    // smallest size fit width could reach was a size the − button could not,
+    // and the last press before the floor did nothing at all.
+    expect(ZOOM_STEPS[0]).toBe(MIN_SCALE);
+  });
+
+  it("ends at the largest", () => {
+    expect(ZOOM_STEPS[ZOOM_STEPS.length - 1]).toBe(MAX_SCALE);
+  });
+
+  it("is in order, with no repeats", () => {
+    for (let i = 1; i < ZOOM_STEPS.length; i++) {
+      expect(ZOOM_STEPS[i] as number).toBeGreaterThan(
+        ZOOM_STEPS[i - 1] as number,
+      );
+    }
+  });
+});
+
+/**
+ * What the ± buttons are allowed to claim. A control that is live and does
+ * nothing is a control that lied, and there is no way to tell it apart from a
+ * control that is broken.
+ */
+describe("whether a press would move anything", () => {
+  it("moves from a stop in the middle of the table", () => {
+    expect(canStepZoom(1, 1, COLUMN)).toBe(true);
+    expect(canStepZoom(1, -1, COLUMN)).toBe(true);
+  });
+
+  it("does not move down from the floor", () => {
+    expect(canStepZoom(MIN_SCALE, -1, COLUMN)).toBe(false);
+  });
+
+  it("does not move up from the ceiling", () => {
+    expect(canStepZoom(MAX_SCALE, 1, COLUMN)).toBe(false);
+  });
+
+  it("moves down from the lowest ordinary stop, which is not the floor", () => {
+    expect(canStepZoom(0.5, -1, COLUMN)).toBe(true);
+  });
+
+  it("moves either way from fit width, when fit width landed between stops", () => {
+    expect(canStepZoom("fit-width", 1, COLUMN)).toBe(true);
+    expect(canStepZoom("fit-width", -1, COLUMN)).toBe(true);
+  });
+
+  it("asks about the size, not about the mode", () => {
+    // A monitor wide enough that fit width clamps to the ceiling. The step
+    // "leaves fit width", so a mode comparison says something changed — and
+    // the page does not move by a pixel. The same shape, at the other end.
+    const wide = { columnWidth: 9000, baseWidth: 612 };
+    expect(canStepZoom("fit-width", 1, wide)).toBe(false);
+    expect(canStepZoom("fit-width", -1, wide)).toBe(true);
+
+    const narrow = { columnWidth: 40, baseWidth: 612 };
+    expect(canStepZoom("fit-width", -1, narrow)).toBe(false);
+    expect(canStepZoom("fit-width", 1, narrow)).toBe(true);
+  });
+
+  it("says nothing will move before the page has been measured", () => {
+    // No document yet: every scale is 1 by definition, and a press would set a
+    // number against a page whose width nobody knows.
+    expect(canStepZoom("fit-width", 1, { columnWidth: 0, baseWidth: 0 })).toBe(
+      false,
+    );
+    expect(canStepZoom("fit-width", -1, { columnWidth: 0, baseWidth: 0 })).toBe(
+      false,
+    );
   });
 });
 

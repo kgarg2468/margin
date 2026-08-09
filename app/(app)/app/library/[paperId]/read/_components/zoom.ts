@@ -14,13 +14,26 @@
  * proportions actually wants.
  *
  * The bounds are pdf.js's practical ones and match what the reader was already
- * clamping to before there was a control.
+ * clamping to before there was a control — and they are the two ends of the
+ * table, not a second opinion beside it. They disagreed once: the floor was
+ * 0.4 and the lowest stop 0.5, so fit width in a narrow column could reach a
+ * size the − button could not, and the press at 50% was live and did nothing.
+ * 0.4 keeps the floor where a narrow phone needs it and hands the last step
+ * back to the control.
  */
 
 export const MIN_SCALE = 0.4;
 export const MAX_SCALE = 2;
 
-export const ZOOM_STEPS: readonly number[] = [0.5, 0.75, 1, 1.25, 1.5, 2];
+export const ZOOM_STEPS: readonly number[] = [
+  MIN_SCALE,
+  0.5,
+  0.75,
+  1,
+  1.25,
+  1.5,
+  MAX_SCALE,
+];
 
 /** Comparing scales that came out of a division needs a hair of tolerance. */
 const EPSILON = 0.0001;
@@ -56,6 +69,31 @@ export function stepZoom(
   return (
     [...ZOOM_STEPS].reverse().find((step) => step < current - EPSILON) ?? current
   );
+}
+
+/**
+ * Whether pressing ± would actually change the size of the page.
+ *
+ * Asked of the *scale*, not of the mode. `stepZoom` at either end of the table
+ * hands back a number where fit width was, which is a different `ZoomMode` and
+ * the same page: on a monitor wide enough that fit width clamps to the ceiling,
+ * a mode comparison says + will do something and the page does not move by a
+ * pixel. It is the same lesson the restore guard learned — compare the thing
+ * that is about to change, not the thing you asked with.
+ *
+ * An unmeasured document cannot step at all. Nothing has a size yet, and the
+ * press would not zoom so much as quietly give up fit width for the session,
+ * against a page whose width nobody has read.
+ */
+export function canStepZoom(
+  mode: ZoomMode,
+  direction: 1 | -1,
+  input: ZoomInput,
+): boolean {
+  if (input.columnWidth <= 0 || input.baseWidth <= 0) {
+    return false;
+  }
+  return zoomScale(stepZoom(mode, direction, input), input) !== zoomScale(mode, input);
 }
 
 export function zoomLabel(mode: ZoomMode, input: ZoomInput): string {

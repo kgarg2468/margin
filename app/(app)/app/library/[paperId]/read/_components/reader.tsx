@@ -40,8 +40,7 @@ import type {
   PageResolution,
 } from "./types";
 import {
-  MAX_SCALE,
-  MIN_SCALE,
+  canStepZoom,
   holdFraction,
   parsePageJump,
   restoreDelta,
@@ -1046,11 +1045,15 @@ export function Reader({
             <button
               type="button"
               aria-label="Zoom out"
+              // What the press would do, asked of the size rather than of the
+              // bound: `MIN_SCALE` is a floor, and a control disabled by a
+              // floor it cannot land on stays live at the last stop above it
+              // and does nothing. See `canStepZoom`.
               disabled={
-                zoomScale(zoom, {
+                !canStepZoom(zoom, -1, {
                   columnWidth,
                   baseWidth: baseSize?.width ?? 0,
-                }) <= MIN_SCALE
+                })
               }
               onClick={() =>
                 changeZoom(
@@ -1068,9 +1071,14 @@ export function Reader({
               type="button"
               aria-pressed={zoom === "fit-width"}
               aria-label={`Fit the page to the column. Currently ${zoomLabel(zoom, { columnWidth, baseWidth: baseSize?.width ?? 0 })}.`}
+              // Nothing to fit to yet. The whole group waits on the page's own
+              // width: pressing before it arrives sets a number against a size
+              // nobody has read, and quietly costs the reader fit width for the
+              // session.
+              disabled={baseSize === null}
               onClick={() => changeZoom("fit-width")}
               className={
-                "pressable tap-target rounded-sm border px-1.5 py-0.5 font-sans text-[11px] tabular-nums " +
+                "pressable tap-target rounded-sm border px-1.5 py-0.5 font-sans text-[11px] tabular-nums disabled:opacity-40 " +
                 (zoom === "fit-width"
                   ? "border-ink-faint text-ink"
                   : "border-rule text-ink-faint hover:border-ink-faint hover:text-accent")
@@ -1085,10 +1093,10 @@ export function Reader({
               type="button"
               aria-label="Zoom in"
               disabled={
-                zoomScale(zoom, {
+                !canStepZoom(zoom, 1, {
                   columnWidth,
                   baseWidth: baseSize?.width ?? 0,
-                }) >= MAX_SCALE
+                })
               }
               onClick={() =>
                 changeZoom(
