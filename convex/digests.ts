@@ -12,6 +12,7 @@ import { getMembership, requireMembership, requireUserId } from "./lib/authz";
 import {
   assembleDigest,
   detectCollisions,
+  detectCrossPaperCollisions,
   type Collision,
   type DigestAnnotation,
 } from "../lib/digest/engine";
@@ -29,7 +30,9 @@ import { papersToScan, planSinceAway } from "../lib/digest/since-away";
  * runs is `lib/digest/engine.ts`, which is pure and unit-tested: deterministic
  * typed-pair collision detection over overlapping passage anchors, gold pairs
  * promoted to their own line, everything else coalesced to one line per paper,
- * hard cap five.
+ * hard cap five. The "since you were away" boundary additionally pairs across
+ * papers — it is the only one whose pool spans more than one — and those pairs
+ * rank behind every same-paper one.
  *
  * ## Three things this file will not do
  *
@@ -123,6 +126,8 @@ const sessionBoundary = v.union(
 const digestItem = v.object({
   kind: v.union(v.literal("collision"), v.literal("coalesced")),
   paperId: v.id("papers"),
+  /** The second paper of a cross-paper collision; absent on every other item. */
+  otherPaperId: v.optional(v.id("papers")),
   annotationIds: v.array(v.id("annotations")),
   pairType: v.optional(v.string()),
   line: v.string(),
@@ -732,6 +737,27 @@ export const catchUp = mutation({
       pool.push(...paperPool);
     }
 
+    // The one boundary that can see past a paper.
+    //
+    // A session's prep pools one paper and has nothing to pair across; an
+    // arrival pools every paper the lab moved on while the member was gone,
+    // which is the only place in the product where "two people disagreeing
+    // about the same claim in two different papers" is a fact that exists in
+    // memory rather than in somebody's head. The per-paper passes above cannot
+    // find it by construction, so the scan runs once over the assembled pool.
+    //
+    // Privacy is unchanged and comes from the same place it always did: every
+    // row in `pool` arrived through `by_paper_and_visibility` at "lab", from a
+    // paper whose `labId` was re-checked above. The scan pairs what it is
+    // given and adds no read of its own.
+    //
+    // `crossPaper.capped` says whether the scan ran out of budget before it ran
+    // out of candidates. The row has nowhere to record it today — see the note
+    // in `lib/digest/engine.ts` — but the cap is a named constant with the
+    // reasoning attached, and the flag is on the assembled result rather than
+    // swallowed here.
+    const crossPaper = detectCrossPaperCollisions(pool);
+
     const delta = pool.filter(
       (a) => a.memberId !== userId && a.createdAt > plan.since,
     );
@@ -745,6 +771,7 @@ export const catchUp = mutation({
       delta,
       paperTitles,
       collisions,
+      crossPaper,
     });
     if (items.length === 0) {
       return waiting?._id ?? null;

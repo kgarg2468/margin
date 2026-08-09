@@ -3,8 +3,11 @@ import {
   anchorOverlap,
   assembleDigest,
   coalescedLine,
+  crossPaperOverlap,
   detectCollisions,
+  detectCrossPaperCollisions,
   pairKey,
+  MIN_CROSS_PAPER_QUOTE_CHARS,
   type AnnotationType,
   type DigestAnnotation,
 } from "./engine";
@@ -419,5 +422,386 @@ describe("assembleDigest", () => {
       paperTitles: titles,
     });
     expect(items[0]?.line).toContain("this paper");
+  });
+});
+
+/* -------------------------------------------------------------------------
+ * Cross-paper collisions (Phase 2)
+ * ---------------------------------------------------------------------- */
+
+/** A claim long enough to stand on its own without a paper for context. */
+const CLAIM =
+  "the residual connection is what makes a very deep network trainable at all";
+
+describe("crossPaperOverlap", () => {
+  it("matches the same claim quoted in two different papers", () => {
+    const a = ann({ memberId: "ana", type: "hypothesis", paperId: "p1", quote: CLAIM });
+    const b = ann({ memberId: "ben", type: "critique", paperId: "p2", quote: CLAIM });
+    expect(crossPaperOverlap(a, b)).toBe("quote");
+  });
+
+  it("leaves the same paper to anchorOverlap", () => {
+    const a = ann({ memberId: "ana", type: "hypothesis", quote: CLAIM });
+    const b = ann({ memberId: "ben", type: "critique", quote: CLAIM });
+    expect(crossPaperOverlap(a, b)).toBeNull();
+    expect(anchorOverlap(a, b)).toBe("range");
+  });
+
+  it("holds a cross-paper match to a much longer floor than a within-paper one", () => {
+    // Clears the 20-character within-paper fallback and still refuses to link
+    // two papers: without a shared document, a clause is not evidence.
+    const short = "attention is all you need, really";
+    expect(short.length).toBeGreaterThanOrEqual(20);
+    expect(short.length).toBeLessThan(MIN_CROSS_PAPER_QUOTE_CHARS);
+    const a = ann({
+      memberId: "ana",
+      type: "hypothesis",
+      paperId: "p1",
+      pageIndex: 2,
+      quote: short,
+    });
+    const b = ann({
+      memberId: "ben",
+      type: "critique",
+      paperId: "p2",
+      pageIndex: 5,
+      quote: short,
+    });
+    expect(crossPaperOverlap(a, b)).toBeNull();
+    // The very same selection links two pages *inside* one paper.
+    expect(anchorOverlap({ ...a, paperId: "p2" }, b)).toBe("quote");
+  });
+
+  it("sees through typesetting: case, whitespace and edge punctuation", () => {
+    const a = ann({
+      memberId: "ana",
+      type: "hypothesis",
+      paperId: "p1",
+      quote: `  “${CLAIM.replace(" is ", "  is  ")}.”  `,
+    });
+    const b = ann({
+      memberId: "ben",
+      type: "critique",
+      paperId: "p2",
+      quote: CLAIM.toUpperCase(),
+    });
+    expect(crossPaperOverlap(a, b)).toBe("quote");
+  });
+
+  it("does not match two different sentences", () => {
+    const a = ann({ memberId: "ana", type: "hypothesis", paperId: "p1", quote: CLAIM });
+    const b = ann({
+      memberId: "ben",
+      type: "critique",
+      paperId: "p2",
+      quote: CLAIM.replace("residual", "recurrent"),
+    });
+    expect(crossPaperOverlap(a, b)).toBeNull();
+  });
+});
+
+describe("detectCrossPaperCollisions", () => {
+  it("pairs a gold cell across two papers, oldest half first", () => {
+    const older = ann({
+      memberId: "ana",
+      type: "hypothesis",
+      paperId: "p1",
+      quote: CLAIM,
+      createdAt: 10,
+    });
+    const newer = ann({
+      memberId: "ben",
+      type: "critique",
+      paperId: "p2",
+      quote: CLAIM,
+      createdAt: 20,
+    });
+    const { collisions, capped } = detectCrossPaperCollisions([newer, older]);
+    expect(capped).toBe(false);
+    expect(collisions).toHaveLength(1);
+    expect(collisions[0]?.a.id).toBe(older.id);
+    expect(collisions[0]?.label).toBe("contradiction");
+    expect(collisions[0]?.pairType).toBe("critique x hypothesis");
+    expect(collisions[0]?.overlap).toBe("quote");
+  });
+
+  it("ignores non-gold pairs across papers", () => {
+    const { collisions } = detectCrossPaperCollisions([
+      ann({ memberId: "ana", type: "note", paperId: "p1", quote: CLAIM }),
+      ann({ memberId: "ben", type: "hypothesis", paperId: "p2", quote: CLAIM }),
+    ]);
+    expect(collisions).toHaveLength(0);
+  });
+
+  it("never pairs a member with themselves across their own reading", () => {
+    const { collisions } = detectCrossPaperCollisions([
+      ann({ memberId: "ana", type: "hypothesis", paperId: "p1", quote: CLAIM }),
+      ann({ memberId: "ana", type: "critique", paperId: "p2", quote: CLAIM }),
+    ]);
+    expect(collisions).toHaveLength(0);
+  });
+
+  it("spends nothing on a group that never leaves one paper", () => {
+    const { collisions, comparisons } = detectCrossPaperCollisions([
+      ann({ memberId: "ana", type: "hypothesis", paperId: "p1", quote: CLAIM }),
+      ann({ memberId: "ben", type: "critique", paperId: "p1", quote: CLAIM }),
+    ]);
+    expect(collisions).toHaveLength(0);
+    expect(comparisons).toBe(0);
+  });
+
+  it("leaves same-paper pairs inside a mixed group to detectCollisions", () => {
+    const pool = [
+      ann({ memberId: "ana", type: "hypothesis", paperId: "p1", quote: CLAIM }),
+      ann({ memberId: "ben", type: "critique", paperId: "p1", quote: CLAIM }),
+      ann({ memberId: "cara", type: "critique", paperId: "p2", quote: CLAIM }),
+    ];
+    const { collisions, comparisons } = detectCrossPaperCollisions(pool);
+    // All three pairs were looked at — the accounting does not hide the one it
+    // declined — but only the one that spans papers is this detector's.
+    expect(comparisons).toBe(3);
+    expect(collisions).toHaveLength(1);
+    expect(collisions[0]?.a.paperId).not.toBe(collisions[0]?.b.paperId);
+    // And the same-paper half is still found by the detector that owns it.
+    expect(detectCollisions(pool)).toHaveLength(1);
+  });
+
+  it("is deterministic — the pool's order changes nothing", () => {
+    const pool = [
+      ann({ memberId: "ana", type: "hypothesis", paperId: "p1", quote: CLAIM, createdAt: 40 }),
+      ann({ memberId: "ben", type: "critique", paperId: "p2", quote: CLAIM, createdAt: 30 }),
+      ann({ memberId: "cara", type: "method-note", paperId: "p3", quote: CLAIM, createdAt: 20 }),
+    ];
+    const forward = detectCrossPaperCollisions(pool);
+    const backward = detectCrossPaperCollisions([...pool].reverse());
+    expect(forward).toEqual(backward);
+    expect(forward.collisions.map((c) => c.label)).toEqual([
+      "contradiction",
+      "method available",
+    ]);
+  });
+
+  it("caps the scan and says so, instead of returning a short answer quietly", () => {
+    const pool = [
+      ann({ memberId: "ana", type: "hypothesis", paperId: "p1", quote: CLAIM, createdAt: 40 }),
+      ann({ memberId: "ben", type: "critique", paperId: "p2", quote: CLAIM, createdAt: 30 }),
+      ann({ memberId: "cara", type: "method-note", paperId: "p3", quote: CLAIM, createdAt: 20 }),
+      ann({ memberId: "dee", type: "definition", paperId: "p4", quote: CLAIM, createdAt: 10 }),
+    ];
+    const full = detectCrossPaperCollisions(pool);
+    expect(full.capped).toBe(false);
+    expect(full.comparisons).toBe(6);
+
+    const partial = detectCrossPaperCollisions(pool, 3);
+    expect(partial.capped).toBe(true);
+    expect(partial.comparisons).toBe(3);
+    // The cap cuts the oldest candidates, so a capped scan keeps the freshest
+    // pairs — and keeps the same ones however the pool arrived.
+    expect(partial.collisions.map((c) => c.label)).toEqual([
+      "contradiction",
+      "method available",
+    ]);
+    expect(detectCrossPaperCollisions([...pool].reverse(), 3)).toEqual(partial);
+  });
+});
+
+describe("assembleDigest across papers", () => {
+  /** Ana hypothesised in p1; Ben critiqued the same claim over in p2. */
+  const spanning = () => {
+    const mine = ann({
+      id: "ana-hypothesis",
+      memberId: "ana",
+      type: "hypothesis",
+      paperId: "p1",
+      pageIndex: 2,
+      quote: CLAIM,
+      createdAt: 10,
+    });
+    const theirs = ann({
+      id: "ben-critique",
+      memberId: "ben",
+      type: "critique",
+      paperId: "p2",
+      pageIndex: 6,
+      quote: CLAIM,
+      createdAt: 20,
+    });
+    return { mine, theirs, pool: [mine, theirs] };
+  };
+
+  it("pairs nothing across papers unless asked to", () => {
+    const { theirs, pool } = spanning();
+    const { items, crossPaperCapped } = assembleDigest({
+      recipientId: "ana",
+      pool,
+      delta: [theirs],
+      paperTitles: titles,
+    });
+    expect(crossPaperCapped).toBe(false);
+    expect(items).toHaveLength(1);
+    expect(items[0]?.kind).toBe("coalesced");
+    expect(items[0]?.otherPaperId).toBeUndefined();
+  });
+
+  it("promotes a cross-paper pair and names both papers in the line", () => {
+    const { mine, theirs, pool } = spanning();
+    const { items } = assembleDigest({
+      recipientId: "ana",
+      pool,
+      delta: [theirs],
+      paperTitles: titles,
+      crossPaper: detectCrossPaperCollisions(pool),
+    });
+    expect(items).toHaveLength(1);
+    expect(items[0]?.kind).toBe("collision");
+    expect(items[0]?.pairType).toBe("critique x hypothesis");
+    expect(items[0]?.annotationIds).toEqual([mine.id, theirs.id]);
+    // Filed under the recipient's own paper; the far side is named separately
+    // so a reader never has to parse the sentence to tell the two apart.
+    expect(items[0]?.paperId).toBe("p1");
+    expect(items[0]?.otherPaperId).toBe("p2");
+    expect(items[0]?.line).toBe(
+      "Ben critiqued the passage you hypothesised about — across Attention Is All You Need, p. 3 and Deep Residual Learning, p. 7: “" +
+        CLAIM +
+        "”",
+    );
+  });
+
+  it("cites the recipient's own paper first, whichever half they wrote", () => {
+    const { mine, pool } = spanning();
+    const { items } = assembleDigest({
+      recipientId: "ben",
+      pool,
+      delta: [mine],
+      paperTitles: titles,
+      crossPaper: detectCrossPaperCollisions(pool),
+    });
+    expect(items[0]?.paperId).toBe("p2");
+    expect(items[0]?.otherPaperId).toBe("p1");
+    expect(items[0]?.line).toBe(
+      "You critiqued the passage Ana hypothesised about — across Deep Residual Learning, p. 7 and Attention Is All You Need, p. 3: “" +
+        CLAIM +
+        "”",
+    );
+  });
+
+  it("is still recipient-relative — a cross-paper pair between two others coalesces", () => {
+    const { pool } = spanning();
+    const { items } = assembleDigest({
+      recipientId: "cara",
+      pool,
+      delta: pool,
+      paperTitles: titles,
+      crossPaper: detectCrossPaperCollisions(pool),
+    });
+    expect(detectCrossPaperCollisions(pool).collisions).toHaveLength(1);
+    expect(items.every((item) => item.kind === "coalesced")).toBe(true);
+    expect(items.map((item) => item.paperId).sort()).toEqual(["p1", "p2"]);
+  });
+
+  it("ranks a cross-paper pair below a same-paper one of equal recency", () => {
+    const mine = ann({ id: "mine", memberId: "ana", type: "hypothesis", quote: CLAIM, createdAt: 1 });
+    const sameP = ann({
+      id: "same-paper",
+      memberId: "ben",
+      type: "critique",
+      quote: "a different sentence in the same margin",
+      createdAt: 100,
+    });
+    const crossP = ann({
+      id: "cross-paper",
+      memberId: "cara",
+      type: "critique",
+      paperId: "p2",
+      quote: CLAIM,
+      createdAt: 100,
+    });
+    const pool = [mine, sameP, crossP];
+    const { items } = assembleDigest({
+      recipientId: "ana",
+      pool,
+      delta: [sameP, crossP],
+      paperTitles: titles,
+      crossPaper: detectCrossPaperCollisions(pool),
+      cap: 1,
+    });
+    expect(items).toHaveLength(1);
+    expect(items[0]?.annotationIds).toEqual([mine.id, sameP.id]);
+    expect(items[0]?.otherPaperId).toBeUndefined();
+  });
+
+  it("keeps a same-paper pair ahead even when the cross-paper one is newer", () => {
+    // Scope outranks recency: a tighter fact is not displaced by a fresher
+    // guess. Both pairs still exist; only the budget is contested.
+    const mine = ann({ id: "mine2", memberId: "ana", type: "hypothesis", quote: CLAIM, createdAt: 1 });
+    const sameP = ann({
+      id: "same-paper2",
+      memberId: "ben",
+      type: "critique",
+      quote: "a different sentence in the same margin",
+      createdAt: 100,
+    });
+    const crossP = ann({
+      id: "cross-paper2",
+      memberId: "cara",
+      type: "critique",
+      paperId: "p2",
+      quote: CLAIM,
+      createdAt: 9000,
+    });
+    const pool = [mine, sameP, crossP];
+    const { items } = assembleDigest({
+      recipientId: "ana",
+      pool,
+      delta: [sameP, crossP],
+      paperTitles: titles,
+      crossPaper: detectCrossPaperCollisions(pool),
+    });
+    const gold = items.filter((item) => item.kind === "collision");
+    expect(gold).toHaveLength(2);
+    expect(gold[0]?.annotationIds).toEqual([mine.id, sameP.id]);
+    expect(gold[1]?.otherPaperId).toBe("p2");
+  });
+
+  it("still gives each new annotation at most one gold line, across both detectors", () => {
+    // Ben's critique collides with Ana's hypothesis on the same passage *and*
+    // with the same claim she flagged over in p2. One line, and it is the
+    // tighter one.
+    const here = ann({ id: "ana-here", memberId: "ana", type: "hypothesis", quote: CLAIM, createdAt: 1 });
+    const there = ann({
+      id: "ana-there",
+      memberId: "ana",
+      type: "hypothesis",
+      paperId: "p2",
+      quote: CLAIM,
+      createdAt: 5,
+    });
+    const bens = ann({ id: "ben-critique2", memberId: "ben", type: "critique", quote: CLAIM, createdAt: 100 });
+    const pool = [here, there, bens];
+    const crossPaper = detectCrossPaperCollisions(pool);
+    expect(crossPaper.collisions).toHaveLength(1);
+    const { items } = assembleDigest({
+      recipientId: "ana",
+      pool,
+      delta: [bens],
+      paperTitles: titles,
+      crossPaper,
+    });
+    const gold = items.filter((item) => item.kind === "collision");
+    expect(gold).toHaveLength(1);
+    expect(gold[0]?.otherPaperId).toBeUndefined();
+    expect(gold[0]?.annotationIds).toEqual([here.id, bens.id]);
+  });
+
+  it("carries a capped scan through to the assembled digest", () => {
+    const { theirs, pool } = spanning();
+    const { crossPaperCapped } = assembleDigest({
+      recipientId: "ana",
+      pool,
+      delta: [theirs],
+      paperTitles: titles,
+      crossPaper: { ...detectCrossPaperCollisions(pool), capped: true },
+    });
+    expect(crossPaperCapped).toBe(true);
   });
 });

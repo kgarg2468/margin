@@ -969,6 +969,13 @@ export default defineSchema({
       v.object({
         kind: v.union(v.literal("collision"), v.literal("coalesced")),
         paperId: v.id("papers"),
+        // The far side of a cross-paper collision — two members on the same
+        // claim in two different papers. Absent on every other item, which is
+        // what keeps `paperId` meaning what it has always meant: the paper the
+        // line is filed under, and the one the recipient has their own
+        // annotation in. Only that one is safe to link to or to advance a
+        // cursor on; the other is named in the line, not caught up on.
+        otherPaperId: v.optional(v.id("papers")),
         annotationIds: v.array(v.id("annotations")),
         // e.g. "hypothesis x critique" — the cell of the type-pair matrix
         // that fired. Absent for coalesced lines.

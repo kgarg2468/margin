@@ -34,6 +34,9 @@ type DigestItem = Digest["items"][number];
  * summed into a sentence. The first is the reason the digest exists; the second
  * is context. They are drawn to say that: a collision carries a rule and the
  * name of the pair, a coalesced line is a quiet bullet.
+ *
+ * A collision can span two papers (`otherPaperId`), which is the same shape
+ * with a second way in rather than a third kind of line.
  */
 const BOUNDARY_LABEL: Record<Digest["boundary"], string> = {
   "session-prep": "Before the session",
@@ -281,12 +284,32 @@ function DigestLine({ item }: { item: DigestItem }) {
         <p className="font-serif text-base leading-relaxed text-ink">
           {item.line}
         </p>
-        <Link
-          href={href}
-          className="font-sans text-xs text-accent underline-offset-4 hover:underline"
-        >
-          Read the passage
-        </Link>
+        {/*
+         * A cross-paper collision has two sides, so it gets two ways in — and
+         * they are not equals. `item.paperId` is the paper the reader
+         * annotated themselves, which is why it keeps the accent link and why
+         * it is the only one "I'm caught up" advances a cursor on. The far
+         * paper is somewhere they may never have been, so it gets the quiet
+         * register: available, not urged. Its title is not a stored field on
+         * the item, but it does not need to be — the line directly above names
+         * both papers, so the label only has to say which of the two this is.
+         */}
+        <span className="flex flex-wrap items-baseline gap-x-4">
+          <Link
+            href={href}
+            className="font-sans text-xs text-accent underline-offset-4 hover:underline"
+          >
+            Read the passage
+          </Link>
+          {item.otherPaperId !== undefined && (
+            <Link
+              href={`/app/library/${item.otherPaperId}/read`}
+              className="font-sans text-xs text-ink-faint underline-offset-4 hover:text-accent hover:underline"
+            >
+              Read the other paper
+            </Link>
+          )}
+        </span>
       </li>
     );
   }

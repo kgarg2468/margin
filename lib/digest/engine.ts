@@ -23,6 +23,31 @@
  * 4. **Hard cap of five items.** The simulation put gold retention at
  *    99.7–100% at that cap, which is the whole argument for it: the cap costs
  *    essentially no signal and buys a digest a person will actually read.
+ *
+ * ## The cross-paper extension (Phase 2)
+ *
+ * The four rules above are the policy the simulation validated, and they are
+ * all *within one paper*. `detectCrossPaperCollisions` adds a second, opt-in
+ * detector for the pair the simulation never had a shape for: two members
+ * arguing about the same claim in two different papers. It is deliberately a
+ * separate function rather than a flag on `detectCollisions`, because every
+ * existing caller — the digest producer, the presenter's brief — is asking a
+ * one-paper question and must keep getting the one-paper answer.
+ *
+ * Three things keep the extension from cheapening the digest:
+ *
+ * - It runs on **quote identity only**. Character offsets mean nothing across
+ *   two documents, so the sole deterministic signal available is that two
+ *   members selected the same words — held to a much longer floor than the
+ *   within-paper fallback (`MIN_CROSS_PAPER_QUOTE_CHARS`), because a paper is
+ *   context that a cross-paper match does not have.
+ * - It **ranks below** every same-paper collision of the same kind. A same
+ *   passage in the same paper is a tighter fact than the same sentence quoted
+ *   in two places, so it wins the cap first, always.
+ * - Its scan is **capped and the cap is reported** (`CrossPaperScan.capped`),
+ *   because a pool spanning several papers can hold a pathological group of
+ *   identical selections and quietly returning half an answer is the one thing
+ *   this file is not allowed to do.
  */
 
 /** The 7-type annotation ontology, mirroring `annotationType` in the schema. */
@@ -82,7 +107,23 @@ export type DigestItem<
   AnnotationId extends string = string,
 > = {
   kind: "collision" | "coalesced";
+  /**
+   * The paper this line is filed under — and, for a collision, the paper the
+   * *recipient* has their own annotation in.
+   *
+   * That side is chosen on purpose. It is the paper the reader has actually
+   * opened, so it is the one a "read the passage" link can land in without
+   * dropping them somewhere they have never been, and it is the one whose
+   * cursor an acknowledgement may honestly advance. A cross-paper line names
+   * the other paper (`otherPaperId`, and both titles in `line`) but does not
+   * claim the reader has caught up on it.
+   */
   paperId: PaperId;
+  /**
+   * The far side of a cross-paper collision. Absent on every other item —
+   * coalesced lines and same-paper collisions have one paper and only one.
+   */
+  otherPaperId?: PaperId;
   annotationIds: AnnotationId[];
   pairType?: string;
   line: string;
@@ -131,6 +172,44 @@ const MAX_QUOTE_CHARS = 100;
  */
 const MIN_QUOTE_MATCH_CHARS = 20;
 
+/**
+ * Shortest selection that may link two *different* papers.
+ *
+ * Three times the within-paper floor, and the multiple is the whole argument.
+ * Inside one paper, twenty characters is enough because the paper itself is
+ * the context: two members are demonstrably reading the same document, and the
+ * quote only has to identify a sentence within it. Across two papers there is
+ * no shared context at all — the string has to carry the claim on its own, and
+ * short-to-middling sentences recur across a literature by construction
+ * ("data are presented as mean ± SD"). Sixty characters is a full sentence of
+ * substance rather than a phrase.
+ *
+ * It is a floor, not a guarantee: a long enough piece of methods boilerplate
+ * can still clear it. That is why a cross-paper pair also has to be a gold
+ * type pair between two different members, and why it ranks below every
+ * same-paper pair — the failure mode is one soft line at the bottom of a
+ * digest, not a tight fact displaced by a coincidence.
+ */
+export const MIN_CROSS_PAPER_QUOTE_CHARS = 60;
+
+/**
+ * Ceiling on how many candidate pairs one cross-paper scan will compare.
+ *
+ * The scan is not the naive quadratic — annotations are grouped by their
+ * normalized selection first, and only groups that actually span two papers
+ * are compared at all, so a realistic lab's scan is dozens of comparisons over
+ * a pool where the blind version would be half a million. The cap is for the
+ * shape that defeats the grouping: one boilerplate sentence selected by fifty
+ * members across ten papers is a single group of five hundred rows and a
+ * hundred-odd thousand comparisons on its own.
+ *
+ * When it bites, the scan stops and says so (`CrossPaperScan.capped`). It
+ * never returns a short answer as though it were a complete one — the same
+ * rule `assembleDigest` follows when the item cap cuts a line and it reports
+ * `droppedCount` rather than pretending five was all there was.
+ */
+export const MAX_CROSS_PAPER_COMPARISONS = 5000;
+
 /** Canonical matrix key for two types, order-free. */
 export function pairKey(a: AnnotationType, b: AnnotationType): string {
   return a <= b ? `${a} x ${b}` : `${b} x ${a}`;
@@ -175,6 +254,49 @@ export function anchorOverlap(
 }
 
 /**
+ * The comparable form of a selection, or `null` if it is too slight to link
+ * two papers with.
+ *
+ * Normalization is the minimum that survives being printed twice: whitespace
+ * collapsed, case folded, and leading/trailing punctuation dropped. Those three
+ * differences are typesetting — a sentence that starts a paragraph in one paper
+ * and follows a colon in the other, a selection that swept up the full stop and
+ * one that stopped short of it — and treating them as different claims would
+ * mean the feature only ever fires on two people who dragged their cursors
+ * identically. Nothing beyond that is normalized: no stemming, no stopword
+ * stripping, no fuzzy distance. The promise this file makes is that a digest
+ * cannot assert a connection that is not literally in the data, and every
+ * loosening is a chance to break it.
+ */
+function claimKey(quote: string): string | null {
+  const normalized = quote
+    .trim()
+    .replace(/\s+/gu, " ")
+    .toLowerCase()
+    .replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
+  return normalized.length >= MIN_CROSS_PAPER_QUOTE_CHARS ? normalized : null;
+}
+
+/**
+ * Do two annotations in *different* papers sit on the same claim?
+ *
+ * The mirror of `anchorOverlap` for the case that function refuses by design.
+ * There is no range arm here and there cannot be one: `start` and `end` are
+ * offsets into one document's text, and two documents' offsets have nothing to
+ * say to each other. Same paper returns `null` — that question belongs to
+ * `anchorOverlap`, and answering it in both places is how two detectors start
+ * disagreeing.
+ */
+export function crossPaperOverlap(
+  a: DigestAnnotation,
+  b: DigestAnnotation,
+): "quote" | null {
+  if (a.paperId === b.paperId) return null;
+  const key = claimKey(a.quote);
+  return key !== null && key === claimKey(b.quote) ? "quote" : null;
+}
+
+/**
  * Deterministic collision order: newest collision first, id as the tiebreak.
  *
  * Shared by `detectCollisions` and `assembleDigest` so that a precomputed list
@@ -188,6 +310,37 @@ function byRecency(x: Collision, y: Collision): number {
   if (yAt !== xAt) return yAt - xAt;
   if (x.a.id !== y.a.id) return x.a.id < y.a.id ? -1 : 1;
   return x.b.id < y.b.id ? -1 : x.b.id > y.b.id ? 1 : 0;
+}
+
+/** Are the two halves of this collision in different papers? */
+function isCrossPaper(collision: Collision): boolean {
+  return collision.a.paperId !== collision.b.paperId;
+}
+
+/**
+ * The full ranking: every same-paper collision, then every cross-paper one,
+ * each tier newest-first by `byRecency`.
+ *
+ * Scope outranks recency rather than merely breaking its ties, and that is a
+ * deliberate reading of "a same-paper collision is a tighter fact". A tie on
+ * `createdAt` is a millisecond coincidence that essentially never happens, so a
+ * rule that only fired on one would be decoration. What the tier actually buys
+ * is that the five lines can never fill up with quote matches while a member's
+ * own passage sits under somebody's critique unmentioned.
+ *
+ * It costs less than it looks like it should. Only a pair containing a *fresh*
+ * annotation can become an item at all (`assembleDigest` promotes nothing that
+ * is not in the delta), so the same-paper tier is not a backlog of old news
+ * queue-jumping — it is this week's tight facts ahead of this week's soft ones.
+ *
+ * For a single-paper pool — a session's prep, a presenter's brief — every
+ * collision is in the same tier and this is exactly `byRecency`.
+ */
+function byPairRank(x: Collision, y: Collision): number {
+  const xCross = isCrossPaper(x) ? 1 : 0;
+  const yCross = isCrossPaper(y) ? 1 : 0;
+  if (xCross !== yCross) return xCross - yCross;
+  return byRecency(x, y);
 }
 
 /**
@@ -237,6 +390,133 @@ export function detectCollisions<
   }
   collisions.sort(byRecency);
   return collisions;
+}
+
+/**
+ * What one cross-paper scan found, and whether it got to look at everything.
+ *
+ * `capped` is the honesty half and the reason this is an object rather than an
+ * array: a partial scan and a complete one produce the same *kind* of answer,
+ * and a caller that cannot tell them apart will present a bounded guess as a
+ * finished search.
+ */
+export type CrossPaperScan<
+  PaperId extends string = string,
+  AnnotationId extends string = string,
+  UserId extends string = string,
+> = {
+  /** Gold pairs spanning two papers, ranked by `byPairRank`. */
+  collisions: Collision<PaperId, AnnotationId, UserId>[];
+  /** How many candidate pairs were actually compared. */
+  comparisons: number;
+  /** True when the comparison cap stopped the scan before the candidates ran out. */
+  capped: boolean;
+};
+
+/**
+ * Every gold collision that spans two papers in the same lab.
+ *
+ * **Precondition, and it is the privacy one:** `pool` must already be the
+ * lab-visible, non-deleted annotations of papers in a single lab, exactly as
+ * `convex/digests.ts` builds it. This function pairs whatever it is handed;
+ * nothing in the annotation shape carries a lab or a visibility, so the read
+ * that produced the pool is the only thing that can enforce either — which is
+ * why that read is pinned to `by_paper_and_visibility` at `"lab"` and every
+ * paper's `labId` is re-checked before its rows join the pool.
+ *
+ * Not the naive quadratic. Annotations are grouped by `claimKey` first and
+ * only groups that span more than one paper are compared, which is what makes
+ * the interesting case (a handful of shared sentences) cost a handful of
+ * comparisons in a pool of a thousand rows. `limit` bounds what is left: the
+ * group of identical boilerplate that grouping cannot help with.
+ *
+ * Determinism does not depend on the order the pool arrives in. Groups are
+ * ranked freshest-first with the key as the tiebreak, rows within a group are
+ * ranked newest-first with the id as the tiebreak, and the cap therefore cuts
+ * the *oldest* candidates rather than whichever ones the database happened to
+ * return last.
+ */
+export function detectCrossPaperCollisions<
+  P extends string,
+  A extends string,
+  U extends string,
+>(
+  pool: readonly DigestAnnotation<P, A, U>[],
+  limit: number = MAX_CROSS_PAPER_COMPARISONS,
+): CrossPaperScan<P, A, U> {
+  const groups = new Map<string, DigestAnnotation<P, A, U>[]>();
+  for (const annotation of pool) {
+    const key = claimKey(annotation.quote);
+    if (key === null) continue;
+    const bucket = groups.get(key);
+    if (bucket === undefined) groups.set(key, [annotation]);
+    else bucket.push(annotation);
+  }
+
+  const newestIn = (rows: readonly DigestAnnotation<P, A, U>[]): number =>
+    rows.reduce((max, row) => Math.max(max, row.createdAt), 0);
+
+  const candidates = [...groups.entries()]
+    // A group confined to one paper is `anchorOverlap`'s business, not this
+    // function's, and comparing it would spend budget to rediscover pairs
+    // `detectCollisions` has already found.
+    .filter(([, rows]) => new Set(rows.map((row) => row.paperId)).size > 1)
+    .sort((x, y) => {
+      const diff = newestIn(y[1]) - newestIn(x[1]);
+      return diff !== 0 ? diff : x[0] < y[0] ? -1 : 1;
+    });
+
+  const collisions: Collision<P, A, U>[] = [];
+  let comparisons = 0;
+  let capped = false;
+
+  scan: for (const [, rows] of candidates) {
+    const ranked = [...rows].sort((x, y) =>
+      y.createdAt !== x.createdAt
+        ? y.createdAt - x.createdAt
+        : x.id < y.id
+          ? -1
+          : x.id > y.id
+            ? 1
+            : 0,
+    );
+    for (let i = 0; i < ranked.length; i++) {
+      const first = ranked[i];
+      if (first === undefined) continue;
+      for (let j = i + 1; j < ranked.length; j++) {
+        const second = ranked[j];
+        if (second === undefined) continue;
+        if (comparisons >= limit) {
+          capped = true;
+          break scan;
+        }
+        comparisons += 1;
+        // Same paper inside a mixed group: already `detectCollisions`'s.
+        if (first.paperId === second.paperId) continue;
+        if (first.memberId === second.memberId) continue;
+        const label = GOLD_PAIRS[pairKey(first.type, second.type)];
+        if (label === undefined) continue;
+        // Canonical order: older annotation first, id as the tiebreak — the
+        // same rule `detectCollisions` uses, so a stored pair reads the same
+        // way whichever detector found it.
+        const [a, b] =
+          first.createdAt < second.createdAt ||
+          (first.createdAt === second.createdAt && first.id <= second.id)
+            ? [first, second]
+            : [second, first];
+        collisions.push({
+          a,
+          b,
+          pairType: pairKey(a.type, b.type),
+          label,
+          overlap: "quote",
+        });
+      }
+    }
+  }
+
+  collisions.sort(byPairRank);
+  return { collisions, comparisons, capped };
 }
 
 const SINGULAR: Readonly<Record<AnnotationType, string>> = {
@@ -291,11 +571,18 @@ function lower(name: string): string {
  * line says "you", because "Ben critiqued the passage you hypothesised about"
  * is the reason this product exists and "Ben critiqued the passage Ana
  * hypothesised about" is a newsletter.
+ *
+ * `paperTitle` is the title of `collision.a`'s paper. `otherPaperTitle` is
+ * `collision.b`'s, and passing it is what turns this into a cross-paper line —
+ * omit it and a cross-paper pair would be printed as though both halves were
+ * in one document, which is the one thing a reader must never have to guess
+ * about. It is ignored when the two halves share a paper.
  */
 export function collisionLine(
   collision: Collision,
   recipientId: string,
   paperTitle: string,
+  otherPaperTitle?: string,
 ): string {
   const { a, b, label: semantics } = collision;
   // Put the recipient first in symmetric phrasings.
@@ -347,8 +634,25 @@ export function collisionLine(
   // which `assembleDigest` no longer promotes, has no recipient side to use.
   const mine =
     a.memberId === recipientId ? a : b.memberId === recipientId ? b : undefined;
-  const page = (mine?.pageIndex ?? Math.max(a.pageIndex, b.pageIndex)) + 1;
   const quote = elide(a.quote.length >= b.quote.length ? a.quote : b.quote);
+
+  // A cross-paper pair is two passages in two documents, so it gets two
+  // citations. One title would be worse than none: the reader would go looking
+  // for both halves in whichever paper got named and find one of them, which
+  // reads as the product being wrong about its own evidence. The recipient's
+  // own side is cited first, for the same reason the same-paper line prefers
+  // their page — it is the copy they have actually held.
+  if (otherPaperTitle !== undefined && a.paperId !== b.paperId) {
+    const cite = (side: DigestAnnotation): string =>
+      `${side === a ? paperTitle : otherPaperTitle}, p. ${side.pageIndex + 1}`;
+    const [near, far] = mine === b ? [b, a] : [a, b];
+    const across = `across ${cite(near)} and ${cite(far)}`;
+    return quote.length > 0
+      ? `${phrase} — ${across}: “${quote}”`
+      : `${phrase} — ${across}`;
+  }
+
+  const page = (mine?.pageIndex ?? Math.max(a.pageIndex, b.pageIndex)) + 1;
   const where = `${paperTitle}, p. ${page}`;
   return quote.length > 0
     ? `${phrase} — ${where}: “${quote}”`
@@ -399,6 +703,14 @@ export type AssembledDigest<
    * hiding a dozen annotations and "and 1 more" would be a lie.
    */
   droppedCount: number;
+  /**
+   * Whether the cross-paper scan behind this digest hit its comparison cap —
+   * i.e. whether there might be cross-paper pairs nobody has looked for.
+   *
+   * `false` when no cross-paper scan was supplied at all, which is the honest
+   * answer: a digest that never went looking has nothing truncated.
+   */
+  crossPaperCapped: boolean;
 };
 
 /**
@@ -425,6 +737,16 @@ export type AssembledDigest<
  * Each new annotation contributes to at most one gold line, so five different
  * people colliding with one of your hypotheses reads as five lines, but one
  * annotation colliding with five things does not.
+ *
+ * ## Cross-paper pairs are opt-in
+ *
+ * `crossPaper` is a `detectCrossPaperCollisions(pool)` result, and omitting it
+ * is not a degraded mode — it is the one-paper policy the simulation validated,
+ * which is what a session's prep and a presenter's brief still want. When it is
+ * supplied, its pairs join the same candidate list, are promoted by the same
+ * recipient-relative rule, and rank behind every same-paper pair. They are
+ * distinguishable in the output without reading the prose: `otherPaperId` is
+ * set, and `line` names both papers.
  */
 export function assembleDigest<
   P extends string,
@@ -438,6 +760,11 @@ export function assembleDigest<
   paperTitles: ReadonlyMap<P, string>;
   /** `detectCollisions(pool)`, if the caller already has it. */
   collisions?: readonly Collision<P, A, U>[];
+  /**
+   * `detectCrossPaperCollisions(pool)`. Omit it for the one-paper policy —
+   * a pool that spans papers is not on its own a request to pair across them.
+   */
+  crossPaper?: CrossPaperScan<P, A, U>;
   cap?: number;
 }): AssembledDigest<P, A> {
   const cap = input.cap ?? MAX_DIGEST_ITEMS;
@@ -449,28 +776,42 @@ export function assembleDigest<
   const goldItems: DigestItem<P, A>[] = [];
 
   // Re-sorted rather than trusted: a precomputed list must rank identically to
-  // a detected one, because this order is what the cap cuts against.
-  const candidates = (input.collisions ?? detectCollisions(input.pool))
+  // a detected one, because this order is what the cap cuts against. Both
+  // detectors' output goes through the one comparator, which is where
+  // same-paper's precedence over cross-paper is decided.
+  const candidates = [
+    ...(input.collisions ?? detectCollisions(input.pool)),
+    ...(input.crossPaper?.collisions ?? []),
+  ]
     .filter(
       (c) =>
         c.a.memberId === input.recipientId || c.b.memberId === input.recipientId,
     )
-    .sort(byRecency);
+    .sort(byPairRank);
 
   for (const collision of candidates) {
     const fresh = [collision.a, collision.b].filter((x) => deltaIds.has(x.id));
     if (fresh.length === 0) continue;
     if (fresh.some((x) => promoted.has(x.id))) continue;
     for (const x of fresh) promoted.add(x.id);
+    const cross = isCrossPaper(collision);
+    // File the line under the recipient's own side. They are always one half —
+    // promotion is recipient-relative — and for a same-paper pair the two
+    // sides are the same paper, so this is `collision.a.paperId` as before.
+    const near =
+      collision.a.memberId === input.recipientId ? collision.a : collision.b;
+    const far = near === collision.a ? collision.b : collision.a;
     goldItems.push({
       kind: "collision",
-      paperId: collision.a.paperId,
+      paperId: near.paperId,
+      ...(cross ? { otherPaperId: far.paperId } : {}),
       annotationIds: [collision.a.id, collision.b.id],
       pairType: collision.pairType,
       line: collisionLine(
         collision,
         input.recipientId,
         titleOf(collision.a.paperId),
+        cross ? titleOf(collision.b.paperId) : undefined,
       ),
     });
   }
@@ -510,5 +851,6 @@ export function assembleDigest<
   return {
     items: all.slice(0, cap),
     droppedCount: withheld.size,
+    crossPaperCapped: input.crossPaper?.capped ?? false,
   };
 }
