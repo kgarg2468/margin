@@ -6,6 +6,7 @@ import { annotationType } from "./schema";
 import { isStillShared } from "./synthesis";
 import {
   changedSince,
+  mostRecentMeetings,
   positionChanges,
   unresolvedAcrossMeetings,
   type AnnotationFact,
@@ -105,6 +106,19 @@ const LEDGER_LIMIT = 1000;
  * paper across fifty meetings has a different problem than this feature solves.
  */
 const MEETING_LIMIT = 50;
+
+/**
+ * How many qualifying sessions are read before the clock picks the fifty.
+ *
+ * Wider than `MEETING_LIMIT` on purpose — see `heldMeetings`. The cap has to
+ * fall on meeting order, meeting order is not the order this index offers, and
+ * the only way to sort by a clock the index does not hold is to have the rows
+ * in hand first. Five times the cap, because it costs a bounded read of one
+ * paper's own sessions and it puts the ceiling somewhere a real paper cannot
+ * reach: a lab would have to have held two hundred and fifty journal clubs on a
+ * single paper before the reordering this protects against could hide behind it.
+ */
+const MEETING_SCAN_LIMIT = 250;
 
 /** How many meetings the reader may anchor the "since" window to. */
 const ANCHOR_CHOICES = 8;
@@ -214,11 +228,30 @@ const temporalIndex = v.object({
  *
  * A cancelled meeting is not a meeting. A question written while one sat on the
  * calendar was never taken to a floor, so it has outlasted nothing.
+ *
+ * ## Why the read is wider than the cap
+ *
+ * `by_paper` is creation order, and creation order is not meeting order. A
+ * session backdated after the fact — or deleted and re-created to fix a typo —
+ * sits at the newest end of that index and the oldest end of the calendar, so
+ * taking `MEETING_LIMIT` rows here and sorting the survivors by the clock would
+ * choose the most recently *typed* meetings and then present them as the most
+ * recent meetings. The wrong one drops out, a question's count of meetings
+ * outlasted quietly falls by one, and the "since" picker offers dates that are
+ * not the paper's last few.
+ *
+ * So this reads every qualifying session up to a much larger ceiling and lets
+ * `mostRecentMeetings` apply the cap on the clock. The ceiling is the honest
+ * remainder of the problem: `sessions` has no index on (paper, time) — only
+ * `by_lab_and_scheduled`, which would mean scanning the whole lab's calendar to
+ * answer a question about one paper — so there is a number past which this read
+ * stops, and it is set where a paper could never reach it rather than where a
+ * busy one might. When the cap does bite, the caller says so.
  */
 async function heldMeetings(
   ctx: QueryCtx,
   paperId: Id<"papers">,
-): Promise<HeldMeeting<Id<"sessions">>[]> {
+): Promise<{ meetings: HeldMeeting<Id<"sessions">>[]; truncated: boolean }> {
   const rows = await ctx.db
     .query("sessions")
     .withIndex("by_paper", (q) => q.eq("paperId", paperId))
@@ -229,18 +262,25 @@ async function heldMeetings(
         q.eq(q.field("status"), "synthesized"),
       ),
     )
-    .take(MEETING_LIMIT);
+    .take(MEETING_SCAN_LIMIT);
 
   // `endedAt` rather than `scheduledAt`: the boundary a note falls on either
   // side of is when the room emptied, and a note written in the last ten
   // minutes of a meeting was written during it, not after it. The booked time
-  // is the fallback for a row that somehow has no end.
-  return rows
-    .map((session) => ({
-      id: session._id,
-      at: session.endedAt ?? session.scheduledAt,
-    }))
-    .sort((x, y) => y.at - x.at || (x.id < y.id ? -1 : 1));
+  // is the fallback for a row that somehow has no end. Both the choice and the
+  // keep-the-most-recent selection live in `mostRecentMeetings`, where they are
+  // unit-tested.
+  return {
+    meetings: mostRecentMeetings(
+      rows.map((session) => ({
+        id: session._id,
+        scheduledAt: session.scheduledAt,
+        endedAt: session.endedAt,
+      })),
+      MEETING_LIMIT,
+    ),
+    truncated: rows.length > MEETING_LIMIT,
+  };
 }
 
 /**
@@ -405,7 +445,10 @@ export const forPaper = query({
       .take(LEDGER_LIMIT);
     const facts = readFacts(events, new Set(live.map((row) => row._id)));
 
-    const meetings = await heldMeetings(ctx, args.paperId);
+    const { meetings, truncated: moreMeetings } = await heldMeetings(
+      ctx,
+      args.paperId,
+    );
     const anchor = resolveAnchor(meetings, args.sinceSessionId, args.sinceAt);
 
     const changed =
@@ -438,7 +481,14 @@ export const forPaper = query({
       anchors: meetings
         .slice(0, ANCHOR_CHOICES)
         .map((one) => ({ sessionId: one.id, at: one.at })),
-      truncated: pool.length === POOL_LIMIT || events.length === LEDGER_LIMIT,
+      // Any of the three reads hitting its cap means the lenses are reading
+      // this paper's recent end rather than the whole of it. The meetings one
+      // matters most to say out loud: past it, "outlasted three meetings" is a
+      // floor rather than a count.
+      truncated:
+        pool.length === POOL_LIMIT ||
+        events.length === LEDGER_LIMIT ||
+        moreMeetings,
     };
   },
 });

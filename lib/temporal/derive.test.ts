@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   changedSince,
   isEmpty,
+  mostRecentMeetings,
   positionChanges,
   unresolvedAcrossMeetings,
   type AnnotationFact,
   type HeldMeeting,
+  type MeetingRow,
   type TemporalNote,
 } from "./derive";
 
@@ -70,6 +72,68 @@ const flipped = (
   at: day(atDay),
   kind: "visibility",
   visibility,
+});
+
+describe("mostRecentMeetings", () => {
+  const session = (
+    id: string,
+    scheduledDay: number,
+    endedDay?: number,
+  ): MeetingRow => ({
+    id,
+    scheduledAt: day(scheduledDay),
+    ...(endedDay === undefined ? {} : { endedAt: day(endedDay) }),
+  });
+
+  it("measures a meeting from when the room emptied", () => {
+    // A note written in the last ten minutes of a meeting was written during
+    // it, not after it, so the boundary is the end and not the booking.
+    const [one] = mostRecentMeetings([session("s1", 3, 4)], 10);
+    expect(one?.at).toBe(day(4));
+  });
+
+  it("falls back to the booked time for a row with no end", () => {
+    const [one] = mostRecentMeetings([session("s1", 3)], 10);
+    expect(one?.at).toBe(day(3));
+  });
+
+  it("keeps the most recent by the clock, not by the order rows arrived", () => {
+    // The bug this function exists for. `by_paper` is creation order, so a
+    // session backdated after the fact arrives at the newest end of the read
+    // while sitting at the oldest end of the calendar. Capping first would keep
+    // it and drop a meeting that actually happened later.
+    const backdatedLast = session("backdated", 1, 2);
+    const older = session("older", 5, 6);
+    const newer = session("newer", 9, 10);
+
+    const kept = mostRecentMeetings([backdatedLast, older, newer], 2);
+    expect(kept.map((one) => one.id)).toEqual(["newer", "older"]);
+  });
+
+  it("orders most recent first whatever order it was handed", () => {
+    const kept = mostRecentMeetings(
+      [session("mid", 5, 6), session("new", 9, 10), session("old", 1, 2)],
+      10,
+    );
+    expect(kept.map((one) => one.id)).toEqual(["new", "mid", "old"]);
+  });
+
+  it("breaks a tie on the clock deterministically", () => {
+    const kept = mostRecentMeetings(
+      [session("b", 3, 4), session("a", 3, 4)],
+      10,
+    );
+    expect(kept.map((one) => one.id)).toEqual(["a", "b"]);
+  });
+
+  it("returns everything when the cap is not reached", () => {
+    expect(mostRecentMeetings([session("s1", 1, 2)], 50)).toHaveLength(1);
+  });
+
+  it("survives a cap of zero and an empty calendar", () => {
+    expect(mostRecentMeetings([session("s1", 1, 2)], 0)).toEqual([]);
+    expect(mostRecentMeetings([], 50)).toEqual([]);
+  });
 });
 
 describe("unresolvedAcrossMeetings", () => {

@@ -108,6 +108,60 @@ export type HeldMeeting<SessionId extends string = string> = {
 };
 
 /**
+ * A session row, as the meeting clock reads it.
+ *
+ * Two timestamps because a meeting has two: the slot it was booked into and
+ * the moment the room emptied. `endedAt` is the one every lens here measures
+ * against — see `mostRecentMeetings` — and `scheduledAt` is what a row that
+ * somehow has no end falls back to.
+ */
+export type MeetingRow<SessionId extends string = string> = {
+  id: SessionId;
+  scheduledAt: number;
+  endedAt?: number;
+};
+
+/**
+ * The most recent meetings, chosen by the meeting clock rather than by the
+ * order their rows were created.
+ *
+ * This is a whole function for one sort and one slice because the order those
+ * two happen in is a correctness property, and getting it backwards is close to
+ * invisible. A paper's sessions are reachable by `by_paper`, which is creation
+ * order, and creation order is not meeting order: a session backdated after the
+ * fact, or one deleted and re-created to fix a typo, lands at the *newest* end
+ * of the index while sitting at the oldest end of the calendar. Capping the read
+ * first and sorting the survivors — the obvious way to write it — therefore
+ * chooses the fifty most recently *typed* meetings and then presents them as the
+ * fifty most recent meetings. On a lab that never backdates anything the two are
+ * identical and the bug is unobservable; on one that does, a real meeting
+ * silently vanishes from the count of what a question has outlasted, and the
+ * "since" picker offers the wrong dates.
+ *
+ * So the clock decides, and the cap falls afterwards. The caller's job is to
+ * hand over every qualifying session it can afford to read; this one's is to
+ * make sure the ones kept are the ones nearest the present.
+ *
+ * Keeping the *most recent* is the right end to keep when something must go: the
+ * further back a meeting was, the less the room remembers of it, and every lens
+ * built on this reads forwards from a recent anchor. The cost is that a count of
+ * meetings outlasted becomes a floor rather than an exact number once a paper
+ * runs past the cap — never an overstatement, and the caller says so out loud.
+ */
+export function mostRecentMeetings<S extends string>(
+  sessions: readonly MeetingRow<S>[],
+  limit: number,
+): HeldMeeting<S>[] {
+  return sessions
+    .map((session) => ({
+      id: session.id,
+      at: session.endedAt ?? session.scheduledAt,
+    }))
+    .sort((x, y) => y.at - x.at || (x.id < y.id ? -1 : 1))
+    .slice(0, Math.max(0, limit));
+}
+
+/**
  * The three ledger facts this index reads, already narrowed.
  *
  * Mapped by `convex/temporal.ts` out of the `events` union rather than passed
