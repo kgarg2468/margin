@@ -357,19 +357,22 @@ export function Reader({
       const root = scrollRef.current;
       const element = pageElements.current.get(currentPage);
       // A press that does not change the *size* must not leave a place held.
-      // The restore below is keyed on `pageHeight`, so a mode change that
-      // computes to the scale already on screen — pressing fit width while a
-      // numeric zoom happens to produce the same number, two presses away on
-      // a wide monitor — would record a hold nothing ever spends. It would
-      // then sit there until the next unrelated height change, a window
-      // resize an hour later, and yank the reader to a place recorded then.
+      // The restore below is keyed on `pageHeight`, so the comparison here is
+      // that same floored height, not the raw scale: two scales a hair apart
+      // — fit width landing at 1.24985 beside the 1.25 step — floor to the
+      // same height, and a hold recorded for a dep that never changes would
+      // sit until the next unrelated height change, a window resize an hour
+      // later, and yank the reader to a place recorded then.
       //
       // `setZoom` stays unconditional either side of this: the modes really
-      // are different even when the scales agree, and the fit-width button's
+      // are different even when the heights agree, and the fit-width button's
       // `aria-pressed` is the one thing that has to say so.
       const changesSize =
-        zoomScale(next, { columnWidth, baseWidth: baseSize?.width ?? 0 }) !==
-        scale;
+        baseSize !== null &&
+        Math.floor(
+          baseSize.height *
+            zoomScale(next, { columnWidth, baseWidth: baseSize.width }),
+        ) !== pageHeight;
       if (changesSize && root !== null && element !== undefined) {
         const box = element.getBoundingClientRect();
         const rootBox = root.getBoundingClientRect();
@@ -380,7 +383,7 @@ export function Reader({
       }
       setZoom(next);
     },
-    [currentPage, scale, columnWidth, baseSize],
+    [currentPage, columnWidth, baseSize, pageHeight],
   );
 
   useLayoutEffect(() => {
@@ -1002,8 +1005,9 @@ export function Reader({
           {/* `gap-3.5`, not the `gap-1` this group was drawn with, and
               `tap-target` on all three rather than on the outer two.
               `@utility tap-target` is a 44x44 `::after` that takes no part in
-              layout and — deliberately — no part in pointer-events either, so
-              on a ~21px button it overhangs ~11.7px past each edge. At a 4px
+              layout but — deliberately — every part in pointer-events, so
+              on a ~21px button it overhangs ~11.7px of live hit area past
+              each edge. At a 4px
               gap the − and + boxes reached ~7px into a ~40px fit-width button
               that had no box of its own to win the overlap with, so a third of
               its face zoomed the wrong way and did it silently: a stolen click
