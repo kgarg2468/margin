@@ -1,4 +1,12 @@
 import { ConvexError, v } from "convex/values";
+/**
+ * How far ahead of its scheduled time a session may be started. Generous on
+ * purpose — labs move a meeting forward a day without touching the calendar —
+ * but a session started a fortnight early is the wrong row, clicked in a list.
+ * The rule itself lives in `lib/` so the button that offers the start and the
+ * mutation that enforces it cannot drift apart.
+ */
+import { awayProse, startWindow } from "../lib/session-window";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
@@ -44,12 +52,6 @@ const MIN_SCHEDULE_DELAY_MS = 60 * 1000;
 const CLOCK_SKEW_GRACE_MS = 5 * 60 * 1000;
 /** Nobody schedules a journal club two years out; a date this far away is a typo or a bad epoch. */
 const MAX_SCHEDULE_AHEAD_MS = 2 * 365 * 24 * 60 * 60 * 1000;
-/**
- * How far ahead of its scheduled time a session may be started. Generous on
- * purpose — labs move a meeting forward a day without touching the calendar —
- * but a session started a fortnight early is the wrong row, clicked in a list.
- */
-const MAX_EARLY_START_MS = 24 * 60 * 60 * 1000;
 const MAX_TITLE_LENGTH = 200;
 /** Presenter notes are prep, not a manuscript — and they get read into one long-context synthesis call. */
 export const MAX_NOTES_LENGTH = 20_000;
@@ -347,18 +349,6 @@ function cleanScheduledAt(input: number): number {
     throw new ConvexError("Sessions can be scheduled up to two years ahead.");
   }
   return at;
-}
-
-/**
- * "in about 3 days" — enough for a refusal to be actionable without pulling in
- * a date library or guessing at the reader's timezone.
- */
-function untilProse(ms: number): string {
-  const hours = Math.round(ms / (60 * 60 * 1000));
-  if (hours < 48) {
-    return `in about ${hours} hours`;
-  }
-  return `in about ${Math.round(hours / 24)} days`;
 }
 
 /** Somebody has to be in the lab to present to it. */
@@ -686,10 +676,10 @@ export const startSession = mutation({
     // irreversible — it burns the prep boundary, fires the start digest, and
     // there is no transition back to `scheduled` — so the one case worth
     // refusing is the one that is obviously a misclick in a list of meetings.
-    const early = session.scheduledAt - Date.now();
-    if (early > MAX_EARLY_START_MS) {
+    const { canStart } = startWindow(session.scheduledAt, Date.now());
+    if (!canStart) {
       throw new ConvexError(
-        `That session isn't until ${untilProse(early)}. Start it closer to the time, or reschedule it if the meeting really has moved.`,
+        `That session is still ${awayProse(session.scheduledAt - Date.now())}. Start it closer to the time, or reschedule it if the meeting really has moved.`,
       );
     }
 
