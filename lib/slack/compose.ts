@@ -474,12 +474,52 @@ export function markdownToMrkdwn(markdown: string): string {
 }
 
 /**
+ * The longest escape `escapeSlack` can emit, in characters.
+ *
+ * `&amp;` is five; the six here is slack for a fourth entity showing up later
+ * without this constant being revisited.
+ */
+const LONGEST_ENTITY = 6;
+
+/**
+ * How many characters of `text` may be taken without cutting an entity in half.
+ *
+ * At most `limit`, and less than that only when the character at the limit sits
+ * inside an `&…;` escape that has not closed yet — in which case the cut backs
+ * up to the `&` and the whole entity travels to the next chunk. Everything
+ * reaching this function has already been through `escapeSlack`, so the only
+ * ampersands present are ones we put there.
+ */
+function entitySafeCut(text: string, limit: number): number {
+  if (text.length <= limit) {
+    return text.length;
+  }
+  const window = text.slice(Math.max(0, limit - LONGEST_ENTITY), limit);
+  const offset = window.lastIndexOf("&");
+  if (offset === -1) {
+    return limit;
+  }
+  const start = Math.max(0, limit - LONGEST_ENTITY) + offset;
+  const closes = text.indexOf(";", start);
+  if (closes !== -1 && closes < limit) {
+    // The entity opened and closed inside the chunk. Nothing to back up for.
+    return limit;
+  }
+  // `start` can only be 0 when the entire limit is one unterminated entity,
+  // which needs a limit under six characters to arrange. Take the limit rather
+  // than nothing, because a chunk of zero length is a loop that never ends.
+  return start === 0 ? limit : start;
+}
+
+/**
  * Break already-converted mrkdwn into sections Slack will accept.
  *
  * Split on blank lines rather than on a character count, so a section boundary
  * falls between paragraphs. A single paragraph longer than the limit — an
- * approver who wrote one enormous block — is cut at the limit, because there is
- * no better seam in it.
+ * approver who wrote one enormous block — is cut near the limit, because there
+ * is no better seam in it; `entitySafeCut` keeps that cut from landing inside
+ * an escape and rendering `&am` at the end of one section and `p;` at the start
+ * of the next.
  */
 export function chunkMrkdwn(
   mrkdwn: string,
@@ -497,8 +537,11 @@ export function chunkMrkdwn(
         chunks.push(buffer);
         buffer = "";
       }
-      for (let at = 0; at < block.length; at += limit) {
-        chunks.push(block.slice(at, at + limit));
+      let at = 0;
+      while (at < block.length) {
+        const take = entitySafeCut(block.slice(at), limit);
+        chunks.push(block.slice(at, at + take));
+        at += take;
       }
       continue;
     }

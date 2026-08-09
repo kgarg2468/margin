@@ -405,6 +405,43 @@ describe("chunkMrkdwn", () => {
   it("drops blank runs rather than emitting empty sections", () => {
     expect(chunkMrkdwn("\n\n\n\naaa\n\n\n\n", 100)).toEqual(["aaa"]);
   });
+
+  it("backs the cut up rather than splitting an entity", () => {
+    // The limit falls at index 10, four characters into the `&amp;` that
+    // starts at index 8. Cutting there would put `&am` at the end of one
+    // section and `p;` at the start of the next, and a lab would read both.
+    const chunks = chunkMrkdwn(`${"x".repeat(8)}&amp;${"y".repeat(20)}`, 10);
+    expect(chunks).toEqual([
+      "x".repeat(8),
+      `&amp;${"y".repeat(5)}`,
+      "y".repeat(10),
+      "y".repeat(5),
+    ]);
+  });
+
+  it("keeps an entity whole at the real section limit", () => {
+    // The reviewer's case, at the bound production actually uses: one
+    // paragraph past 2800 characters with an ampersand sitting on the seam.
+    const paragraph = markdownToMrkdwn(`${"x".repeat(2798)}&${"y".repeat(600)}`);
+    const chunks = chunkMrkdwn(paragraph);
+    expect(chunks[0]).toBe("x".repeat(2798));
+    expect(chunks[1]).toBe(`&amp;${"y".repeat(600)}`);
+  });
+
+  it("never cuts inside an entity, whatever the limit", () => {
+    // The invariant `escapeWithin` is held to, held here too — swept across
+    // limits so no single lucky alignment is what makes it pass.
+    const paragraph = markdownToMrkdwn(`${"&".repeat(200)} tail`);
+    for (let limit = 6; limit <= 40; limit += 1) {
+      const chunks = chunkMrkdwn(paragraph, limit);
+      for (const chunk of chunks) {
+        expect(chunk, `limit ${limit}`).not.toMatch(/&(?!amp;|lt;|gt;)/);
+        expect(chunk, `limit ${limit}`).not.toMatch(/^(?:amp|lt|gt);/);
+      }
+      // And nothing was lost or duplicated in the backing up.
+      expect(chunks.join(""), `limit ${limit}`).toBe(paragraph);
+    }
+  });
 });
 
 describe("the write-up", () => {
