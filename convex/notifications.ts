@@ -69,6 +69,20 @@ const MAX_PER_ANNOTATION = 64;
 /** Enough of a note to recognise it; not so much that the panel becomes the reader. */
 const SNIPPET_LENGTH = 140;
 
+/**
+ * How much of a paper's title one subject line will carry.
+ *
+ * `papers.ts` caps a title at 500 characters, which is generous and correct
+ * for a library row and ruinous for an inbox: "Ada Lovelace mentioned you on
+ * “…”" around a 500-character title is a subject line five hundred and forty
+ * characters long, which every mail client truncates at a different place and
+ * none of them truncate well. Eighty plus an ellipsis keeps the whole subject
+ * inside the ~120 characters an inbox list shows, and the truncation lives
+ * here rather than at the call site so it is a property of the message rather
+ * than of whichever fixture happened to be short.
+ */
+const TITLE_IN_SUBJECT = 80;
+
 /* -------------------------------------------------------------------------
  * Writing (called from convex/annotations.ts)
  * ---------------------------------------------------------------------- */
@@ -568,14 +582,22 @@ export function composeNotificationEmail(message: {
   snippet: string;
   url: string;
 }): { subject: string; text: string; html: string } {
+  // Shortened once, so the subject and the opening sentence agree about what
+  // the paper is called. `cleanTitle` has already collapsed every run of
+  // whitespace, so there is no CR or LF in here to worry a mail header about.
+  const title =
+    message.paperTitle.length > TITLE_IN_SUBJECT
+      ? `${message.paperTitle.slice(0, TITLE_IN_SUBJECT).trimEnd()}…`
+      : message.paperTitle;
+
   const subject =
     message.kind === "mention"
-      ? `${message.actorName} mentioned you on “${message.paperTitle}”`
-      : `${message.actorName} replied to your note on “${message.paperTitle}”`;
+      ? `${message.actorName} mentioned you on “${title}”`
+      : `${message.actorName} replied to your note on “${title}”`;
   const opening =
     message.kind === "mention"
-      ? `${message.actorName} mentioned you in the margin of “${message.paperTitle}”.`
-      : `${message.actorName} answered your note in the margin of “${message.paperTitle}”.`;
+      ? `${message.actorName} mentioned you in the margin of “${title}”.`
+      : `${message.actorName} answered your note in the margin of “${title}”.`;
   const because =
     "You're getting this because you're in this lab and this note was addressed to you.";
 
