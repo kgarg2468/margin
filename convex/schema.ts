@@ -362,7 +362,20 @@ export default defineSchema({
      * Without it that check would be a full scan of the table, which is a
      * strange price to pay for cleaning up after a dropped connection.
      */
-    .index("by_pdf_storage", ["storageId"]),
+    .index("by_pdf_storage", ["storageId"])
+    /**
+     * What ⌘K looks papers up by. Titles only: the extracted text lives in
+     * `paperPages`, which carries no `labId` and so cannot be filtered to the
+     * caller's lab in a search index at all.
+     *
+     * `labId` is a filter field rather than a post-filter because a search
+     * index is global to the table — without it a query would rank every
+     * lab's library together and then throw most of it away.
+     */
+    .searchIndex("search_title", {
+      searchField: "title",
+      filterFields: ["labId"],
+    }),
 
   /**
    * One page of pdf.js-extracted text, the surface anchors resolve against.
@@ -438,7 +451,18 @@ export default defineSchema({
     .index("by_lab", ["labId"])
     .index("by_paper", ["paperId"])
     .index("by_lab_and_scheduled", ["labId", "scheduledAt"])
-    .index("by_lab_and_status", ["labId", "status"]),
+    .index("by_lab_and_status", ["labId", "status"])
+    /**
+     * Sessions by the name someone gave them. A session's `title` is optional
+     * — most of them are known by the paper they are about — so this finds the
+     * ones a lab bothered to name ("Methods week", "Reviewer 2 postmortem")
+     * and nothing else. Finding a meeting by its paper is what the paper hit
+     * is for.
+     */
+    .searchIndex("search_title", {
+      searchField: "title",
+      filterFields: ["labId"],
+    }),
 
   /** A typed, anchored note on a passage — the atom of the product. `parentId` makes threads. */
   annotations: defineTable({
@@ -460,7 +484,21 @@ export default defineSchema({
     .index("by_member", ["memberId"])
     .index("by_parent", ["parentId"])
     .index("by_session", ["sessionId"])
-    .index("by_lab", ["labId"]),
+    .index("by_lab", ["labId"])
+    /**
+     * Search over what the lab wrote.
+     *
+     * All three filter fields exist for the same reason: the privacy
+     * constitution's rule that a private note is invisible to everyone but its
+     * author has to hold *inside the index*, not in a filter applied to its
+     * results. `convex/search.ts` runs two separate queries — lab-visible
+     * notes, and the caller's own private ones — and there is no combination
+     * of `.eq()`s here that would return someone else's private note.
+     */
+    .searchIndex("search_body", {
+      searchField: "body",
+      filterFields: ["labId", "visibility", "memberId"],
+    }),
 
   /**
    * The Ledger: append-only, never updated, never deleted. Every row is a

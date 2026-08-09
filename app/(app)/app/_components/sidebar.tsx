@@ -6,6 +6,7 @@ import { useAuthActions } from "@convex-dev/auth/react";
 import { useQuery } from "convex/react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
+import { SearchAffordance } from "./command-palette";
 import type { LabSummary } from "./lab-provider";
 import { useLabs } from "./lab-provider";
 
@@ -58,6 +59,11 @@ export function Sidebar() {
           </select>
         )}
       </div>
+
+      {/* The catalogue drawer, where a catalogue drawer belongs: under the
+          lab it searches and above the rooms it searches through. Only once
+          there is a lab — there is nothing to look for before that. */}
+      {currentLab !== null && <SearchAffordance />}
 
       <nav className="flex flex-col gap-4">
         <span className={eyebrowClass}>Sections</span>
