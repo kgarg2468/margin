@@ -36,6 +36,7 @@ import {
   seedAnnotation,
   seedLab,
 } from "./delegations.fixtures";
+import * as findings from "./findings";
 
 vi.mock("@convex-dev/auth/server", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@convex-dev/auth/server")>()),
@@ -179,6 +180,58 @@ describe("caps", () => {
     const verdict = capVerdict({ active: MAX_ACTIVE_PER_LAB, labDay: 0 });
     expect(verdict.ok).toBe(false);
     if (!verdict.ok) expect(verdict.refusal).toMatch(/scout/i);
+  });
+
+  it("does not let a crashed run keep a slot forever", async () => {
+    // Status alone is not occupancy. A run whose process died never wrote a
+    // terminal status, so counting `running` rows would let eight crashes
+    // take the scout away from a lab permanently — no message, nothing to
+    // press, and no cron in this codebase to come and fix it.
+    const { ctx, seed } = await seeded();
+    for (let i = 0; i < MAX_ACTIVE_PER_LAB; i += 1) {
+      await queue(ctx, seed, {
+        annotationId: undefined,
+        actionId: seed.actionId,
+        status: "running",
+        lease: `dead-${i}`,
+        leaseAcquiredAt: Date.now() - DELEGATION_LEASE_MS - 1,
+      });
+    }
+
+    ctx.auth = { userId: seed.pi };
+    await handlerOf(request)(ctx, {
+      subject: { kind: "annotation", annotationId: seed.questionId },
+    } as never);
+
+    // The new run exists, and the dead ones were closed rather than ignored:
+    // an abandoned row that stays `running` is a lie the audit trail tells.
+    const rows = ctx.db.all("delegations");
+    expect(rows.filter((row) => row.status === "queued")).toHaveLength(1);
+    expect(rows.filter((row) => row.status === "failed")).toHaveLength(
+      MAX_ACTIVE_PER_LAB,
+    );
+    expect(rows.filter((row) => row.failure === "lease-expired")).toHaveLength(
+      MAX_ACTIVE_PER_LAB,
+    );
+  });
+
+  it("still refuses when the slots are held by runs that are alive", async () => {
+    const { ctx, seed } = await seeded();
+    for (let i = 0; i < MAX_ACTIVE_PER_LAB; i += 1) {
+      await queue(ctx, seed, {
+        annotationId: undefined,
+        actionId: seed.actionId,
+        status: "running",
+        lease: `alive-${i}`,
+        leaseAcquiredAt: Date.now(),
+      });
+    }
+    ctx.auth = { userId: seed.pi };
+    await expect(
+      handlerOf(request)(ctx, {
+        subject: { kind: "annotation", annotationId: seed.questionId },
+      } as never),
+    ).rejects.toThrow(ConvexError);
   });
 
   it("reads the day through the time index, not the status one", async () => {
@@ -364,6 +417,53 @@ describe("a run, start to finish", () => {
     expect(
       ctx.db.all("events").some((e) => e.type === "delegation.empty"),
     ).toBe(true);
+  });
+
+  it("says cancelled, not empty, when the question went away mid-run", async () => {
+    const { ctx, seed } = await seeded();
+    const delegationId = await queue(ctx, seed);
+    const claimed = (await handlerOf(claim)(ctx, { delegationId } as never)) as {
+      lease: string;
+    };
+    await ctx.db.patch(seed.questionId as string, { visibility: "private" });
+
+    await handlerOf(storeEmpty)(ctx, {
+      delegationId,
+      lease: claimed.lease,
+    } as never);
+
+    // "The lab has not written about this" is a claim about the corpus. It
+    // must not be the sentence left behind by a run whose question nobody
+    // can find any more — an audit trail that is subtly wrong about why a
+    // run stopped is worse than none, because it will be believed.
+    const row = rowAt(ctx.db.all("delegations"));
+    expect(row.status).toBe("cancelled");
+    expect(row.cancellation).toBe("subject-withdrawn");
+  });
+
+  it("puts a failed run on the same timelines as a successful one", async () => {
+    const { ctx, seed } = await seeded();
+    await run(ctx, await queue(ctx, seed));
+    const empty = ctx.db
+      .all("events")
+      .find((e) => e.type === "delegation.empty");
+    // Otherwise a lab's paper timeline shows the runs that worked and none of
+    // the runs that did not, which is the one shape of record that flatters
+    // the feature.
+    expect(empty?.paperId).toBe(seed.paperId);
+    expect(empty?.sessionId).toBe(seed.sessionId);
+
+    const { ctx: other, seed: seed2 } = await seeded();
+    await queue(other, seed2, {
+      status: "running",
+      lease: "dead",
+      leaseAcquiredAt: Date.now() - DELEGATION_LEASE_MS - 1,
+    });
+    await handlerOf(expireStale)(other, { labId: seed2.labId } as never);
+    const failed = other.db
+      .all("events")
+      .find((e) => e.type === "delegation.failed");
+    expect(failed?.paperId).toBe(seed2.paperId);
   });
 
   it("is a no-op on retry, and writes exactly one finding", async () => {
@@ -750,6 +850,55 @@ describe("listForSubject", () => {
 });
 
 /* -------------------------------------------------------------------------
+ * Reading a finding back
+ * ---------------------------------------------------------------------- */
+
+describe("findings.forDelegation", () => {
+  async function returned() {
+    const { ctx, seed } = await seeded();
+    await corpus(ctx, seed);
+    const delegationId = await queue(ctx, seed);
+    await run(ctx, delegationId);
+    return { ctx, seed, delegationId };
+  }
+
+  it("shows a member of the lab what their run found", async () => {
+    const { ctx, seed, delegationId } = await returned();
+    ctx.auth = { userId: seed.member };
+    expect(
+      await handlerOf(findings.forDelegation)(ctx, { delegationId } as never),
+    ).not.toBeNull();
+  });
+
+  it("closes once the question it was about goes private", async () => {
+    const { ctx, seed, delegationId } = await returned();
+    await ctx.db.patch(seed.questionId as string, { visibility: "private" });
+
+    ctx.auth = { userId: seed.member };
+    // A delegation id is a bearer token by accident: anyone who watched the
+    // run start is holding one. Membership alone would leave a finding on a
+    // since-privatized question readable to exactly the people most likely
+    // to have kept the id.
+    expect(
+      await handlerOf(findings.forDelegation)(ctx, { delegationId } as never),
+    ).toBeNull();
+    expect(
+      await handlerOf(findings.newestForSubject)(ctx, {
+        subject: { kind: "annotation", annotationId: seed.questionId },
+      } as never),
+    ).toBeNull();
+  });
+
+  it("closes for somebody outside the lab", async () => {
+    const { ctx, delegationId } = await returned();
+    ctx.auth = { userId: "users_999" };
+    expect(
+      await handlerOf(findings.forDelegation)(ctx, { delegationId } as never),
+    ).toBeNull();
+  });
+});
+
+/* -------------------------------------------------------------------------
  * The subject lifecycle cascade
  * ---------------------------------------------------------------------- */
 
@@ -857,9 +1006,9 @@ describe("the cascade", () => {
     );
 
     expect(result.cancelled).toBe(1);
-    expect((await ctx.db.get(inFlight))?.cancellation).toBe(
-      "citation-withdrawn",
-    );
+    // The note *was* the question, so the reason is that the subject went —
+    // not that a citation under it moved.
+    expect((await ctx.db.get(inFlight))?.cancellation).toBe("subject-withdrawn");
   });
 
   it("writes one join row per distinct note, however many items cite it", () => {

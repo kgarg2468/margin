@@ -716,6 +716,41 @@ describe("the citation gate", () => {
     );
   });
 
+  it("records a label the sentence leans on but the citation list forgot", () => {
+    // The paraphrase leak, one layer up. An item that says "[A2] matches
+    // [A1]" while declaring `citations: ["A1"]` is resting on A2 in the
+    // sentence a scientist reads — and if A2 is not in
+    // `citedAnnotationIds`, A2's author withdrawing it redacts nothing. The
+    // stored citations have to be the union of what the model declared and
+    // what it wrote, or whole-item redaction is guarding the wrong list.
+    const { byLabel } = material(3);
+    const result = sanitizeFindingItems(
+      {
+        items: [
+          { text: "[A2] matches what [A1] reported.", citations: ["A1"] },
+        ],
+      },
+      byLabel,
+    );
+    expect(rowAt(result.items).citedAnnotationIds).toEqual([
+      "annotations_1",
+      "annotations_2",
+    ]);
+  });
+
+  it("keeps an item that cites inline and declares an empty list", () => {
+    // The same union, read from the other side: reading the list alone would
+    // throw away every legitimate item from a model that cites in prose.
+    const { byLabel } = material(2);
+    const result = sanitizeFindingItems(
+      { items: [{ text: "Two notes converge here [A1].", citations: [] }] },
+      byLabel,
+    );
+    expect(result.items).toHaveLength(1);
+    expect(rowAt(result.items).citedAnnotationIds).toEqual(["annotations_1"]);
+    expect(result.droppedForCitation).toBe(0);
+  });
+
   it("dedupes repeated labels and caps the item's length", () => {
     const { byLabel } = material(1);
     const result = sanitizeFindingItems(
