@@ -1042,6 +1042,10 @@ export function Reader({
     // scroll — says nothing about where the paper is, and then this does.
     const focused = document.activeElement;
     if (focused instanceof HTMLElement && focused.dataset.page !== undefined) {
+      // Cleared rather than left holding the last sentence: a region still
+      // reading "Page 2 of 15" cannot announce a return to page 2, because
+      // setting it to what it already says is no mutation at all.
+      setAnnouncement("");
       return;
     }
     setAnnouncement(`Page ${currentPage + 1} of ${pageCount}`);
