@@ -464,10 +464,11 @@ export const setSettled = mutation({
       });
       // A settled question is not a question the scout may keep working on:
       // the subject fence is what stops this feature drifting into chat, and
-      // it has to hold after the fact as well as before it. Findings that
-      // came back earlier are superseded rather than deleted — the lab may
-      // well have settled it *because* of one, and an artifact that erases
-      // itself at the moment it was useful is an artifact nobody can audit.
+      // it has to hold after the fact as well as before it. Only in-flight
+      // runs are cancelled. Findings that already came back are left exactly
+      // as they are — the lab may well have settled it *because* of one, and
+      // an artifact that erases itself at the moment it was useful is an
+      // artifact nobody can audit.
       await cascadeForAction(ctx, action._id, "subject-settled", userId);
     } else {
       await ctx.db.patch(action._id, {
@@ -512,8 +513,14 @@ export const setSettled = mutation({
  * rather than the design (`docs/design/agent-delegation.md` §5.4), and the
  * change is `cascadeForAction` below — an in-flight run is cancelled with its
  * lease cleared, so anything still working fails closed rather than storing a
- * finding about a question that no longer exists, and returned findings are
- * marked superseded rather than deleted.
+ * finding about a question that no longer exists.
+ *
+ * Findings that already returned are not touched. `supersededAt` means one
+ * thing, "a newer run for the same subject returned", and a field that also
+ * meant "the subject went away" would be a field the reader has to disambiguate
+ * every time. What protects a withdrawn subject is the read path: `findings`
+ * re-resolves every citation on every read and blanks any item resting on
+ * something no longer shared.
  *
  * The delegation rows keep the deleted action's id. There is nothing left to
  * resolve it against, which is exactly what the surface renders as "question

@@ -1976,8 +1976,7 @@ export default defineSchema({
     .index("by_delegation", ["delegationId"])
     /** The render read: the newest non-superseded finding for one subject. */
     .index("by_annotation", ["annotationId"])
-    .index("by_action", ["actionId"])
-    .index("by_lab", ["labId"]),
+    .index("by_action", ["actionId"]),
 
   /**
    * One row per (finding, cited annotation) — the reverse lookup a withdrawal
