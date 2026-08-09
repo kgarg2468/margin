@@ -9,6 +9,7 @@ import type {
 } from "convex/server";
 import { useCallback, useMemo } from "react";
 import type { ToastInput } from "@/lib/toast-store";
+import { readableError } from "./errors";
 import { useToast } from "./toast";
 
 /**
@@ -24,8 +25,8 @@ import { useToast } from "./toast";
  * indistinguishable from the app losing their writing.
  *
  * So this helper's whole job is making the rollback *visible*. Two things,
- * neither of which Convex is in a position to decide: an error toast in the
- * caller's own words, and `onRolledBack` for the state that lives outside the
+ * neither of which Convex is in a position to decide: an error toast saying
+ * what went wrong, and `onRolledBack` for the state that lives outside the
  * query store — the draft to put back in the composer, the panel to reopen.
  * The optimistic value itself needs no restoring; it was never the caller's to
  * hold.
@@ -48,16 +49,30 @@ export async function runWithFeedback<T>(
 ): Promise<T | undefined> {
   try {
     return await run();
-  } catch {
+  } catch (caught) {
+    // Not every failure here came from the server. Convex does not catch a
+    // throwing `optimisticUpdate` — it surfaces on the mutation's promise and
+    // arrives in this same `catch`, where it would otherwise be erased and
+    // shown to the reader as if the backend had said no. So the real error is
+    // logged before anything is dressed up for display: this is the one place
+    // that still knows what actually happened.
+    console.error("Mutation failed:", caught);
+
     // Restore first, announce second. `onRolledBack` puts the draft back on
     // screen, and the toast should be read against a page that has already
     // finished rearranging itself rather than one still moving under it.
-    //
-    // The error is swallowed rather than reported through `readableError`:
-    // the copy here is the caller's, written for the specific thing that just
-    // failed to happen, and it is better than any sentence the backend has.
     opts.onRolledBack?.();
-    opts.toast({ message: opts.errorMessage, tone: "error" });
+
+    // `errorMessage` is the fallback, not the headline. When a mutation
+    // refuses on purpose it throws a `ConvexError` carrying copy written for
+    // the specific refusal — "Only the person who wrote a note can change
+    // it." — and that sentence tells the reader what to do next, which a
+    // generic "Couldn't save your note" never can. `readableError` prefers it
+    // and falls back to the caller's line for the failures nobody anticipated.
+    opts.toast({
+      message: readableError(caught, opts.errorMessage),
+      tone: "error",
+    });
     return undefined;
   }
 }
@@ -66,7 +81,10 @@ export function useFeedbackMutation<M extends FunctionReference<"mutation">>(
   mutation: M,
   opts: {
     optimisticUpdate?: OptimisticUpdate<FunctionArgs<M>>;
-    /** Human copy, in the caller's words: "Couldn't save your note". */
+    /**
+     * Human copy for a failure nobody planned for: "Couldn't save your note".
+     * A `ConvexError` thrown by the mutation itself outranks it.
+     */
     errorMessage: string;
     /** Restore drafts, reopen composers — the state Convex doesn't own. */
     onRolledBack?: () => void;
