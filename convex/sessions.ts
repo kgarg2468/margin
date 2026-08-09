@@ -52,7 +52,7 @@ const MAX_SCHEDULE_AHEAD_MS = 2 * 365 * 24 * 60 * 60 * 1000;
 const MAX_EARLY_START_MS = 24 * 60 * 60 * 1000;
 const MAX_TITLE_LENGTH = 200;
 /** Presenter notes are prep, not a manuscript — and they get read into one long-context synthesis call. */
-const MAX_NOTES_LENGTH = 20_000;
+export const MAX_NOTES_LENGTH = 20_000;
 /** A ceiling on the calendar, not a page. A lab meeting weekly for two years fits. */
 const MAX_SESSIONS = 100;
 /**
@@ -284,12 +284,32 @@ function refuse(session: Doc<"sessions">, attempted: string): never {
   );
 }
 
-function cleanTitle(input: string | undefined): string | undefined {
+/** Exported for `sessionTemplates.ts`, so a saved title is held to the rule the session will apply to it. */
+export function cleanTitle(input: string | undefined): string | undefined {
   if (input === undefined) {
     return undefined;
   }
   const title = input.trim().replace(/\s+/g, " ").slice(0, MAX_TITLE_LENGTH);
   return title.length > 0 ? title : undefined;
+}
+
+/**
+ * Which title a session ends up with when a template was applied: what the
+ * person typed, then the template's, then none — and a session with none is
+ * known by its paper, which is the common case and not a gap.
+ *
+ * Typed beats saved because the typing happened second and in front of the
+ * form that already showed what the template would do. A template that
+ * overrode it would be the one field on the page that ignores you.
+ *
+ * Pure and exported for the same reason `canApprove` is: it is a rule, it has
+ * three cases, and two of them are only reachable through a mutation.
+ */
+export function sessionTitleFrom(
+  typed: string | undefined,
+  templateTitle: string | undefined,
+): string | undefined {
+  return cleanTitle(typed) ?? cleanTitle(templateTitle);
 }
 
 /**
@@ -407,6 +427,18 @@ async function cancelPrepDigest(
  * Any member can schedule one — journal clubs are organised by whoever is
  * organising them, not only by the PI — and the presenter defaults to whoever
  * is doing the scheduling, which is the common case.
+ *
+ * `templateId` is the lab's own saved meeting shape (see
+ * `convex/sessionTemplates.ts`), and applying one is a copy, not a link: the
+ * agenda lands in this session's `presenterNotes` and stops being the
+ * template's business. The presenter edits it here afterwards like any other
+ * notes, and editing the template later does not reach back into meetings that
+ * have already been put on the calendar — which is the only behaviour that
+ * survives someone tidying up their templates in week nine.
+ *
+ * The seeding happens on the server rather than the client sending the text
+ * back, so a template is one id over the wire and the shape a session was
+ * given is the shape the lab actually saved.
  */
 export const createSession = mutation({
   args: {
@@ -415,6 +447,7 @@ export const createSession = mutation({
     scheduledAt: v.number(),
     presenterId: v.optional(v.id("users")),
     title: v.optional(v.string()),
+    templateId: v.optional(v.id("sessionTemplates")),
   },
   returns: v.id("sessions"),
   handler: async (ctx, args) => {
@@ -447,7 +480,18 @@ export const createSession = mutation({
       await requirePresenterMembership(ctx, args.labId, presenterId);
     }
 
-    const title = cleanTitle(args.title);
+    // A template id is a claim like the paper id above, and gets the same
+    // treatment: belonging to this lab is checked here, not assumed from the
+    // fact that the caller had the id.
+    let template: Doc<"sessionTemplates"> | null = null;
+    if (args.templateId !== undefined) {
+      template = await ctx.db.get(args.templateId);
+      if (template === null || template.labId !== args.labId) {
+        throw new ConvexError("That agenda template isn't this lab's.");
+      }
+    }
+
+    const title = sessionTitleFrom(args.title, template?.title);
     const sessionId = await ctx.db.insert("sessions", {
       labId: args.labId,
       paperId: args.paperId,
@@ -455,6 +499,9 @@ export const createSession = mutation({
       scheduledAt,
       presenterId,
       status: "scheduled",
+      ...(template !== null
+        ? { presenterNotes: template.presenterNotes }
+        : {}),
       createdBy: membership.userId,
     });
 

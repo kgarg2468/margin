@@ -1149,6 +1149,37 @@ export default defineSchema({
       filterFields: ["labId"],
     }),
 
+  /**
+   * A meeting shape the lab reuses: the agenda somebody would otherwise retype
+   * into every session, saved once under a name.
+   *
+   * Lab-scoped, and that is the whole difference between this and
+   * `savedFilters` above. A saved view is a working note about one member's
+   * week and nobody else can see it. A meeting shape is how the lab runs
+   * journal club — the rotating organiser putting next term on the calendar is
+   * usually not the person who worked it out, and a shape only its author can
+   * reach is a shape that gets retyped.
+   *
+   * `presenterNotes` is named for the field it seeds rather than for the
+   * feature. Applying a template writes it straight into a session's
+   * `presenterNotes` and nothing else ever reads it, so a second name for the
+   * same text would only invite the two to drift. It is deliberately *not*
+   * called an agenda in the schema: `briefs` below is already described as the
+   * meeting's agenda, and that one is generated from what the lab wrote in the
+   * margin. This is what a person types before anyone has read anything.
+   *
+   * No `updatedAt`, no version history: a template is stationery, and the
+   * sessions it produced keep their own copy of what it said at the time.
+   */
+  sessionTemplates: defineTable({
+    labId: v.id("labs"),
+    name: v.string(),
+    /** The session title this shape implies — "Methods week". Optional: most shapes are known by the paper. */
+    title: v.optional(v.string()),
+    presenterNotes: v.string(),
+    createdBy: v.id("users"),
+  }).index("by_lab", ["labId"]),
+
   /** A typed, anchored note on a passage — the atom of the product. `parentId` makes threads. */
   annotations: defineTable({
     labId: v.id("labs"),
