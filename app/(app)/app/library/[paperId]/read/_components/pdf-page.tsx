@@ -21,7 +21,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { unionOfRects } from "./draft-box";
 import { ruleOpacity, washOpacity } from "./mark-alpha";
 import { typeStyle } from "./ontology";
-import { pageKeyTarget } from "./page-navigation";
+import { PAGE_KEYS_HINT_ID, pageKeyTarget } from "./page-navigation";
 import styles from "./reader.module.css";
 import type {
   AnchorState,
@@ -701,6 +701,10 @@ export function PdfPage({
       tabIndex={tabStop ? 0 : -1}
       role="group"
       aria-label={`Page ${pageIndex + 1} of ${pageCount}`}
+      // Only on the page that carries the stop: somebody who tabs straight
+      // into the paper hears which keys move it. On the other thirty-six it
+      // would be thirty-six copies of the same sentence in the tree.
+      aria-describedby={tabStop ? PAGE_KEYS_HINT_ID : undefined}
       // A sheet of paper on the desk, not a rectangle in a void: a hair of
       // radius and a soft drop shadow instead of the old hard 1px ledge.
       className={`${styles.page} shrink-0 rounded-[3px] border border-rule bg-surface shadow-[var(--shadow-card)] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-accent`}

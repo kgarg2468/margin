@@ -30,7 +30,7 @@ import type { RailCard } from "./margin-rail";
 import { MarginRail } from "./margin-rail";
 import type { AnnotationType } from "./ontology";
 import { ANNOTATION_TYPES } from "./ontology";
-import { tabStopPage } from "./page-navigation";
+import { PAGE_KEYS_HINT_ID, tabStopPage } from "./page-navigation";
 import { PdfPage } from "./pdf-page";
 import type {
   AnnotationId,
@@ -1104,7 +1104,11 @@ export function Reader({
             <button
               type="button"
               aria-pressed={zoom === "fit-width"}
-              aria-label={`Fit the page to the column. Currently ${zoomLabel(zoom, { columnWidth, baseWidth: baseSize?.width ?? 0 })}.`}
+              // What it says, then what it does. The visible text is the
+              // current scale, and a name that buries it behind a sentence is
+              // a name somebody speaking to their computer cannot use to press
+              // the thing they are looking at.
+              aria-label={`${zoomLabel(zoom, { columnWidth, baseWidth: baseSize?.width ?? 0 })}. Fit the page to the column.`}
               // Nothing to fit to yet. The whole group waits on the page's own
               // width: pressing before it arrives sets a number against a size
               // nobody has read, and quietly costs the reader fit width for the
@@ -1162,8 +1166,15 @@ export function Reader({
               event.currentTarget.querySelector("input")?.blur();
             }}
           >
+            {/* The page you are on is in the label, because it is nowhere
+                else any more: it used to be text and it is now the input's
+                placeholder, which assistive tech does not reliably announce
+                and which disappears the moment somebody types. What is left on
+                screen is "of 31". */}
             <label htmlFor="reader-page-jump" className="sr-only">
-              Go to page
+              {pageCount > 0
+                ? `Go to page. On page ${currentPage + 1} of ${pageCount}.`
+                : "Go to page"}
             </label>
             <input
               id="reader-page-jump"
@@ -1268,7 +1279,7 @@ export function Reader({
           >
             {/* The paper is one tab stop, and a stop that moves is only an
                 affordance if you are told it moves. */}
-            <p className="sr-only">
+            <p id={PAGE_KEYS_HINT_ID} className="sr-only">
               Page Up and Page Down move between pages. Home and End go to the
               first and last. Hold Shift with the arrow keys to select a passage
               to annotate.

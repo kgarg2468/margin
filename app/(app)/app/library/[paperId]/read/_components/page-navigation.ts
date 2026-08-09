@@ -15,6 +15,16 @@
  */
 
 /**
+ * The paragraph that says all of the above out loud.
+ *
+ * Named here rather than written twice, because the two ends of the
+ * association are in different files: the reader renders the sentence, the page
+ * carrying the stop points at it. A stop that moves under keys nobody mentioned
+ * is not an affordance.
+ */
+export const PAGE_KEYS_HINT_ID = "reader-page-keys";
+
+/**
  * Which page carries the stop.
  *
  * Ordinarily the one being read. The clamp is for the case where it is not:
