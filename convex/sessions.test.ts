@@ -1,11 +1,14 @@
 import { ConvexError } from "convex/values";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Doc, Id } from "./_generated/dataModel";
+import type { MutationCtx } from "./_generated/server";
 import {
   FakeCtx,
   handlerOf,
   seedLab,
 } from "./delegations.fixtures";
+import { recordEvent } from "./lib/ledger";
+import type { LedgerEvent } from "./lib/ledger";
 import { reopenSession, restoreSession, startSession } from "./sessions";
 
 vi.mock("@convex-dev/auth/server", async (importOriginal) => ({
@@ -103,6 +106,21 @@ async function sessionRow(
 
 function eventTypes(ctx: FakeCtx): string[] {
   return ctx.db.all("events").map((event) => event.type);
+}
+
+/**
+ * The forward event, written the way the product writes one.
+ *
+ * Through `recordEvent` rather than `ctx.db.insert("events", …)`: the ledger
+ * has exactly one write path, `eslint.config.mjs` enforces that for every file
+ * under `convex/`, and a test that seeded the table by hand would be the one
+ * place in the repo where the append-only claim is made by something other
+ * than the module that owns it. `at` is stamped by the ledger, so the seeded
+ * row is a moment older than these assertions pretend — irrelevant here, where
+ * what is asserted is which rows exist and in what order.
+ */
+async function seedEvent(ctx: FakeCtx, event: LedgerEvent): Promise<void> {
+  await recordEvent(ctx as unknown as MutationCtx, event);
 }
 
 describe("reopenSession", () => {
@@ -234,13 +252,12 @@ describe("reopenSession", () => {
     });
     // The forward event as `endSession` would have written it. The undo adds a
     // second fact; it must not reach back for the first.
-    await ctx.db.insert("events", {
+    await seedEvent(ctx, {
       labId: seed.labId,
       type: "session.ended",
       actorId: seed.pi,
       paperId: seed.paperId,
       sessionId,
-      at: Date.now() - MINUTE,
     });
 
     await reopen(ctx, sessionId);
@@ -368,13 +385,12 @@ describe("restoreSession", () => {
       status: "cancelled",
       cancelledAt: Date.now() - MINUTE,
     });
-    await ctx.db.insert("events", {
+    await seedEvent(ctx, {
       labId: seed.labId,
       type: "session.cancelled",
       actorId: seed.pi,
       paperId: seed.paperId,
       sessionId,
-      at: Date.now() - MINUTE,
     });
 
     await restore(ctx, sessionId);
