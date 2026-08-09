@@ -1628,6 +1628,8 @@ export const approve = mutation({
     const stillShared = await stillSharedAmong(ctx, session.labId, citations);
     const snapshot = approvalSnapshot(citations, stillShared);
     const reapproved = session.synthesisApprovedAt !== undefined;
+    // Read before the patch, while `session` is still the copy that was there.
+    const unchanged = session.synthesis === text;
 
     const approvedAt = Date.now();
     await ctx.db.patch(args.sessionId, {
@@ -1656,7 +1658,16 @@ export const approve = mutation({
     // write-up was approved and not by whom, and the post names the person.
     // `approvedAt` travels with it so the send can refuse to post underneath a
     // newer approval that has landed in the meantime.
-    if (slackIsConfigured(await ctx.db.get(session.labId))) {
+    //
+    // Re-approving the same prose posts nothing. It is a real thing people do
+    // — open the write-up, read it again, press the button — and the channel
+    // would get a second "Revised write-up" whose body is character-for-
+    // character the first one. That is exactly the duplicate the transport
+    // above declines to risk on an ambiguous 502, and it would be worse coming
+    // from here, because here it is not a risk taken to recover a lost post:
+    // it is a post nobody wanted, sent on purpose. The approval is still
+    // recorded and the ledger still holds it; only the channel is spared.
+    if (!unchanged && slackIsConfigured(await ctx.db.get(session.labId))) {
       await ctx.scheduler.runAfter(0, internal.slack.deliverSynthesis, {
         sessionId: args.sessionId,
         approvedAt,

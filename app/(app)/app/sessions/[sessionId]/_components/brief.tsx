@@ -109,6 +109,7 @@ export function PresenterBrief({
   rows: readonly AnnotationView[];
 }) {
   const brief = useQuery(api.briefs.getForSession, { sessionId: session._id });
+  const slack = useQuery(api.slack.status, { labId: session.labId });
   const generate = useMutation(api.briefs.generate);
   const approve = useMutation(api.briefs.approve);
   const [error, setError] = useState<string | null>(null);
@@ -361,6 +362,18 @@ export function PresenterBrief({
           </span>
         )}
       </div>
+
+      {/*
+        Said where the button is, not on a settings page the presenter has no
+        reason to have opened. Marking a brief reviewed is what sends it to the
+        lab's Slack channel, and somebody about to publish should find that out
+        before they press, rather than from a colleague reading it in Slack.
+      */}
+      {slack?.connected === true && (
+        <p className="max-w-prose font-sans text-xs text-ink-faint">
+          Marking it reviewed also posts it to the lab&rsquo;s Slack channel.
+        </p>
+      )}
 
       {error !== null && (
         <p role="alert" aria-live="polite" className={`${errorClass} max-w-prose`}>
