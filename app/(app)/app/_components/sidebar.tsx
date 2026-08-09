@@ -1,13 +1,13 @@
 "use client";
 
 import { api } from "@/convex/_generated/api";
-import { eyebrowClass, selectClass, skeletonClass } from "@/lib/ui";
+import { eyebrowClass, skeletonClass } from "@/lib/ui";
 import { useAuthActions } from "@convex-dev/auth/react";
 import { useQuery } from "convex/react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import type { LabSummary } from "./lab-provider";
 import { useLabs } from "./lab-provider";
+import { Select } from "./select";
 
 /** The product, in two rooms: what the lab is reading, and when it meets. */
 const sections = [
@@ -42,20 +42,12 @@ export function Sidebar() {
             {currentLab.name}
           </span>
         ) : (
-          <select
+          <Select
             aria-label="Switch lab"
-            value={currentLab?._id ?? ""}
-            onChange={(event) =>
-              selectLab(event.target.value as LabSummary["_id"])
-            }
-            className={selectClass}
-          >
-            {labs.map((lab) => (
-              <option key={lab._id} value={lab._id}>
-                {lab.name}
-              </option>
-            ))}
-          </select>
+            value={currentLab?._id ?? null}
+            onValueChange={selectLab}
+            options={labs.map((lab) => ({ value: lab._id, label: lab.name }))}
+          />
         )}
       </div>
 
