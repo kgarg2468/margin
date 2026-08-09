@@ -91,6 +91,24 @@ export function emailIsConfigured(): boolean {
  *
  * A value that is not an absolute http(s) origin is treated as absent for the
  * same reason — `margin.example.edu` with no scheme is a relative path too.
+ *
+ * ## Why this rejects rather than normalizes
+ *
+ * `https://margin.example.edu?source=mail` and
+ * `https://admin:hunter2@margin.example.edu` both used to pass, and every link
+ * Margin sends is built by concatenation — `${site}/app?invite=…` — so the
+ * first becomes `…edu?source=mail/app?invite=…`, which is a path on a query
+ * string and resolves to nothing. Credentials in the authority are worse: they
+ * would be mailed to everyone the lab invites.
+ *
+ * The obvious fix is to normalize to `parsed.origin`, and that is the wrong
+ * one. Convex Auth builds its own base as `requireEnv("SITE_URL").replace(/\/$/,
+ * "")` and nothing here can change that, so normalizing would leave two bases
+ * that quietly disagree — `convex/invites.ts` states out loud that they agree,
+ * and the sign-in a link triggers has to land on the same origin the link came
+ * from. So this validates and refuses instead: anything with a path, a query,
+ * a fragment or credentials is treated as absent, which surfaces as "nothing
+ * was sent, and here is why" rather than as mail with a broken link in it.
  */
 export function siteUrl(): string | null {
   const configured = process.env.SITE_URL;
@@ -98,7 +116,25 @@ export function siteUrl(): string | null {
     return null;
   }
   const trimmed = configured.trim().replace(/\/+$/, "");
-  return /^https?:\/\/[^/]/.test(trimmed) ? trimmed : null;
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return null;
+  }
+  if (parsed.hostname.length === 0) {
+    return null;
+  }
+  if (parsed.username.length > 0 || parsed.password.length > 0) {
+    return null;
+  }
+  if (parsed.pathname !== "/" || parsed.search !== "" || parsed.hash !== "") {
+    return null;
+  }
+  return trimmed;
 }
 
 /** Text is escaped into HTML in three places; one function so it cannot be forgotten in the fourth. */
@@ -462,6 +498,18 @@ const SignInLink: EmailConfig<DataModel> = {
   from: emailFrom(),
   maxAge: SIGN_IN_LINK_TTL_S,
   async sendVerificationRequest({ identifier: email, url }) {
+    // The same gate the invitation and the notification already pass through,
+    // and the one path that was skipping it. `url` is built by Convex Auth
+    // from its own base — `requireEnv("SITE_URL")` — which is satisfied by any
+    // non-empty string, so a `SITE_URL` with no scheme produces a real message
+    // whose only link is relative: nowhere at all from an inbox, and nothing
+    // in the log to say so. Refuse out loud instead; the sign-in page shows
+    // the error and the person can still use a password.
+    if (siteUrl() === null) {
+      throw new ConvexError(
+        "This deployment's SITE_URL isn't a usable origin, so a sign-in link would point nowhere. Nothing was sent.",
+      );
+    }
     await sendEmail({ to: email, ...composeSignInEmail(url) });
   },
 };

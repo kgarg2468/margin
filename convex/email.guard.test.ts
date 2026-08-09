@@ -331,6 +331,27 @@ describe("siteUrl", () => {
     expect(withSiteUrl("/app", siteUrl)).toBeNull();
   });
 
+  it("refuses anything that is not a bare origin", () => {
+    // Every link is built by concatenation — `${site}/app?invite=…` — so a
+    // query on the base becomes a path on a query string, which is nowhere.
+    expect(
+      withSiteUrl("https://margin.example.edu?source=mail", siteUrl),
+    ).toBeNull();
+    expect(withSiteUrl("https://margin.example.edu#top", siteUrl)).toBeNull();
+    expect(
+      withSiteUrl("https://margin.example.edu/margin", siteUrl),
+    ).toBeNull();
+    // And credentials in the authority would be mailed to every invitee.
+    expect(
+      withSiteUrl("https://admin:hunter2@margin.example.edu", siteUrl),
+    ).toBeNull();
+    // Absolute, but not a scheme a browser will follow from an inbox.
+    expect(withSiteUrl("ftp://margin.example.edu", siteUrl)).toBeNull();
+    expect(
+      withSiteUrl("javascript:alert(document.domain)", siteUrl),
+    ).toBeNull();
+  });
+
   it("takes an absolute origin and drops its trailing slashes", () => {
     expect(withSiteUrl("https://margin.example.edu", siteUrl)).toBe(
       "https://margin.example.edu",

@@ -27,7 +27,10 @@ const MESSAGE = {
 };
 
 /** A refusal with exactly the headers under test and nothing else. */
-function refusal(status: number, headers: Record<string, string> = {}): Response {
+function refusal(
+  status: number,
+  headers: Record<string, string> = {},
+): Response {
   return new Response("nope", { status, headers });
 }
 
@@ -86,7 +89,9 @@ describe("retryAfterMs", () => {
       ),
     ).toBe(1_250);
     // Nothing usable anywhere: doubling, not a made-up small number.
-    expect(retryAfterMs(refusal(429, { "retry-after": "soon" }), 1)).toBe(1_000);
+    expect(retryAfterMs(refusal(429, { "retry-after": "soon" }), 1)).toBe(
+      1_000,
+    );
   });
 
   it("refuses a wait longer than it is willing to serve", () => {

@@ -3,7 +3,13 @@ import { api } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
 import { action, mutation, query } from "./_generated/server";
-import { emailIsConfigured, renderEmail, sendEmail, siteUrl } from "./auth";
+import {
+  emailIsConfigured,
+  pause,
+  renderEmail,
+  sendEmail,
+  siteUrl,
+} from "./auth";
 import { getMembership, requirePi, requireUserId } from "./lib/authz";
 import { recordEvent } from "./lib/ledger";
 
@@ -442,7 +448,7 @@ export const inviteByEmail = action({
     const results: PromiseSettledResult<void>[] = [];
     for (let start = 0; start < recipients.length; start += SEND_BURST) {
       if (start > 0) {
-        await new Promise((resolve) => setTimeout(resolve, SEND_BURST_PAUSE_MS));
+        await pause(SEND_BURST_PAUSE_MS);
       }
       results.push(
         ...(await Promise.allSettled(
