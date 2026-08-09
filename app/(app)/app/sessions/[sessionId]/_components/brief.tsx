@@ -4,6 +4,7 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { GOLD_PAIRS } from "@/lib/digest/engine";
 import { ownPrivateNotes, tallyContributors } from "@/lib/brief/prep";
+import { cleanQuote } from "@/lib/quotes";
 import { formatDate, relativeWhen } from "@/lib/sessions-ui";
 import {
   errorClass,
@@ -297,7 +298,7 @@ export function PresenterBrief({
                     ) : (
                       <blockquote className="max-w-prose font-serif text-[15px] italic leading-snug text-ink-muted">
                         <span className="line-clamp-2">
-                          {note.anchor.quote}
+                          {cleanQuote(note.anchor.quote, 160)}
                         </span>
                       </blockquote>
                     )}

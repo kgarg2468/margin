@@ -1,6 +1,7 @@
 "use client";
 
 import type { Id } from "@/convex/_generated/dataModel";
+import { cleanQuote } from "@/lib/quotes";
 import { eyebrowClass } from "@/lib/ui";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import type { AnnotationType } from "../../../library/[paperId]/read/_components/ontology";
@@ -242,7 +243,7 @@ function PassageCard({ passage }: { passage: PassageGroup }) {
       </span>
 
       <blockquote className="font-serif text-[15px] italic leading-snug text-ink">
-        <span className="line-clamp-4">{passage.quote}</span>
+        <span className="line-clamp-4">{cleanQuote(passage.quote, 280)}</span>
       </blockquote>
 
       <ul className="flex flex-wrap gap-1.5">
@@ -407,7 +408,7 @@ function FloorNote({
       </p>
 
       <blockquote className="mt-1 font-serif text-[13px] italic leading-snug text-ink-faint">
-        <span className="line-clamp-2">{note.anchor.quote}</span>
+        <span className="line-clamp-2">{cleanQuote(note.anchor.quote, 160)}</span>
       </blockquote>
 
       {replies.length > 0 && (
