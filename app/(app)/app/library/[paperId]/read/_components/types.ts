@@ -86,4 +86,14 @@ export type PageResolution = {
   points: Map<AnnotationId, PassagePoint>;
   states: Map<AnnotationId, AnchorState>;
   orphaned: AnnotationId[];
+  /**
+   * The scale the page was drawn at when this was measured.
+   *
+   * `positions` and `points` are pixels, and pixels expire. A page outside the
+   * render window has no text layer to re-measure, so after a zoom it would go
+   * on reporting where its passages were at the old size — indefinitely, if the
+   * reader never scrolls back to it. `states` and `orphaned` are about text
+   * rather than pixels and do not expire.
+   */
+  scale: number;
 };

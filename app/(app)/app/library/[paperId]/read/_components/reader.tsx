@@ -744,13 +744,21 @@ export function Reader({
     for (const annotation of visible) {
       const page = pageOf(annotation);
       const resolution = resolutions.get(page);
+      // Where a page said its passages were is only true of the size it said
+      // it at. A page outside the render window has no text layer left to
+      // re-measure, so after a zoom it keeps reporting last size's pixels —
+      // for good, if the reader never scrolls back to it, which is how a card
+      // for page 30 ends up sorted in among page 15's. What the page had to
+      // say about the *text* — which notes it could not place, and how it
+      // found the ones it could — is not a measurement and does not expire.
+      const measured = resolution?.scale === scale ? resolution : undefined;
       const element = pageElements.current.get(page);
       const entry = {
         annotation,
         replies: repliesByParent.get(annotation._id) ?? [],
         top: 0,
         state: resolution?.states.get(annotation._id),
-        passage: resolution?.points.get(annotation._id),
+        passage: measured?.points.get(annotation._id),
         // Only when it is somewhere other than where it was written: the rail
         // says so beside the card, and has nothing to say in the ordinary case.
         ...(page === annotation.anchor.pageIndex
@@ -767,11 +775,12 @@ export function Reader({
         continue;
       }
 
-      const known = resolution?.positions.get(annotation._id);
+      const known = measured?.positions.get(annotation._id);
       if (known !== undefined) {
         anchored.push({ ...entry, top: known });
       } else if (element !== undefined) {
-        // The page has not been rendered yet, so the passage has no rectangle.
+        // The page has not been rendered at this size, so the passage has no
+        // rectangle worth believing.
         // Estimate down the page from the anchor's offset — a rough guess that
         // stops the rail piling every unrendered note at the same y, and that
         // is replaced by the real position the moment the page paints.
@@ -788,7 +797,7 @@ export function Reader({
       }
     }
     return { cards: anchored, unanchored: lost };
-  }, [visible, repliesByParent, resolutions, pageCount, pageHeight, pageOf]);
+  }, [visible, repliesByParent, resolutions, pageCount, pageHeight, scale, pageOf]);
 
   const focusPassage = useCallback(
     (annotation: AnnotationView) => {

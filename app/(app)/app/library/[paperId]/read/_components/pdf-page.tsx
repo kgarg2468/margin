@@ -197,6 +197,8 @@ export function PdfPage({
   const hoveredRef = useRef<AnnotationId | null>(null);
 
   const [layer, setLayer] = useState<TextLayerIndex | null>(null);
+  /** The scale the text layer now on screen was rendered at. */
+  const layerScale = useRef(scale);
   const [marks, setMarks] = useState<Mark[]>([]);
   const [failed, setFailed] = useState(false);
   /**
@@ -288,6 +290,12 @@ export function PdfPage({
         }
       }
       setExtractedLength(normalizePdfText(extracted).length);
+      // Written where the layer is built, and read by the two effects that
+      // report pixels measured off it. Neither of them can depend on `scale`:
+      // a scale change tears this layer down before either could re-measure,
+      // so an effect that re-ran on it would be measuring spans that are no
+      // longer in the document.
+      layerScale.current = scale;
       setLayer(indexTextLayer(container));
     };
 
@@ -442,7 +450,13 @@ export function PdfPage({
     }
 
     setMarks(placed);
-    onResolved(pageIndex, { positions, points, states, orphaned });
+    onResolved(pageIndex, {
+      positions,
+      points,
+      states,
+      orphaned,
+      scale: layerScale.current,
+    });
   }, [layer, extractedLength, annotations, recovered, pageIndex, onResolved]);
 
   // --- the passage being written about ------------------------------------
