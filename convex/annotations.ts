@@ -6,7 +6,11 @@ import { internalMutation, mutation, query } from "./_generated/server";
 import { recordVersion, sweepVersions } from "./annotationVersions";
 import { getMembership, requireMembership, requireUserId } from "./lib/authz";
 import { recordEvent } from "./lib/ledger";
-import { clearNotificationsFor, raiseNotification } from "./notifications";
+import {
+  clearNotificationsFor,
+  EMAIL_STAGGER_MS,
+  raiseNotification,
+} from "./notifications";
 import {
   anchor,
   annotationType,
@@ -434,19 +438,31 @@ async function resolveMentions(
  * shared again genuinely notifies again, and says so in the ledger. That is
  * the right way round: the alternative is a note somebody un-shared by mistake
  * that can never reach the person it was written to.
+ *
+ * Takes the send slot to start from and answers the next free one, so a caller
+ * that announces several notes in a row — or that follows the mentions with a
+ * reply notification — keeps one paced queue instead of restarting the clock
+ * and stacking sends back on top of each other.
  */
 async function announceMentions(
   ctx: MutationCtx,
   annotation: Doc<"annotations">,
-): Promise<void> {
+  startSlot = 0,
+): Promise<number> {
   if (
     annotation.visibility !== "lab" ||
     annotation.deletedAt !== undefined ||
     annotation.mentions === undefined
   ) {
-    return;
+    return startSlot;
   }
 
+  // Staggered, not fired at once. Every mention here becomes a scheduled
+  // action and every action is a POST to Resend, whose limit is ten a second
+  // — so a note naming ten people used to arrive as ten simultaneous requests
+  // and provoke the very rate limit `sendEmail` then had to wait out. Spacing
+  // them by index costs a second and a half on mail nobody reads for minutes.
+  let slot = startSlot;
   for (const subjectUserId of annotation.mentions) {
     const raised = await raiseNotification(ctx, {
       recipientId: subjectUserId,
@@ -455,7 +471,9 @@ async function announceMentions(
       annotationId: annotation._id,
       paperId: annotation.paperId,
       actorId: annotation.memberId,
+      emailDelayMs: slot * EMAIL_STAGGER_MS,
     });
+    slot += 1;
     if (!raised) {
       continue;
     }
@@ -469,6 +487,7 @@ async function announceMentions(
       subjectUserId,
     });
   }
+  return slot;
 }
 
 /** The caller's own annotation, or a refusal. Authorship is the only edit right. */
@@ -694,9 +713,10 @@ export const reply = mutation({
     // is the mention: it says this reply is addressed to them in particular,
     // where "somebody replied" only says it landed under their note.
     const written = await ctx.db.get(annotationId);
-    if (written !== null) {
-      await announceMentions(ctx, written);
-    }
+    // The reply notification takes the slot after the mentions rather than
+    // landing on top of them: a reply that also names ten people is eleven
+    // sends, and eleven at once is one more than Resend's limit per second.
+    const slot = written === null ? 0 : await announceMentions(ctx, written);
     await raiseNotification(ctx, {
       recipientId: parent.memberId,
       labId: parent.labId,
@@ -704,6 +724,7 @@ export const reply = mutation({
       annotationId,
       paperId: parent.paperId,
       actorId: membership.userId,
+      emailDelayMs: slot * EMAIL_STAGGER_MS,
     });
 
     return annotationId;
@@ -1422,10 +1443,13 @@ export const setVisibility = mutation({
     // while it was private; everybody named is told now, once, whether the
     // note was shared today or after three rounds of second thoughts.
     if (args.visibility === "lab") {
+      // One paced queue across the whole flip, not one per note: sharing a
+      // thread releases every note's mentions in the same transaction.
+      let slot = 0;
       for (const id of [annotation._id, ...restored]) {
         const row = await ctx.db.get(id);
         if (row !== null) {
-          await announceMentions(ctx, row);
+          slot = await announceMentions(ctx, row, slot);
         }
       }
     }

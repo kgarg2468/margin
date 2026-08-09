@@ -81,7 +81,31 @@ export type NotificationRequest = {
   annotationId: Id<"annotations">;
   paperId: Id<"papers">;
   actorId: Id<"users">;
+  /**
+   * How long to hold this one message before its send is attempted.
+   *
+   * A fan-out's caller knows something this function cannot: how many other
+   * sends it is about to schedule in the same breath. See `EMAIL_STAGGER_MS`.
+   */
+  emailDelayMs?: number;
 };
+
+/**
+ * The gap between one note's outgoing messages.
+ *
+ * A mutation that mentions ten people schedules ten actions, and `runAfter(0)`
+ * means the scheduler starts all of them at once. Each is a POST to Resend,
+ * which rate-limits at ten requests a second per team — so a note naming ten
+ * people plus a reply to its author is eleven requests in one instant, and the
+ * eleventh is a `429` every time. `sendEmail` now waits that out and re-asks,
+ * but a retry is the apology, not the fix: the fix is not to provoke it.
+ *
+ * 150 ms puts a full fan-out at under seven requests a second and finishes the
+ * whole thing in a second and a half — which is nothing at all against mail
+ * that is read minutes later, and is the same bargain `SEND_BURST_PAUSE_MS`
+ * strikes for invitations.
+ */
+export const EMAIL_STAGGER_MS = 150;
 
 /**
  * Tell one person about one note, at most once.
@@ -97,9 +121,13 @@ export type NotificationRequest = {
  *
  * The email is *scheduled*, not sent. A mutation cannot fetch, and inlining a
  * network call into the transaction that writes the annotation would make
- * saving a note as slow and as failable as Resend is. `runAfter(0)` hands it
- * to the scheduler, which runs it after this transaction commits — so mail is
+ * saving a note as slow and as failable as Resend is. `runAfter` hands it to
+ * the scheduler, which runs it after this transaction commits — so mail is
  * never sent for a note that then failed to save.
+ *
+ * `emailDelayMs` is how a fan-out paces itself: the caller staggers what it
+ * schedules so a note naming ten people does not become ten simultaneous POSTs
+ * to a ten-per-second rate limit.
  */
 export async function raiseNotification(
   ctx: MutationCtx,
@@ -158,9 +186,11 @@ export async function raiseNotification(
   // job that would only throw is a failed function in the log every time
   // anybody is mentioned.
   if (emailIsConfigured()) {
-    await ctx.scheduler.runAfter(0, internal.notifications.deliverEmail, {
-      notificationId,
-    });
+    await ctx.scheduler.runAfter(
+      Math.max(request.emailDelayMs ?? 0, 0),
+      internal.notifications.deliverEmail,
+      { notificationId },
+    );
   }
   return true;
 }
