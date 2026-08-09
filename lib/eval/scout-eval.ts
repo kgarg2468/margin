@@ -162,8 +162,33 @@ export type Population = {
   /** Of those, the ones with at least one surviving label. */
   questionsScored: number;
   questionsWithoutLabels: number;
+  /**
+   * Questions that moved between the selection read and the retrieval read —
+   * reopened, withdrawn, or left with no surviving label. Their own field
+   * rather than folded into `questionsWithoutLabels`, because "nobody cited
+   * anything while settling this" and "this stopped being a settled question
+   * while we were looking at it" are different facts about a corpus.
+   */
+  questionsUnreadable: number;
+  /**
+   * Scoreable questions this run did not get to, because `limit` cut the list.
+   *
+   * Disclosed but *not* treated as truncation: every question that was scored
+   * was scored correctly, so a verdict off a capped list is still a verdict —
+   * unlike a capped scan, which can hide labels and make the scores wrong.
+   */
+  questionsBeyondLimit: number;
   /** Labels discarded because the note is no longer lab-visible. */
   labelsDroppedNotLabVisible: number;
+  /**
+   * Bounded reads that came back full, in the reader's words.
+   *
+   * A `.take(n)` that returns exactly `n` has almost certainly left rows
+   * behind, and the rows it left behind may be the labels. Silence here would
+   * be the worst kind of wrong number: one that looks like a measurement.
+   * Any entry forces the verdict to abstain.
+   */
+  truncated: string[];
 };
 
 export type ScoutEvalReport = {
@@ -327,8 +352,20 @@ export function aggregate(questions: readonly QuestionScore[]): Aggregate {
  */
 export function verdictOf(
   totals: Aggregate,
-  minimum: number = MIN_QUESTIONS_FOR_VERDICT,
+  options: {
+    /** Bounded reads that came back full. Any of them and there is no verdict. */
+    truncated?: readonly string[];
+    minimum?: number;
+  } = {},
 ): string {
+  const truncated = options.truncated ?? [];
+  const minimum = options.minimum ?? MIN_QUESTIONS_FOR_VERDICT;
+  if (truncated.length > 0) {
+    // A partial scan can lose labels, and a lost label is a miss neither side
+    // committed. Whatever the means say, they are not measurements of this
+    // corpus — they are measurements of the part of it that fit.
+    return `No verdict: this run did not see the whole corpus (${truncated.join("; ")}). Scores computed off a partial scan can be wrong in both directions, so no comparison is offered.`;
+  }
   if (totals.questionsScored === 0) {
     return "No verdict: no settled question in this corpus carries a citation a human made while settling it, so there is nothing to score. This is a statement about the data, not about the scout.";
   }
@@ -379,8 +416,15 @@ export function formatScoutEvalReport(report: ScoutEvalReport): string {
   lines.push("");
   lines.push(`## Corpus`);
   lines.push(
-    `labs ${report.population.labsScanned} · settled questions ${report.population.questionsSettled} · scoreable ${report.population.questionsScored} · unlabelled ${report.population.questionsWithoutLabels} · labels dropped (no longer lab-visible) ${report.population.labelsDroppedNotLabVisible}`,
+    `labs ${report.population.labsScanned} · settled questions ${report.population.questionsSettled} · scoreable ${report.population.questionsScored} · unlabelled ${report.population.questionsWithoutLabels} · moved under the run ${report.population.questionsUnreadable} · beyond this run's limit ${report.population.questionsBeyondLimit} · labels dropped (no longer lab-visible) ${report.population.labelsDroppedNotLabVisible}`,
   );
+  if (report.population.truncated.length === 0) {
+    lines.push("every bounded read came back short of its cap: nothing was hidden by truncation");
+  } else {
+    for (const cap of report.population.truncated) {
+      lines.push(`! truncated: ${cap}`);
+    }
+  }
   lines.push("");
   lines.push(`## Per question`);
   if (report.questions.length === 0) {
@@ -401,6 +445,19 @@ export function formatScoutEvalReport(report: ScoutEvalReport): string {
     );
   }
   lines.push("");
+  // Below the minimum the means are not withheld out of modesty. A line
+  // reading "recall@6 0.0%" is quotable, and it will be quoted without the
+  // sentence above it that says how many questions produced it.
+  if (report.aggregate.questionsScored < MIN_QUESTIONS_FOR_VERDICT) {
+    lines.push(`## Aggregate — withheld`);
+    lines.push(
+      `${report.aggregate.questionsScored} scoreable question${
+        report.aggregate.questionsScored === 1 ? "" : "s"
+      }, fewer than the ${MIN_QUESTIONS_FOR_VERDICT} this gate needs. No aggregate is printed, because a mean over this many questions is a number somebody would quote. The per-question rows above are real.`,
+    );
+    return lines.join("\n");
+  }
+
   lines.push(`## Aggregate (macro, one question one vote)`);
   for (const side of [report.aggregate.scout, report.aggregate.baseline]) {
     lines.push(

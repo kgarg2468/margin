@@ -175,6 +175,19 @@ describe("verdictOf", () => {
     expect(verdict).toMatch(/not a launch-gate result/);
   });
 
+  it("abstains outright when a bounded read came back full", () => {
+    // A partial scan can lose labels, and a lost label is a miss neither side
+    // committed. Ten clean-looking wins do not survive it.
+    const rows = Array.from({ length: MIN_QUESTIONS_FOR_VERDICT }, (_, i) =>
+      question(`q${i}`, ["a"], ["a"], ["x"]),
+    );
+    const verdict = verdictOf(totalsFor(rows), {
+      truncated: ["outcomes in lab L hit the 500-row read cap"],
+    });
+    expect(verdict).toMatch(/^No verdict/);
+    expect(verdict).toContain("500-row read cap");
+  });
+
   it("says ahead, behind, and level in words a gate can act on", () => {
     const ahead = Array.from({ length: MIN_QUESTIONS_FOR_VERDICT }, (_, i) =>
       question(`q${i}`, ["a"], ["a"], ["x"]),
@@ -204,7 +217,10 @@ describe("formatScoutEvalReport", () => {
       questionsSettled: 2,
       questionsScored: 1,
       questionsWithoutLabels: 1,
+      questionsUnreadable: 1,
+      questionsBeyondLimit: 4,
       labelsDroppedNotLabVisible: 3,
+      truncated: [],
     },
     questions: [question("q1", ["a"], ["a"], ["x"])],
     aggregate: aggregate([question("q1", ["a"], ["a"], ["x"])]),
@@ -230,7 +246,42 @@ describe("formatScoutEvalReport", () => {
     const text = formatScoutEvalReport(report);
     expect(text).toContain("settled questions 2");
     expect(text).toContain("unlabelled 1");
+    expect(text).toContain("moved under the run 1");
+    expect(text).toContain("beyond this run's limit 4");
     expect(text).toContain("labels dropped (no longer lab-visible) 3");
+    expect(text).toContain("nothing was hidden by truncation");
+  });
+
+  it("prints every cap it hit, where the corpus counts are", () => {
+    const text = formatScoutEvalReport({
+      ...report,
+      population: { ...report.population, truncated: ["lab scan hit 25"] },
+    });
+    expect(text).toContain("! truncated: lab scan hit 25");
+    expect(text.indexOf("! truncated")).toBeLessThan(
+      text.indexOf("## Per question"),
+    );
+  });
+
+  it("withholds the aggregate under the minimum rather than printing a quotable zero", () => {
+    const text = formatScoutEvalReport(report);
+    // One scoreable question. "recall@6 0.0%" is a sentence somebody would
+    // paste into a decision; the count that produced it is not.
+    expect(text).toContain("## Aggregate — withheld");
+    expect(text).not.toMatch(/questions with any hit/);
+  });
+
+  it("prints the aggregate once there are enough questions to mean something", () => {
+    const rows = Array.from({ length: MIN_QUESTIONS_FOR_VERDICT }, (_, i) =>
+      question(`q${i}`, ["a"], ["a"], ["x"]),
+    );
+    const text = formatScoutEvalReport({
+      ...report,
+      questions: rows,
+      aggregate: aggregate(rows),
+    });
+    expect(text).toContain("## Aggregate (macro, one question one vote)");
+    expect(text).toContain("questions with any hit");
   });
 
   it("says so when there is nothing to print", () => {
