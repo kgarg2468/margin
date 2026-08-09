@@ -59,6 +59,7 @@ export function Popover({
   onOpenChange,
   anchor,
   initialFocus,
+  instant,
 }: {
   /** Omit for a controlled popover with an `anchor`. */
   trigger?: ReactNode;
@@ -92,15 +93,28 @@ export function Popover({
   anchor?: ComponentProps<typeof Base.Positioner>["anchor"];
   /** `false` leaves focus where it is, for a sheet whose own field autofocuses. */
   initialFocus?: ComponentProps<typeof Base.Popup>["initialFocus"];
+  /**
+   * Skip the entrance, for a controlled sheet whose caller knows it was
+   * summoned from the keyboard.
+   *
+   * A popover with a trigger settles this by itself, from the event Base UI
+   * hands it when it opens. A controlled one mounted with `open` already
+   * `true` is never opened as far as Base UI is concerned — there is no event,
+   * the callback below never fires with `true`, and the sheet would play
+   * `pop-in` after a keystroke forever. So the one shape that cannot answer
+   * the question gets to be told.
+   */
+  instant?: boolean;
 }) {
-  const [instant, setInstant] = useState(false);
+  const [openedByKey, setOpenedByKey] = useState(false);
+  const withoutEntrance = instant ?? openedByKey;
 
   return (
     <Base.Root
       {...(open === undefined ? {} : { open })}
       onOpenChange={(next, details) => {
         if (next) {
-          setInstant(openedFromKeyboard(details.event));
+          setOpenedByKey(openedFromKeyboard(details.event));
         }
         onOpenChange?.(next, details);
       }}
@@ -132,7 +146,7 @@ export function Popover({
               // frames fades rather than snapping.
               "transition-opacity duration-[var(--dur-exit)] ease-out " +
               "data-[ending-style]:animate-none data-[ending-style]:opacity-0 " +
-              (instant ? "" : "pop-in ") +
+              (withoutEntrance ? "" : "pop-in ") +
               (className ?? "")
             }
           >

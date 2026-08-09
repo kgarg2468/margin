@@ -10,6 +10,7 @@ import {
   resolveAnchor,
 } from "@/lib/anchoring";
 import { loadPdfjs, normalizePdfText } from "@/lib/pdf/extract";
+import { openedFromKeyboard } from "@/lib/ui";
 import type {
   PDFDocumentProxy,
   PDFPageProxy,
@@ -553,6 +554,9 @@ export function PdfPage({
     const selectionBox = range.getBoundingClientRect();
     return {
       anchor,
+      // The default, overridden by whichever gesture is asking. A selection is
+      // a selection; how it was made is the caller's news, not the range's.
+      fromKeyboard: false,
       top:
         owner.wrapper.offsetTop +
         Math.min(
@@ -566,13 +570,16 @@ export function PdfPage({
     };
   }, []);
 
-  const captureSelection = useCallback(() => {
-    const draft = draftFromSelection();
-    if (draft !== null) {
-      onDraft(draft);
-      setPending(null);
-    }
-  }, [draftFromSelection, onDraft]);
+  const captureSelection = useCallback(
+    (fromKeyboard: boolean) => {
+      const draft = draftFromSelection();
+      if (draft !== null) {
+        onDraft({ ...draft, fromKeyboard });
+        setPending(null);
+      }
+    },
+    [draftFromSelection, onDraft],
+  );
 
   // The keyboard path. Shift-arrow through the text layer moves the selection
   // without any pointer event, and caret browsing makes that the way a
@@ -684,7 +691,7 @@ export function PdfPage({
       // radius and a soft drop shadow instead of the old hard 1px ledge.
       className={`${styles.page} shrink-0 rounded-[3px] border border-rule bg-surface shadow-[var(--shadow-card)] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-accent`}
       style={pageStyle}
-      onMouseUp={captureSelection}
+      onMouseUp={() => captureSelection(false)}
       onKeyDown={(event: KeyboardEvent<HTMLDivElement>) => {
         // Held down, and these keys are not navigation any more: Shift+End
         // extends the selection to the end of the line, which is the gesture
@@ -711,7 +718,7 @@ export function PdfPage({
       onKeyUp={(event: KeyboardEvent<HTMLDivElement>) => {
         // Shift-arrow selection never fires a mouseup.
         if (event.shiftKey) {
-          captureSelection();
+          captureSelection(true);
         }
       }}
       onMouseMove={handleMove}
@@ -821,8 +828,11 @@ export function PdfPage({
           data-annotate=""
           // Losing the selection to the button's own focus would defeat it.
           onMouseDown={(event) => event.preventDefault()}
-          onClick={() => {
-            onDraft(pending);
+          onClick={(event) => {
+            onDraft({
+              ...pending,
+              fromKeyboard: openedFromKeyboard(event.nativeEvent),
+            });
             setPending(null);
           }}
           style={{

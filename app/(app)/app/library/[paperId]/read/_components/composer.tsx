@@ -231,6 +231,9 @@ export function Composer({
       // Base UI would take focus to the sheet; the field below asks for it
       // first, and a reader who selected a passage wants the cursor in the box.
       initialFocus={false}
+      // A pointer takes time to arrive and the entrance covers that travel; a
+      // shift-arrow does not, and neither does Enter on "Annotate selection".
+      instant={draft.fromKeyboard}
       onOpenChange={dismissal}
       className="w-80 max-w-[calc(100vw-3rem)]"
     >

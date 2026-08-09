@@ -21,6 +21,17 @@ export type Draft = {
   anchor: TextAnchor;
   top: number;
   left: number;
+  /**
+   * The passage was chosen, or the offer to annotate it accepted, from the
+   * keyboard.
+   *
+   * Carried this far because the composer is the one sheet in the app that is
+   * mounted already open: Base UI reports the event that opens a popover, and
+   * a popover nobody opened has no event to report. Without this the motion
+   * budget's "keyboard-triggered surfaces render instantly" has a hole at the
+   * exact surface the reader's keyboard path leads to.
+   */
+  fromKeyboard: boolean;
 };
 
 /**
