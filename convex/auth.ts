@@ -51,6 +51,29 @@ export function emailIsConfigured(): boolean {
   return typeof key === "string" && key.length > 0;
 }
 
+/**
+ * Whether this deployment holds a Google OAuth client.
+ *
+ * Both halves, and both non-empty. The emptiness is the part worth spelling
+ * out: `npx convex env set AUTH_GOOGLE_ID ""` is how people un-set a variable
+ * they are not ready to fill in, and a dashboard field saved blank reads the
+ * same way. An existence check passes on both, so the provider registers with
+ * an empty client id and the reader is handed Google's own `invalid_client`
+ * page — the deep-inside-the-handshake failure the block comment at the top of
+ * this file promises does not happen here. Same test the Resend key gets, for
+ * the same reason: a key that is present but blank is not a key.
+ */
+export function googleIsConfigured(): boolean {
+  const id = process.env.AUTH_GOOGLE_ID;
+  const secret = process.env.AUTH_GOOGLE_SECRET;
+  return (
+    typeof id === "string" &&
+    id.length > 0 &&
+    typeof secret === "string" &&
+    secret.length > 0
+  );
+}
+
 /** Text is escaped into HTML in three places; one function so it cannot be forgotten in the fourth. */
 function escapeHtml(value: string): string {
   return value
@@ -260,10 +283,7 @@ const providers: AuthProviderConfig[] = [
   }),
 ];
 
-if (
-  process.env.AUTH_GOOGLE_ID !== undefined &&
-  process.env.AUTH_GOOGLE_SECRET !== undefined
-) {
+if (googleIsConfigured()) {
   providers.push(GoogleProvider);
 }
 
