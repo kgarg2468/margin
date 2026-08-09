@@ -266,37 +266,69 @@ async function activeCount(
         q.eq("labId", labId).eq("status", status),
       )
       .take(STALE_SCAN_LIMIT);
-    total += rows.filter(
-      (row) => row.status !== "running" || !leaseExpired(row, now),
-    ).length;
+    total += rows.filter((row) => !abandoned(row, now)).length;
   }
   return total;
 }
 
 /**
+ * Has this row stopped being a run and started being litter?
+ *
+ * Two ways for that to happen, and the queued one is the easier to miss.
+ * `running` past its lease is a scout that started and did not come back.
+ * `queued` past the same span is a scout that never started at all —
+ * `runForBrief` is a scheduled action, Convex runs those at most once, and a
+ * failure before `claim` leaves a row nothing will ever pick up. Counted as
+ * occupancy, either kind is a slot the lab never gets back.
+ */
+function abandoned(
+  row: Pick<Doc<"delegations">, "status" | "lease" | "leaseAcquiredAt" | "requestedAt">,
+  now: number,
+): boolean {
+  if (row.status === "running") return leaseExpired(row, now);
+  if (row.status === "queued") return now - row.requestedAt >= DELEGATION_LEASE_MS;
+  return false;
+}
+
+/** Why a row was swept, in the vocabulary the reader gets a sentence for. */
+function abandonmentOf(
+  row: Pick<Doc<"delegations">, "status">,
+): "lease-expired" | "never-started" {
+  return row.status === "running" ? "lease-expired" : "never-started";
+}
+
+/**
  * Terminalize the runs nobody is coming back for, before counting the slots.
  *
- * Bounded: the cap means a lab can never hold more than
- * `MAX_ACTIVE_PER_LAB` runs at once, so it can never have more than that many
- * go stale between one sweep and the next. `STALE_SCAN_LIMIT` leaves room for
- * a generation and a half of them anyway.
+ * Both active statuses, not just `running`. A cap that swept only the runs
+ * that started would still be permanently consumable by the ones that never
+ * did — and a lab whose scout quietly stops working, with eight rows sitting
+ * at `queued` and no error anywhere, has no way to even describe what went
+ * wrong.
+ *
+ * Bounded: the cap means a lab can never hold more than `MAX_ACTIVE_PER_LAB`
+ * runs at once, so it can never have more than that many go stale between one
+ * sweep and the next. `STALE_SCAN_LIMIT` leaves room for a generation and a
+ * half of them anyway.
  */
 async function sweepStaleLeases(
   ctx: MutationCtx,
   labId: Id<"labs">,
   now: number,
 ): Promise<number> {
-  const running = await ctx.db
-    .query("delegations")
-    .withIndex("by_lab_and_status", (q) =>
-      q.eq("labId", labId).eq("status", "running"),
-    )
-    .take(STALE_SCAN_LIMIT);
   let reclaimed = 0;
-  for (const delegation of running) {
-    if (leaseExpired(delegation, now)) {
-      await markFailed(ctx, delegation, "lease-expired");
-      reclaimed += 1;
+  for (const status of ACTIVE_STATUSES) {
+    const rows = await ctx.db
+      .query("delegations")
+      .withIndex("by_lab_and_status", (q) =>
+        q.eq("labId", labId).eq("status", status),
+      )
+      .take(STALE_SCAN_LIMIT);
+    for (const delegation of rows) {
+      if (abandoned(delegation, now)) {
+        await markFailed(ctx, delegation, abandonmentOf(delegation));
+        reclaimed += 1;
+      }
     }
   }
   return reclaimed;
@@ -465,11 +497,23 @@ export async function resolveSubject(
  * content; a delegation event carries an id and a reason. Without it, a lab
  * sees the runs that worked and none of the runs that did not, which is the
  * one shape of record that flatters the feature.
+ *
+ * The stored copy comes first, and the live read is only the fallback. A
+ * subject can be *hard-deleted* — `annotations.remove` deletes the row before
+ * anything else gets to look at it — so resolving placement from the subject
+ * is exactly wrong at exactly the moment placement matters most.
  */
 async function subjectPlacement(
   ctx: QueryCtx,
-  delegation: Pick<Doc<"delegations">, "annotationId" | "actionId">,
+  delegation: Pick<
+    Doc<"delegations">,
+    "annotationId" | "actionId" | "paperId" | "sessionId"
+  >,
 ): Promise<{ paperId?: Id<"papers">; sessionId?: Id<"sessions"> }> {
+  if (delegation.paperId !== undefined) {
+    return { paperId: delegation.paperId, sessionId: delegation.sessionId };
+  }
+  // Rows written before the denormalization existed.
   const ref = subjectOf(delegation);
   if (ref === null) return {};
   const row =
@@ -829,6 +873,7 @@ export function sanitizeFindingItems(
 
     const cited: Id<"annotations">[] = [];
     const papers: Id<"papers">[] = [];
+    let invented = false;
     // Both sources, never one or the other. A model that writes
     // `{text: "…[A2] extends [A1]", citations: ["A1"]}` is claiming to rest
     // on A2 in the sentence a scientist reads, and an item whose stored
@@ -841,14 +886,22 @@ export function sanitizeFindingItems(
       ...parseLabels(record.text),
     ]) {
       const candidate = byLabel.get(label);
-      if (candidate === undefined || cited.includes(candidate._id)) continue;
+      if (candidate === undefined) {
+        invented = true;
+        continue;
+      }
+      if (cited.includes(candidate._id)) continue;
       cited.push(candidate._id);
       if (!papers.includes(candidate.paperId)) papers.push(candidate.paperId);
     }
 
-    // An item that cited nothing real is an item that was made up. It does
-    // not get stored with a caveat; it does not get stored.
-    if (text.length === 0 || cited.length === 0) {
+    // An item that cited anything unreal is an item that was made up. Not the
+    // part that was made up — the item. A label nobody issued is evidence
+    // about how this sentence was produced, and "half of it checks out" is
+    // not a property a scientist can use: they would have to know which half,
+    // which is the work the scout was supposed to do. It does not get stored
+    // with a caveat; it does not get stored.
+    if (text.length === 0 || cited.length === 0 || invented) {
       droppedForCitation += 1;
       continue;
     }
@@ -949,6 +1002,10 @@ async function insertDelegation(
     requestedBy: spec.requestedBy,
     requestedAt: spec.requestedAt,
     status: "queued",
+    // Copied off the subject now, while the subject is certain to be there.
+    // See the schema comment: it is placement, never permission.
+    paperId: spec.paperId,
+    sessionId: spec.sessionId,
   });
   await recordEvent(ctx, {
     labId: spec.labId,
@@ -1616,6 +1673,8 @@ export const FAILURE_SENTENCES: Record<
 > = {
   "lease-expired":
     "The scout ran out of time on this one. Nothing was stored, and the slot is free again.",
+  "never-started":
+    "This run was queued and never picked up. Nothing was stored, and the slot is free again. Asking again will start a new one.",
   "run-error": "The scout's run did not finish. Nothing was stored.",
   "nothing-citable":
     "The scout found material but could not cite any of it. Nothing was stored.",

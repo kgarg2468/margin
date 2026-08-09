@@ -254,6 +254,15 @@ export const delegationStatus = v.union(
 export const delegationFailure = v.union(
   /** Nobody stored a result inside the lease; the slot was reclaimed. */
   v.literal("lease-expired"),
+  /**
+   * The run was queued and nothing ever picked it up.
+   *
+   * Distinct from `lease-expired` on purpose. That one means a scout started
+   * and did not come back; this one means it never started at all, which is a
+   * scheduler failure rather than a run failure and reads differently to
+   * anyone asking why a question went unanswered.
+   */
+  v.literal("never-started"),
   /** Retrieval or the model call itself threw. */
   v.literal("run-error"),
   /** Material came back and every item of it died at the citation gate. */
@@ -1854,6 +1863,27 @@ export default defineSchema({
     cancellation: v.optional(delegationCancellation),
     settledAt: v.optional(v.number()),
     findingId: v.optional(v.id("findings")),
+    /**
+     * Where this run belongs on the timelines, copied off the subject when the
+     * run was asked for.
+     *
+     * A denormalization, and the reason is that the subject is the one thing
+     * here that can be *hard-deleted*. A run cancelled or expired after its
+     * annotation was withdrawn has nothing left to resolve a paper from, so an
+     * event placed by reading the subject would land nowhere — and the runs
+     * that fall off the timeline would be exactly the runs that ended badly.
+     *
+     * Safe to denormalize precisely because it is not a permission. Nothing
+     * reads these to decide who may see what; the visibility checks all go to
+     * the live rows. They are two ids for putting a ledger entry in the right
+     * place, and neither of them can go stale in a way that matters: an
+     * annotation does not change papers.
+     *
+     * Optional because rows written before this existed do not have it, and
+     * `subjectPlacement` still falls back to the live read for those.
+     */
+    paperId: v.optional(v.id("papers")),
+    sessionId: v.optional(v.id("sessions")),
   })
     /**
      * The concurrency cap, and the reason the status vocabulary is closed:
