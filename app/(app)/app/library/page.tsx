@@ -1,19 +1,40 @@
 "use client";
 
 import { api } from "@/convex/_generated/api";
+import type { Id } from "@/convex/_generated/dataModel";
 import { papersToBibtex } from "@/lib/export/bibtex";
 import { downloadText, exportFilename } from "@/lib/export/download";
+import type { LibraryFilter } from "@/lib/library/filter";
+import { applyLibraryFilter, emptyFilter } from "@/lib/library/filter";
 import { eyebrowClass, secondaryButtonClass } from "@/lib/ui";
 import { useQuery } from "convex/react";
 import Link from "next/link";
-import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { use, useCallback, useEffect, useRef, useState } from "react";
 import type { LabSummary } from "../_components/lab-provider";
 import { useLabs } from "../_components/lab-provider";
 import { ListSkeleton, PageSkeleton } from "../_components/skeletons";
 import { AddPaper } from "./_components/add-paper";
+import { FilterStrip } from "./_components/filter-strip";
+import { FiledAs, TagMark } from "./_components/marks";
 import { StatusChip, byline } from "./_components/paper-meta";
+import { ShortcutHint } from "./_components/shortcuts";
 
-export default function LibraryPage() {
+/**
+ * The shelf.
+ *
+ * `?collection=` opens the library already narrowed to one collection — it is
+ * how the rail hands off to here, the same way `?paper=` hands the paper page
+ * off to the calendar. A collection is not a page of its own: it is the library
+ * with a filter on, and giving it a route of its own would be two lists to keep
+ * honest.
+ */
+export default function LibraryPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ collection?: string }>;
+}) {
+  const { collection } = use(searchParams);
   const { labs, currentLab } = useLabs();
 
   if (labs === undefined) {
@@ -39,23 +60,181 @@ export default function LibraryPage() {
     );
   }
 
-  return <Library lab={currentLab} />;
+  return (
+    <Library
+      // Remounted when the rail picks a different collection, which is what
+      // makes the URL the source of truth for where the shelf starts and the
+      // component's own state the source of truth for everything after.
+      key={`${currentLab._id}:${collection ?? ""}`}
+      lab={currentLab}
+      collectionId={
+        collection === undefined || collection.length === 0
+          ? null
+          : collection
+      }
+    />
+  );
 }
 
-function Library({ lab }: { lab: LabSummary }) {
+function Library({
+  lab,
+  collectionId,
+}: {
+  lab: LabSummary;
+  collectionId: string | null;
+}) {
   const papers = useQuery(api.papers.listPapers, { labId: lab._id });
+  const collections = useQuery(api.collections.listCollections, {
+    labId: lab._id,
+  });
+  const router = useRouter();
+
+  const [filter, setFilter] = useState<LibraryFilter>({
+    ...emptyFilter,
+    collectionId,
+  });
+  const [text, setText] = useState("");
   const [adding, setAdding] = useState(false);
+  /** Which row carries the mark, as an index into what is currently drawn. */
+  const [marked, setMarked] = useState<number | null>(null);
+  /** The paper whose "filed as" panel is open, if any. */
+  const [filing, setFiling] = useState<Id<"papers"> | null>(null);
+  const [hint, setHint] = useState(false);
+
+  const textRef = useRef<HTMLInputElement | null>(null);
+  const markedRef = useRef<HTMLLIElement | null>(null);
+
+  const selected =
+    collections?.find((entry) => entry._id === filter.collectionId) ?? null;
+
+  const shown = applyLibraryFilter(papers ?? [], {
+    filter,
+    text,
+    collectionPaperIds: selected?.paperIds ?? null,
+  });
 
   const isEmpty = papers !== undefined && papers.length === 0;
+  // Clamped rather than stored clamped: the list under the mark changes as the
+  // filter narrows, and a stored index would point past the end of it.
+  const markedIndex =
+    marked === null ? null : Math.min(marked, shown.length - 1);
+  const markedPaper = markedIndex === null ? null : shown[markedIndex];
+
+  const open = useCallback(
+    (paper: (typeof shown)[number]) => {
+      const readable = paper.ingestStatus === "ready" && paper.hasPdf;
+      router.push(
+        readable
+          ? `/app/library/${paper._id}/read`
+          : `/app/library/${paper._id}`,
+      );
+    },
+    [router],
+  );
+
+  /**
+   * The library's keys.
+   *
+   * Bound at the window because the shelf has no single focusable container to
+   * hang them off, and guarded three ways so they only ever fire when the
+   * reader means them: never with a modifier — ⌘K is the palette's and nothing
+   * here may shadow it — never while the caret is in a field, and never while
+   * something typed-into is what the keystroke would otherwise reach.
+   */
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.metaKey || event.ctrlKey || event.altKey) {
+        return;
+      }
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        (target.isContentEditable ||
+          target instanceof HTMLInputElement ||
+          target instanceof HTMLTextAreaElement ||
+          target instanceof HTMLSelectElement)
+      ) {
+        return;
+      }
+
+      switch (event.key) {
+        case "/":
+          event.preventDefault();
+          textRef.current?.focus();
+          textRef.current?.select();
+          return;
+        case "a":
+          event.preventDefault();
+          setAdding(true);
+          return;
+        case "t":
+          if (markedPaper !== undefined && markedPaper !== null) {
+            event.preventDefault();
+            setFiling(markedPaper._id);
+          }
+          return;
+        case "?":
+          event.preventDefault();
+          setHint((was) => !was);
+          return;
+        case "Escape":
+          setHint(false);
+          setFiling(null);
+          setMarked(null);
+          return;
+        case "ArrowDown":
+          if (shown.length > 0) {
+            event.preventDefault();
+            setMarked((index) =>
+              index === null ? 0 : Math.min(index + 1, shown.length - 1),
+            );
+          }
+          return;
+        case "ArrowUp":
+          if (shown.length > 0) {
+            event.preventDefault();
+            setMarked((index) => (index === null ? 0 : Math.max(index - 1, 0)));
+          }
+          return;
+        case "Enter":
+          if (markedPaper !== undefined && markedPaper !== null) {
+            event.preventDefault();
+            open(markedPaper);
+          }
+          return;
+        default:
+      }
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [markedPaper, open, shown.length]);
+
+  /**
+   * Move the browser's own focus with the mark, so the arrow keys move a
+   * screen reader down the shelf rather than moving a border a screen reader
+   * cannot see. Held back while a panel is open — the caret in the tag field is
+   * where the reader actually is.
+   */
+  useEffect(() => {
+    if (markedIndex !== null && filing === null) {
+      markedRef.current?.focus({ preventScroll: false });
+    }
+  }, [markedIndex, filing]);
 
   return (
-    <div className="flex flex-col gap-10">
+    <div className="flex flex-col gap-8">
       <header className="flex flex-col gap-3 border-l border-rule pl-6">
-        <h1 className="font-serif text-4xl tracking-tight text-ink-strong">
-          Library
-        </h1>
+        <div className="flex items-start justify-between gap-4">
+          <h1 className="font-serif text-4xl tracking-tight text-ink-strong">
+            {selected === null ? "Library" : selected.name}
+          </h1>
+          <ShortcutHint open={hint} onToggle={() => setHint((was) => !was)} />
+        </div>
         <p className="font-sans text-sm text-ink-muted">
-          What {lab.name} is reading
+          {selected === null
+            ? `What ${lab.name} is reading`
+            : `A collection in ${lab.name}`}
           {papers !== undefined && papers.length > 0
             ? ` · ${papers.length} ${papers.length === 1 ? "paper" : "papers"}`
             : ""}
@@ -100,10 +279,31 @@ function Library({ lab }: { lab: LabSummary }) {
         <button
           type="button"
           onClick={() => setAdding(true)}
+          title="Add a paper (a)"
           className={`${secondaryButtonClass} tap-target self-start`}
         >
           Add a paper
         </button>
+      )}
+
+      {papers !== undefined && papers.length > 0 && (
+        <FilterStrip
+          labId={lab._id}
+          collections={collections}
+          filter={filter}
+          onFilter={(next) => {
+            setFilter(next);
+            setMarked(null);
+          }}
+          text={text}
+          onText={(next) => {
+            setText(next);
+            setMarked(null);
+          }}
+          textRef={textRef}
+          shown={shown.length}
+          total={papers.length}
+        />
       )}
 
       <section className="flex flex-col gap-5">
@@ -117,17 +317,34 @@ function Library({ lab }: { lab: LabSummary }) {
             DOI and Margin fetches the record, drop in a PDF, or import a
             reference-manager export in bulk.
           </p>
+        ) : shown.length === 0 ? (
+          <p className="max-w-prose font-serif text-base leading-relaxed text-ink-muted">
+            Nothing on this shelf answers to that. Clear the filter above, or
+            widen it — a tag narrows, so two tags means both.
+          </p>
         ) : (
           <ul className="flex flex-col divide-y divide-rule border-y border-rule">
-            {papers.map((paper) => {
+            {shown.map((paper, index) => {
               const line = byline(paper);
               // A ready paper is one whose text layer is in, which is the only
               // state the margins can be written in — so the title opens the
               // reader and the record moves to a second link. Anything else has
               // something to fix first, and the record is where you fix it.
               const readable = paper.ingestStatus === "ready" && paper.hasPdf;
+              const isMarked = markedIndex === index;
               return (
-                <li key={paper._id} className="flex flex-col gap-1 py-4">
+                <li
+                  key={paper._id}
+                  ref={isMarked ? markedRef : null}
+                  tabIndex={-1}
+                  onFocus={() => setMarked(index)}
+                  className={
+                    "flex flex-col gap-1 border-l-2 py-4 pl-4 transition-colors focus:outline-none " +
+                    (isMarked
+                      ? "border-accent bg-surface-sunken/50"
+                      : "border-transparent")
+                  }
+                >
                   <span className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
                     <Link
                       href={
@@ -146,20 +363,69 @@ function Library({ lab }: { lab: LabSummary }) {
                       {line}
                     </span>
                   )}
-                  {/* A paper that can't be read yet has exactly one thing
-                      worth doing to it, and "TEXT PENDING" next to a title
-                      does not say what that is or where. One named action,
-                      in the accent, rather than a chip to decode. */}
-                  <Link
-                    href={`/app/library/${paper._id}`}
-                    className={
-                      readable
-                        ? "tap-target self-start font-sans text-xs text-ink-faint underline-offset-4 hover:text-accent hover:underline"
-                        : "tap-target self-start font-sans text-sm text-accent underline-offset-4 hover:underline"
-                    }
-                  >
-                    {readable ? "Record" : "Finish preparing this paper →"}
-                  </Link>
+
+                  {paper.tags.length > 0 && (
+                    <span className="mt-1 flex flex-wrap items-center gap-1.5">
+                      {paper.tags.map((tag) => (
+                        <TagMark
+                          key={tag}
+                          tag={tag}
+                          active={filter.tags.includes(tag)}
+                          title={`Show everything tagged ${tag}`}
+                          onClick={() => {
+                            setFilter((current) => ({
+                              ...current,
+                              tags: current.tags.includes(tag)
+                                ? current.tags.filter((one) => one !== tag)
+                                : [...current.tags, tag],
+                            }));
+                            setMarked(null);
+                          }}
+                        />
+                      ))}
+                    </span>
+                  )}
+
+                  <span className="mt-1 flex flex-wrap items-baseline gap-x-4 gap-y-1">
+                    {/* A paper that can't be read yet has exactly one thing
+                        worth doing to it, and "TEXT PENDING" next to a title
+                        does not say what that is or where. One named action,
+                        in the accent, rather than a chip to decode. */}
+                    <Link
+                      href={`/app/library/${paper._id}`}
+                      className={
+                        readable
+                          ? "tap-target font-sans text-xs text-ink-faint underline-offset-4 hover:text-accent hover:underline"
+                          : "tap-target font-sans text-sm text-accent underline-offset-4 hover:underline"
+                      }
+                    >
+                      {readable ? "Record" : "Finish preparing this paper →"}
+                    </Link>
+                    <button
+                      type="button"
+                      title="Tag and shelve this paper (t)"
+                      aria-expanded={filing === paper._id}
+                      onClick={() => {
+                        setMarked(index);
+                        setFiling(filing === paper._id ? null : paper._id);
+                      }}
+                      className="tap-target font-sans text-xs text-ink-faint underline-offset-4 hover:text-accent hover:underline"
+                    >
+                      {filing === paper._id ? "Close" : "Filed as…"}
+                    </button>
+                  </span>
+
+                  {filing === paper._id && (
+                    <div className="pop-in mt-3">
+                      <FiledAs
+                        paperId={paper._id}
+                        labId={lab._id}
+                        tags={paper.tags}
+                        autoFocus
+                        onDone={() => setFiling(null)}
+                      />
+                    </div>
+                  )}
                 </li>
               );
             })}
