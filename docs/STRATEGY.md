@@ -19,6 +19,8 @@ Positioning line:
 
 ## 2. What Margin is today (repo-verified, commit `6048ec2`)
 
+> **Point-in-time snapshot.** This table was verified against commit `6048ec2`, before PRs #41–#62 landed. For what has shipped since, read §9 and `docs/TIMELINE.md` §6 — do not treat the ❌/🚧 rows below as current.
+
 | Status | Capability |
 |---|---|
 | ✅ Shipped | Labs, memberships, invites; DOI/PDF ingestion with open-access copy discovery |

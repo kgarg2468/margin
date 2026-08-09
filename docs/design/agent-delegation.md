@@ -34,7 +34,7 @@ This also restores strategy fidelity: `STRATEGY.md` ships the Presenter Agent in
 
 ## 4. Scope
 
-**v1 — brief-embedded corpus scout.** Input: the brief's carried-forward open questions (question-kind `actions` rows, capped at the shipped `MAX_CARRIED_FORWARD = 8`). Retrieval: lab-visible corpus (annotation search index + typed collisions + epistemic-status rows read mechanically). Output: at most one finding per question per brief run. One model call per brief covering all questions (bounded, §6).
+**v1 — brief-embedded corpus scout.** Input: the brief's carried-forward open questions — these are **`open-question` annotations with no replies from prior sessions** (`lib/brief/assemble.ts` filters `a.type === "open-question"`; brief items store `annotationIds`; the brief never reads the `actions` table), capped by the shipped per-section `MAX_SECTION_ITEMS = 6`. **The v1 subject is therefore an `Id<"annotations">`;** action-row subjects arrive with v1.5's on-demand runs from the outcomes panel. Retrieval: lab-visible corpus (annotation search index + the brief's persisted collision lines + epistemic-status fields read mechanically). Output: at most one finding per question per brief run. One model call per brief covering all questions (bounded, §6).
 
 **v1.5 — on-demand delegation** on question rows; same tables, same run path, requester as actor, reactive card status.
 
@@ -50,8 +50,8 @@ delegations: {
   agentKind: "scout.corpus",
   trigger: "brief" | "manual",           // manual = v1.5
   briefId?: Id<"briefs">,                // brief-triggered runs
-  actionId?: Id<"actions">,              // the open question (v1 subject)
-  annotationId?: Id<"annotations">,      // v1.5 secondary subject
+  annotationId?: Id<"annotations">,      // v1 subject: the carried-forward open-question annotation
+  actionId?: Id<"actions">,              // v1.5 subject: outcomes-panel question row
   requestedBy: Id<"users">,              // presenter (brief) or requester (manual)
   requestedAt: number,
   status: "queued" | "running" | "returned" | "empty" | "failed" | "cancelled",
@@ -62,13 +62,17 @@ delegations: {
   findingId?: Id<"findings">,
 }
   .index("by_lab_and_status", ["labId", "status"])   // bounded active-count reads
-  .index("by_action", ["actionId"])
+  .index("by_lab_and_time", ["labId", "requestedAt"]) // rolling daily-budget range read
+                                                      // (rows are never deleted, so the
+                                                      // budget cannot scan by status)
+  .index("by_annotation", ["annotationId"])           // v1 subject lookups
+  .index("by_action", ["actionId"])                   // v1.5 subject lookups
   .index("by_brief", ["briefId"])
 ```
 
 `returned` vs `empty` is the honest-null distinction: `empty` = retrieval itself found nothing; a run whose items all died at the citation gate is `failed` ("found nothing citable").
 
-Caps: per-lab active cap (via `by_lab_and_status`), **plus a rolling per-lab daily run budget** (cost bound, not just concurrency — review finding), plus per-requester fairness for v1.5 manual runs. One active delegation per subject; re-request returns the existing row. Rows are history — never hard-deleted; terminal rows are the audit trail.
+Caps: per-lab active cap (via `by_lab_and_status`), **plus a rolling per-lab daily run budget** (cost bound, not just concurrency — review finding) computed as a `by_lab_and_time` range read over the last 24h. Per-requester fairness for v1.5 manual runs adds its own index when v1.5 lands — not before. One active delegation per subject (either subject kind, checked via its subject index); re-request returns the existing row. Rows are history — never hard-deleted; terminal rows are the audit trail.
 
 ### 5.2 `findings`
 
@@ -91,11 +95,12 @@ findings: {
   model: string,
   generatedAt: number,
   supersededAt?: number,                       // set when a newer run for the same subject returns
-  actionId?: Id<"actions">,                    // denormalized from the delegation's subject at write —
-                                               // the by_action index needs a stored field to exist
+  annotationId?: Id<"annotations">,            // denormalized from the delegation's subject at write —
+  actionId?: Id<"actions">,                    // a subject index needs a stored field to exist
 }
   .index("by_delegation", ["delegationId"])
-  .index("by_action", ["actionId"])            // render newest non-superseded per subject
+  .index("by_annotation", ["annotationId"])    // newest non-superseded per v1 subject
+  .index("by_action", ["actionId"])            // same, v1.5 subjects
 ```
 
 Ordering rule: a thread renders the newest non-superseded finding; prior findings remain reachable from delegation history.
@@ -119,8 +124,8 @@ findingCitations: {
 
 Rows are written atomically with the finding and are never updated; they are
 lookup structure, not state. Read-time whole-item redaction (§3.7) remains the
-defense of record — the join table is how supersession *finds* affected
-findings, not what makes them safe.
+defense of record — the join table is how the withdraw cascade *finds* stored
+findings that cite an annotation, not what makes them safe.
 
 ### 5.3 Ledger events
 
@@ -128,13 +133,13 @@ findings, not what makes them safe.
 
 ### 5.4 Subject lifecycle cascade (new in v2)
 
-`actions.remove` hard-deletes on the stated premise that "no derived artifact cites one" — this design falsifies that premise, so the premise changes, not the design: **settle, remove, and withdraw-of-cited-annotation all cancel any active delegation on the subject (clearing its lease) and mark returned findings superseded.** Withdraw finds the affected findings via `findingCitations.by_annotation` (§5.2b), not by scanning. The `actions.ts` doc comment is corrected in PR A. Terminal delegation rows referencing a deleted action keep the id as a tombstone reference (rendered "question withdrawn").
+`actions.remove` hard-deletes on the stated premise that "no derived artifact cites one" — this design falsifies that premise, so the premise changes, not the design: **settle, remove, and withdraw-of-cited-annotation all cancel any active delegation on the subject (clearing its lease).** Settle/remove reach active delegations via `delegations.by_action`; withdraw reaches them via `delegations.by_annotation`. Withdraw additionally locates *stored* findings that cite the annotation via `findingCitations.by_annotation` (§5.2b), not by scanning — but it does **not** write `supersededAt`, which means only "a newer run for the same subject returned" (§5.2). A withdrawn or re-privatized citation is handled by read-time whole-item redaction (§3.7); an *in-flight* run that already gathered the annotation is unreachable from any index and is caught instead by the store-time "every citation still shared" re-check (§6.6). The `actions.ts` doc comment is corrected in PR A. Terminal delegation rows referencing a deleted action keep the id as a tombstone reference (rendered "question withdrawn").
 
 ## 6. Execution flow
 
-1. **Enqueue.** `briefs.buildForSession`, after writing the brief (deterministic, instant — the scout must never delay or block the brief), collects the brief's carried-forward open questions and, if any, writes one `queued` delegation per question (respecting caps) and schedules `internal.delegations.runForBrief` via `runAfter(0)` with the batch + a fresh lease per row.
+1. **Enqueue.** `briefs.buildForSession`, after writing the brief (deterministic, instant — the scout must never delay or block the brief), collects the brief's carried-forward open questions and, if any, writes one `queued` delegation per question (respecting caps) and schedules `internal.delegations.runForBrief` — an **internalAction** orchestrating claim (internalMutation) → gather (internalQuery) → model call → store (internalMutation) — via `runAfter(0)` with the batch + a fresh lease per row.
 2. **Claim (internalMutation, atomic).** Per delegation: re-validate — brief still exists and is this session's current brief, subject still open, not cancelled — then `queued → running`, stamp `startedAt`/`leaseAcquiredAt`. A retry that finds `running` (or any terminal state) **must not re-run the model call**: if the lease is expired it marks `failed`; otherwise it exits. (Scheduled actions can be retried on crash; the model call is guarded by state, not by hope.)
-3. **Gather (internalQuery, scheduled-reader mode §3.6).** Question text → search query by code-side keyword reduction to the 200-char search cap (stated reduction, not a slice). Reads: lab-visible annotation search, typed collisions, live status rows. All untrusted text is serialized as **JSON in the prompt** — review showed `fence()` strips only the two synthesis tags, so tag-fencing is not reused; JSON serialization closes the delimiter-injection path.
+3. **Gather (internalQuery, scheduled-reader mode §3.6).** Question text → search query by code-side keyword reduction to the 200-char search cap (stated reduction, not a slice). Reads: lab-visible annotation search, the brief's already-persisted collision lines (collisions are computed by `detectCollisions` at brief build, not stored as a table — the gather reads the brief row rather than recomputing), and epistemic-status fields on annotations read mechanically. All untrusted text is serialized as **JSON in the prompt** — review showed `fence()` strips only the two synthesis tags, so tag-fencing is not reused; JSON serialization closes the delimiter-injection path.
 4. **Model call.** Synthesis harness verbatim (raw fetch, strict `json_schema`, timeout, incomplete-output refusal, refusal parts), one call for the batch, `[A#]` labels issued per retrieved annotation, instructions: report only what labels support; no conclusions, no recommendations, no imperatives to the reader.
 5. **Sanitize** via shared `lib/citations/` gates; items with zero surviving citations die; whole-item redaction rule (§3.7) applied.
 6. **Store (internalMutation).** Requires: status `running` **and** matching unexpired lease **and** subject still open **and** every citation still shared (re-check at store, not just gather). Writes finding, supersedes prior finding for the subject, delegation → `returned`/`empty`, ledger event. Cancel clears the lease, so a cancelled run's store fails closed.
@@ -163,7 +168,7 @@ findings, not what makes them safe.
 
 ## 9. Stage-3 readiness (MCP)
 
-The v1.5 mutations (`delegations.request`/`.cancel`/`listForSubject`, `findings` reads) are the complete future external contract; an MCP server exposes exactly these plus search, through the same authz path. External agents get the delegation surface, never table writes. Nothing in v1 blocks this; nothing in v1 builds it.
+The v1.5 mutations (`delegations.request`/`.cancel`/`listForSubject` — implementable for both subject kinds via `by_annotation`/`by_action`, `findings` reads) are the complete future external contract; an MCP server exposes exactly these plus search, through the same authz path. External agents get the delegation surface, never table writes. Nothing in v1 blocks this; nothing in v1 builds it.
 
 ## 10. Eval gate (rewritten in v2 — two instruments, honestly separated)
 

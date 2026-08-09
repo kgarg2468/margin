@@ -63,11 +63,12 @@ Non-engineering, founder-owned, runs alongside everything: recruit 5–10 design
 
 | Files / area | Tracks touching it | Rule |
 |---|---|---|
+| `convex/schema.ts` | C1 (new tables), B1 (verify-only), anything adding a table | C1 owns Wave-1 schema changes; later schema edits rebase onto C1's |
 | Reader components (`read/_components/*`) | A1 only | Nothing else touches the reader until A1 merges |
 | Session page + board + synthesis display | A2, C4, C5 | A2 first; C4/C5 after A2 merges |
 | `convex/synthesis.ts` (server) | C3 (lib/citations extraction) | Independent of A2's display work, but coordinate if concurrent |
 | `convex/actions.ts`, outcomes panel | C1 (cascade + comment), C4 (chips) | C1 before C4 |
-| `convex/briefs.ts`, brief UI | C4, C5 | Either order; small overlap, prefer same worktree or sequential |
+| `convex/briefs.ts`, brief UI | A2 (citation numbering also lives in `brief.tsx`), B3 (delivery formatting), C4, C5 | A2/B3 are in earlier waves so no live collision; C4/C5 either order, prefer same worktree |
 | Auth (`convex/auth.ts`) | B1 | Isolated |
 | Notifications/email | B2 | Isolated (Track C deliberately does not touch notifications) |
 | Library/ingest UI | A3 | Isolated |
@@ -81,4 +82,4 @@ Non-engineering, founder-owned, runs alongside everything: recruit 5–10 design
 
 ## 6. Done (context for agents — don't rebuild these)
 
-Phases 0–2 of the strategy shipped as PRs #41–#62, including: magic links (#45), gated PDFs (#42), ⌘K search (#44), synthesis sign-off (#43), export (#48), BibTeX/RIS import (#47), mentions (#52), reactions (#51), tags/collections (#54), calendar (#50), since-you-were-away (#49), presenter brief (#53), outcomes (#55), cross-paper digest collisions (#56), annotation edit history (#57), cross-page anchoring (#58), temporal memory (#59), epistemic status (#60), interaction layer (#61), auth/deploy fixes (#62). Full capability table and rationale: `docs/STRATEGY.md` §2 and §9.
+The bulk of strategy Phases 0–2 shipped as PRs #41–#62 (Track B above is what remains), including: magic links (#45), gated PDFs (#42), ⌘K search (#44), synthesis sign-off (#43), export (#48), BibTeX/RIS import (#47), mentions (#52), reactions (#51), tags/collections (#54), calendar (#50), since-you-were-away (#49), presenter brief (#53), outcomes (#55), cross-paper digest collisions (#56), annotation edit history (#57), cross-page anchoring (#58), temporal memory (#59), epistemic status (#60), interaction layer (#61), auth/deploy fixes (#62). Rationale: `docs/STRATEGY.md` §9 (its §2 capability table is a pre-#41 snapshot — read §9 for current state).
