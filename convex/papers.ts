@@ -21,6 +21,7 @@ import {
   nextRedirectHop,
 } from "./lib/scholarly";
 import { ingestStatus } from "./schema";
+import { MAX_TAGS_PER_PAPER, normalizeTags } from "../lib/library/tags";
 import { referenceIdentity } from "../lib/reference-import/normalize";
 
 /**
@@ -82,6 +83,8 @@ const paperSummary = v.object({
   hasPdf: v.boolean(),
   pageCount: v.optional(v.number()),
   addedAt: v.number(),
+  /** Always an array to the client, empty where the field is absent — see `toSummary`. */
+  tags: v.array(v.string()),
 });
 
 const paperDetail = v.object({
@@ -101,6 +104,7 @@ const paperDetail = v.object({
   pageCount: v.optional(v.number()),
   addedAt: v.number(),
   addedByName: v.optional(v.string()),
+  tags: v.array(v.string()),
 });
 
 function toSummary(paper: Doc<"papers">) {
@@ -115,6 +119,9 @@ function toSummary(paper: Doc<"papers">) {
     hasPdf: paper.storageId !== undefined,
     pageCount: paper.pageCount,
     addedAt: paper._creationTime,
+    // An absent field and an empty list mean the same thing to a reader, and
+    // one of the two makes every call site check. The client gets the array.
+    tags: paper.tags ?? [],
   };
 }
 
@@ -614,7 +621,126 @@ export const getPaper = query({
       pageCount: paper.pageCount,
       addedAt: paper._creationTime,
       addedByName: addedBy?.name ?? addedBy?.email,
+      tags: paper.tags ?? [],
     };
+  },
+});
+
+/* -------------------------------------------------------------------------
+ * Tags
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Put a label on a paper.
+ *
+ * Lab-shared by construction: any member can tag, any member can untag, and
+ * there is no per-member view of the result. A tag is the lab's word for a pile
+ * of papers — "methods", "for the grant", "we disagree with this" — and its
+ * whole value is that everyone reads the same one. A personal version of this
+ * would be a saved filter, which is exactly why that other thing exists.
+ *
+ * Idempotent, and quietly so. The autocomplete makes re-adding a label that is
+ * already there a normal thing to do by accident, and neither an error nor a
+ * second ledger row is the right answer to it.
+ */
+export const tagPaper = mutation({
+  args: { paperId: v.id("papers"), tag: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const { paper, membership } = await requirePaperAccess(ctx, args.paperId);
+
+    const [tag] = normalizeTags([args.tag]);
+    if (tag === undefined) {
+      throw new ConvexError("A tag needs at least one character.");
+    }
+
+    const existing = paper.tags ?? [];
+    if (existing.includes(tag)) {
+      return null;
+    }
+    if (existing.length >= MAX_TAGS_PER_PAPER) {
+      throw new ConvexError(
+        `A paper carries up to ${MAX_TAGS_PER_PAPER} tags. Take one off before adding another.`,
+      );
+    }
+
+    // Re-normalized as a set rather than appended blind: rows written before
+    // this field existed, or by an older client, are not guaranteed canonical,
+    // and a duplicate that differs only in case would be invisible in the UI
+    // and unremovable through it.
+    await ctx.db.patch(paper._id, { tags: normalizeTags([...existing, tag]) });
+
+    await recordEvent(ctx, {
+      labId: paper.labId,
+      type: "paper.tagged",
+      actorId: membership.userId,
+      paperId: paper._id,
+      tag,
+    });
+    return null;
+  },
+});
+
+/** Take a label off. Removing one that isn't there is a no-op, for the reason adding a duplicate is. */
+export const untagPaper = mutation({
+  args: { paperId: v.id("papers"), tag: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const { paper, membership } = await requirePaperAccess(ctx, args.paperId);
+
+    const [tag] = normalizeTags([args.tag]);
+    if (tag === undefined) {
+      return null;
+    }
+
+    const existing = normalizeTags(paper.tags ?? []);
+    if (!existing.includes(tag)) {
+      return null;
+    }
+
+    await ctx.db.patch(paper._id, {
+      tags: existing.filter((existingTag) => existingTag !== tag),
+    });
+
+    await recordEvent(ctx, {
+      labId: paper.labId,
+      type: "paper.untagged",
+      actorId: membership.userId,
+      paperId: paper._id,
+      tag,
+    });
+    return null;
+  },
+});
+
+/**
+ * The lab's vocabulary, commonest first — what the tag input autocompletes
+ * against.
+ *
+ * Counted here rather than in the browser even though `listPapers` already
+ * carries every tag, because the two have different jobs: the library's list is
+ * capped at 200 rows and the vocabulary should not quietly become "the tags on
+ * the most recent 200 papers". This reads the same index without the ceiling,
+ * and returns tags rather than papers.
+ */
+export const listTags = query({
+  args: { labId: v.id("labs") },
+  returns: v.array(v.object({ tag: v.string(), count: v.number() })),
+  handler: async (ctx, args) => {
+    await requireMembership(ctx, args.labId);
+
+    const counts = new Map<string, number>();
+    for await (const paper of ctx.db
+      .query("papers")
+      .withIndex("by_lab", (q) => q.eq("labId", args.labId))) {
+      for (const tag of normalizeTags(paper.tags ?? [])) {
+        counts.set(tag, (counts.get(tag) ?? 0) + 1);
+      }
+    }
+
+    return [...counts.entries()]
+      .map(([tag, count]) => ({ tag, count }))
+      .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
   },
 });
 

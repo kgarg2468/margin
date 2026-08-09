@@ -237,6 +237,68 @@ export const eventDoc = v.union(
     paperId: v.id("papers"),
     pageCount: v.number(),
   }),
+  /**
+   * A label went on a paper, or came off it.
+   *
+   * The tag itself is carried rather than referenced, and that is the one place
+   * the ledger's usual rule bends on purpose. A tag has no row of its own — it
+   * is a string on the paper — so there is nothing to point at, and "somebody
+   * tagged this paper (with what?)" is not a fact worth appending. It is also
+   * not private material: a tag is lab vocabulary by construction, visible to
+   * every member the moment it is written, so a copy of one in an append-only
+   * table cannot outlive an audience it never had.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("paper.tagged"),
+    paperId: v.id("papers"),
+    tag: v.string(),
+  }),
+  v.object({
+    ...eventBase,
+    type: v.literal("paper.untagged"),
+    paperId: v.id("papers"),
+    tag: v.string(),
+  }),
+  v.object({
+    ...eventBase,
+    type: v.literal("collection.created"),
+    collectionId: v.id("collections"),
+    name: v.string(),
+  }),
+  v.object({
+    ...eventBase,
+    type: v.literal("collection.renamed"),
+    collectionId: v.id("collections"),
+    /** The name it goes by *now* — the old one is the previous row. */
+    name: v.string(),
+  }),
+  /**
+   * The collection row is gone, and this is all that is left of it. The name
+   * rides along for that reason: without it the ledger would say a member
+   * deleted a collection nobody can name any more.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("collection.deleted"),
+    collectionId: v.id("collections"),
+    name: v.string(),
+  }),
+  /**
+   * One paper joined a collection or left it.
+   *
+   * Per paper rather than per edit, because `paperId` is what makes the row
+   * reachable through `by_paper_and_at` — a paper's own record can then say
+   * which shelves it has been put on, which is the question a reader actually
+   * asks. A bulk edit becomes several of these, which is what it is.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("collection.papers_changed"),
+    collectionId: v.id("collections"),
+    paperId: v.id("papers"),
+    change: v.union(v.literal("added"), v.literal("removed")),
+  }),
   v.object({
     ...eventBase,
     type: v.literal("annotation.created"),
@@ -539,6 +601,26 @@ export default defineSchema({
     ingestStatus,
     ingestError: v.optional(v.string()),
     addedBy: v.id("users"),
+    /**
+     * The lab's shelf marks for this paper, canonical form only (lowercased,
+     * trimmed, ≤32 characters, ≤12 of them — see `lib/library/tags.ts`).
+     *
+     * A field rather than a join table, and the reason is that filtering by tag
+     * is not a query here: `listPapers` already reads the lab's whole library
+     * under one bounded `take(200)`, so the tags arrive with the rows that are
+     * about to be drawn and the filter is a pass over an array the client is
+     * holding anyway. A `paperTags` table would add a second read per paper —
+     * or a fan-out per render — to answer a question the first read had already
+     * answered. It would also make "the lab's vocabulary" a scan of a table
+     * with no `labId` on it, which is the same shape of problem `paperPages`
+     * has and the reason ⌘K cannot search inside PDFs.
+     *
+     * What that costs: no index on a tag, so this stops scaling at roughly the
+     * point `listPapers`'s own ceiling does. That is the right trade at 200
+     * papers and the wrong one at 20,000; the 201st paper is the signal to
+     * revisit both together.
+     */
+    tags: v.optional(v.array(v.string())),
   })
     .index("by_lab", ["labId"])
     .index("by_lab_and_doi", ["labId", "doi"])
@@ -578,6 +660,66 @@ export default defineSchema({
   })
     .index("by_paper", ["paperId"])
     .index("by_paper_and_page", ["paperId", "pageIndex"]),
+
+  /**
+   * A named, ordered shelf of papers — "Foundational", "Methods week".
+   *
+   * `paperIds` is an array on the collection rather than a join table, and the
+   * ordering is why. A collection is a *reading order*: the first paper is the
+   * one to read first, and that is the whole difference between a collection
+   * and a tag. An array is that order, natively; a join table would need an
+   * explicit rank column, and every reorder would rewrite a row per paper to
+   * express something a single array write already says. A paper sits in as
+   * many collections as it likes — the same id simply appears in several of
+   * these — so the many-to-many the join table would have bought is here too.
+   *
+   * Bounded at `MAX_COLLECTION_PAPERS` (see `convex/collections.ts`) for the
+   * usual reason an array field is bounded: a Convex document is capped at
+   * 1 MiB, and an unbounded list on a hot document is a table with no ceiling
+   * wearing a field's clothes. The cap is the library's own `take(200)`, so a
+   * collection can hold every paper a lab can list and no more.
+   *
+   * A collection is lab property: any member makes one, any member puts papers
+   * in it. Renaming and deleting are narrower (creator or PI) because those
+   * take something away from everyone else.
+   */
+  collections: defineTable({
+    labId: v.id("labs"),
+    name: v.string(),
+    createdBy: v.id("users"),
+    paperIds: v.array(v.id("papers")),
+  }).index("by_lab", ["labId"]),
+
+  /**
+   * A filter a member gave a name to. Personal, and deliberately so.
+   *
+   * Everything else in this schema is lab property — tags, collections, the
+   * ledger. This is not: "the papers I still have to read for Thursday" is a
+   * working note about one person's week, and publishing everyone's to the lab
+   * would turn a convenience into a status board. It is also the reason there
+   * is no ledger event anywhere near this table. A saved filter records nothing
+   * about the lab's reasoning; it is furniture, and the ledger is for facts.
+   *
+   * The payload mirrors `LibraryFilter` in `lib/library/filter.ts` — tags, a
+   * collection, an ingest state. Not the text box: what you type into the
+   * library right now is how you find one paper you already have in mind, and
+   * filing it under a name would be saving the question instead of the shelf.
+   *
+   * `collectionId` is a plain id with no referential guarantee. Collections are
+   * deleted by people, saved filters belong to other people, and cascading a
+   * delete into a colleague's saved views would be one member silently editing
+   * another's. The reader resolves it and says the shelf is gone.
+   */
+  savedFilters: defineTable({
+    userId: v.id("users"),
+    labId: v.id("labs"),
+    name: v.string(),
+    tags: v.array(v.string()),
+    collectionId: v.optional(v.id("collections")),
+    ingestStatus: v.optional(ingestStatus),
+  })
+    .index("by_user", ["userId"])
+    .index("by_user_and_lab", ["userId", "labId"]),
 
   /**
    * One journal-club meeting: a lab reads one paper, someone presents, then it
