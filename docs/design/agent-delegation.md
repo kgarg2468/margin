@@ -91,6 +91,8 @@ findings: {
   model: string,
   generatedAt: number,
   supersededAt?: number,                       // set when a newer run for the same subject returns
+  actionId?: Id<"actions">,                    // denormalized from the delegation's subject at write —
+                                               // the by_action index needs a stored field to exist
 }
   .index("by_delegation", ["delegationId"])
   .index("by_action", ["actionId"])            // render newest non-superseded per subject
@@ -98,13 +100,35 @@ findings: {
 
 Ordering rule: a thread renders the newest non-superseded finding; prior findings remain reachable from delegation history.
 
+### 5.2b `findingCitations` (reverse lookup)
+
+Citations live nested in `items`, and Convex cannot index into arrays — so the
+withdraw cascade (§5.4) would otherwise be an unbounded findings scan. A join
+row per cited annotation, written in the same mutation as its finding, gives
+the cascade an indexed path:
+
+```
+findingCitations: {
+  labId: Id<"labs">,
+  findingId: Id<"findings">,
+  annotationId: Id<"annotations">,
+}
+  .index("by_annotation", ["annotationId"])
+  .index("by_finding", ["findingId"])
+```
+
+Rows are written atomically with the finding and are never updated; they are
+lookup structure, not state. Read-time whole-item redaction (§3.7) remains the
+defense of record — the join table is how supersession *finds* affected
+findings, not what makes them safe.
+
 ### 5.3 Ledger events
 
 `delegation.requested` · `delegation.returned` (`trigger`, `itemCount`, `droppedForCitation`) · `delegation.failed` · `delegation.cancelled`. Human `actorId` per §3.3; `recordEvent` only.
 
 ### 5.4 Subject lifecycle cascade (new in v2)
 
-`actions.remove` hard-deletes on the stated premise that "no derived artifact cites one" — this design falsifies that premise, so the premise changes, not the design: **settle, remove, and withdraw-of-cited-annotation all cancel any active delegation on the subject (clearing its lease) and mark returned findings superseded.** The `actions.ts` doc comment is corrected in PR A. Terminal delegation rows referencing a deleted action keep the id as a tombstone reference (rendered "question withdrawn").
+`actions.remove` hard-deletes on the stated premise that "no derived artifact cites one" — this design falsifies that premise, so the premise changes, not the design: **settle, remove, and withdraw-of-cited-annotation all cancel any active delegation on the subject (clearing its lease) and mark returned findings superseded.** Withdraw finds the affected findings via `findingCitations.by_annotation` (§5.2b), not by scanning. The `actions.ts` doc comment is corrected in PR A. Terminal delegation rows referencing a deleted action keep the id as a tombstone reference (rendered "question withdrawn").
 
 ## 6. Execution flow
 
