@@ -4,12 +4,14 @@ import {
   WITHDRAWN_ITEM_TEXT,
   annotationRefs,
   applyWithdrawals,
+  approvalSnapshot,
   assembleMarkdown,
   buildUserPrompt,
   collectCitations,
   countWithdrawn,
   extractJson,
   fence,
+  isSameApproval,
   isSameDraft,
   isStillShared,
   nameIndex,
@@ -573,6 +575,72 @@ describe("isSameDraft", () => {
 
   it("does not treat a missing draft as matching a zero timestamp", () => {
     expect(isSameDraft(null, 0)).toBe(false);
+  });
+});
+
+describe("isSameApproval", () => {
+  it("accepts the copy the revision was opened on", () => {
+    expect(isSameApproval({ synthesisApprovedAt: 1_000 }, 1_000)).toBe(true);
+  });
+
+  it("refuses when somebody else approved a new version meanwhile", () => {
+    expect(isSameApproval({ synthesisApprovedAt: 2_000 }, 1_000)).toBe(false);
+  });
+
+  it("refuses when there is no approved copy at all", () => {
+    expect(isSameApproval({}, 1_000)).toBe(false);
+    expect(isSameApproval({ synthesisApprovedAt: undefined }, 0)).toBe(false);
+  });
+});
+
+describe("approvalSnapshot", () => {
+  const live = (...ns: number[]) => new Set(ns.map(id));
+
+  it("keeps the cited notes that are still shared and drops the rest", () => {
+    expect(approvalSnapshot([id(1), id(2), id(3)], live(1, 3))).toEqual([
+      id(1),
+      id(3),
+    ]);
+  });
+
+  it("does not adopt a shared note the prose never cited", () => {
+    expect(approvalSnapshot([id(1)], live(1, 2, 3))).toEqual([id(1)]);
+  });
+
+  it("takes a stale copy's count back to zero when it is approved again", () => {
+    // The remedy the banner asks for has to actually work. A withdrawn note
+    // left in the snapshot would keep the warning up through every
+    // re-approval, and a warning that cannot be discharged is one people
+    // learn to scroll past.
+    const cited = [id(1), id(2), id(3)];
+    const shared = live(2, 3);
+    expect(countWithdrawn(cited, shared)).toBe(1);
+    expect(countWithdrawn(approvalSnapshot(cited, shared), shared)).toBe(0);
+  });
+
+  it("carries a revision forward on its own citations, not the new draft's", () => {
+    // The reapproval bug, as a property. Prose seeded from the approved copy
+    // rests on the notes *that copy* was approved against; a draft generated
+    // since cites whatever the margin says today. Binding the revision to the
+    // draft would count withdrawals against notes this text never came from —
+    // wrong in both directions, silent either way.
+    const approvedAgainst = [id(1), id(2)];
+    const theNewDraftCites = [id(7), id(8)];
+    const shared = live(1, 2, 7, 8);
+
+    const carried = approvalSnapshot(approvedAgainst, shared);
+    expect(carried).toEqual(approvedAgainst);
+    expect(carried.some((one) => theNewDraftCites.includes(one))).toBe(false);
+
+    // And the verdict that follows from it: withdrawing a note the new draft
+    // cites says nothing about a copy written before that draft existed.
+    expect(countWithdrawn(carried, live(1, 2))).toBe(0);
+    // Withdrawing one the copy actually rests on does.
+    expect(countWithdrawn(carried, live(2, 7, 8))).toBe(1);
+  });
+
+  it("carries nothing forward from a copy that rested on nothing", () => {
+    expect(approvalSnapshot([], live(1))).toEqual([]);
   });
 });
 

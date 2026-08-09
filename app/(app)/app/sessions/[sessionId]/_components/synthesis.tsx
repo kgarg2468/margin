@@ -168,11 +168,7 @@ export function SessionSynthesis({
         )}
 
         {editing && has ? (
-          <ApprovalEditor
-            session={session}
-            approved={approved}
-            onDone={() => setEditing(false)}
-          />
+          <ApprovalEditor session={session} onDone={() => setEditing(false)} />
         ) : (
           <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
             {session.canApprove && has && (
@@ -433,16 +429,16 @@ function ApprovedProse({ text }: { text: string }) {
  */
 function ApprovalEditor({
   session,
-  approved,
   onDone,
 }: {
   session: SessionDetail;
-  approved: string | undefined;
   onDone: () => void;
 }) {
   const draft = useQuery(api.synthesis.draftForApproval, {
     sessionId: session._id,
   });
+  const approved = session.synthesis;
+  const approvedAt = session.synthesisApprovedAt;
 
   if (draft === undefined) {
     return (
@@ -463,52 +459,82 @@ function ApprovalEditor({
     );
   }
 
+  // What the box is seeded with decides what its citations are, so the two are
+  // chosen in one breath and never separately. An approved copy is what the
+  // approver last said and opening on anything else would throw their edits
+  // away — and a revision of that copy rests on the notes *it* was approved
+  // against, not on a draft the prose has never seen.
+  const seeded: Basis =
+    approved !== undefined && approvedAt !== undefined
+      ? { from: "approved", approvedAt }
+      : { from: "draft", generatedAt: draft.generatedAt };
+
   return (
     <ApprovalForm
       session={session}
-      // An approved copy is what the approver last said; opening on anything
-      // else would throw away their edits the first time somebody re-reads it.
-      // With none, the draft is the starting point.
       initial={approved ?? draft.markdown}
-      editedFrom={draft.generatedAt}
+      seededFrom={seeded}
       draft={draft}
       onDone={onDone}
     />
   );
 }
 
+/** Which version the text in the box came from — see `approve` in convex. */
+type Basis =
+  | { from: "draft"; generatedAt: number }
+  | { from: "approved"; approvedAt: number };
+
 /**
- * `draft` is live and `editedFrom` is not, and that difference is the point.
+ * `draft` and `session` are live; `basis` is not, and that difference is the
+ * point.
  *
- * The form stays open for as long as it takes to read a page and rewrite it,
- * and a generation run finishing in that window replaces the draft underneath
- * the person editing. The subscription notices; the text in the box does not.
- * So the draft the text was actually written against is pinned in state at
- * mount and moves only when the approver deliberately moves it — which is what
- * lets the mismatch be *seen* here and refused on the server, rather than
- * quietly papered over by sending whatever timestamp happened to be current at
- * the moment somebody clicked.
+ * The form stays open for as long as it takes to read a page and rewrite it.
+ * A generation run can replace the draft underneath the person editing, and
+ * another approver can publish a new copy. The subscriptions notice; the text
+ * in the box does not. So what the text was actually written against is pinned
+ * in state when it is seeded and moves only when the approver deliberately
+ * moves it — which is what lets the mismatch be *seen* here and refused on the
+ * server, rather than quietly papered over by sending whatever version
+ * happened to be current at the moment somebody clicked.
+ *
+ * Moving it is two different offers, and the difference matters: taking the
+ * new draft's text means taking its citations, while keeping your own text
+ * means keeping the ones it was written against. Neither is chosen for the
+ * approver.
  */
 function ApprovalForm({
   session,
   initial,
-  editedFrom,
+  seededFrom,
   draft,
   onDone,
 }: {
   session: SessionDetail;
   initial: string;
-  editedFrom: number;
+  seededFrom: Basis;
   draft: { markdown: string; generatedAt: number };
   onDone: () => void;
 }) {
   const approve = useMutation(api.synthesis.approve);
   const [text, setText] = useState(initial);
-  const [basis, setBasis] = useState(editedFrom);
+  const [basis, setBasis] = useState<Basis>(seededFrom);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
-  const rewritten = draft.generatedAt !== basis;
+  const moved =
+    basis.from === "draft"
+      ? draft.generatedAt !== basis.generatedAt
+      : session.synthesisApprovedAt !== basis.approvedAt;
+
+  /** Keep this text, and stand behind it against the version that is there now. */
+  function rebind() {
+    if (basis.from === "draft") {
+      setBasis({ from: "draft", generatedAt: draft.generatedAt });
+    } else if (session.synthesisApprovedAt !== undefined) {
+      setBasis({ from: "approved", approvedAt: session.synthesisApprovedAt });
+    }
+  }
 
   return (
     <div className="pop-in flex flex-col gap-3">
@@ -516,15 +542,18 @@ function ApprovalForm({
         The lab&rsquo;s write-up
       </label>
       <p className="max-w-prose font-sans text-xs text-ink-faint">
-        Assembled from the draft, attributions and all. Cut it, rewrite it, say
-        what the model missed — what you approve is what the lab keeps.
+        {basis.from === "draft"
+          ? "Assembled from the draft, attributions and all. Cut it, rewrite it, say what the model missed — what you approve is what the lab keeps."
+          : "The copy the lab has now. It stays checked against the notes it was approved against — start again from the draft to check it against that instead."}
       </p>
 
-      {rewritten && (
+      {moved && (
         <p role="status" className={`${errorClass} max-w-prose`}>
-          The draft was written again while this was open, so what you have
-          here no longer matches the write-up it came from. Nothing you typed
-          has been touched — read the new draft above, then say which it is.
+          {basis.from === "draft"
+            ? "The draft was written again while this was open, so what you have here no longer matches the write-up it came from."
+            : "Somebody else approved a new version while this was open, so what you have here is no longer the lab's copy."}{" "}
+          Nothing you typed has been touched — read what&rsquo;s there now, then
+          say which of them this is.
         </p>
       )}
 
@@ -545,17 +574,13 @@ function ApprovalForm({
           // to be refused should say so before it is pressed. The round trip
           // still guards the narrower race — a run landing between this click
           // and the mutation.
-          disabled={pending || rewritten || text.trim().length === 0}
+          disabled={pending || moved || text.trim().length === 0}
           className={primaryButtonClass}
           onClick={async () => {
             setError(null);
             setPending(true);
             try {
-              await approve({
-                sessionId: session._id,
-                text,
-                draftGeneratedAt: basis,
-              });
+              await approve({ sessionId: session._id, text, basis });
               onDone();
             } catch (caught) {
               setError(
@@ -569,30 +594,37 @@ function ApprovalForm({
           {pending ? "Approving…" : "Approve write-up"}
         </button>
 
-        {rewritten && (
+        {moved && (
           // The person is the only one who can say whether their edits still
-          // hold against a write-up that has changed, so both answers are
+          // hold against a version that has changed, so both answers are
           // offered and neither is taken for them: keep the text and stand
-          // behind it, or take the new draft and lose it.
+          // behind it, or take what is there now and lose it.
           <button
             type="button"
-            onClick={() => setBasis(draft.generatedAt)}
+            onClick={rebind}
             className="font-sans text-sm text-accent underline-offset-4 hover:underline"
           >
-            My text still stands — approve against the new draft
+            {basis.from === "draft"
+              ? "My text still stands — approve against the new draft"
+              : "My text still stands — approve it over that version"}
           </button>
         )}
 
         {draft.markdown !== text && (
+          // Taking the draft's text takes the draft's citations with it. That
+          // is the one move that may re-point what this copy is checked
+          // against, and it is only ever made on purpose.
           <button
             type="button"
             onClick={() => {
               setText(draft.markdown);
-              setBasis(draft.generatedAt);
+              setBasis({ from: "draft", generatedAt: draft.generatedAt });
             }}
             className="font-sans text-sm text-accent underline-offset-4 hover:underline"
           >
-            {rewritten ? "Start again from the new draft" : "Start again from the draft"}
+            {moved && basis.from === "draft"
+              ? "Start again from the new draft"
+              : "Start again from the draft"}
           </button>
         )}
 

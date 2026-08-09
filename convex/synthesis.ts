@@ -1421,6 +1421,39 @@ export function isSameDraft(
 }
 
 /**
+ * Is this still the approved copy the reviser was editing?
+ *
+ * The same question as `isSameDraft`, asked of the other thing a person can
+ * open the form on. Two approvers editing at once is rarer than a regeneration
+ * landing mid-edit, but the failure is the same shape: prose that came from
+ * one version, stored with the citations of another.
+ */
+export function isSameApproval(
+  session: { synthesisApprovedAt?: number },
+  approvedAt: number,
+): boolean {
+  return session.synthesisApprovedAt === approvedAt;
+}
+
+/**
+ * The citations an approval is measured against from here on: the notes its
+ * prose rests on that are *still shared at this instant*.
+ *
+ * Filtering rather than storing the lot is what makes "review it and approve
+ * it again" the actual remedy for a stale copy. A withdrawn note that stayed
+ * in the snapshot would keep the banner up through every re-approval, and a
+ * warning that cannot be discharged is one people learn to scroll past — so
+ * this is exactly the inverse of `countWithdrawn`, and re-approving always
+ * takes the count back to zero.
+ */
+export function approvalSnapshot<A extends string = string>(
+  citations: Iterable<A>,
+  stillShared: ReadonlySet<A>,
+): A[] {
+  return [...citations].filter((annotationId) => stillShared.has(annotationId));
+}
+
+/**
  * The draft, as the editable markdown the approval form opens on.
  *
  * Presenter or PI only, because nobody else can act on it — and assembled from
@@ -1480,33 +1513,58 @@ export const draftForApproval = query({
  * person took responsibility for a version of the text and that is exactly the
  * kind of fact the ledger exists to hold.
  *
- * There has to be a generated draft first. Not because the text must come from
- * it — it need not — but because the approved copy's staleness is measured
- * against the draft's citations, and a write-up with nothing behind it is the
- * unfalsifiable prose this whole feature is built to refuse.
+ * ## Why the caller has to say what it edited
  *
- * ## Why the caller has to say which draft it edited
+ * The snapshot has to describe the thing the text was written from, and the
+ * form is open for as long as it takes somebody to read a page and rewrite it.
+ * Two things can move underneath them in that window: a generation run can
+ * replace the draft, and another approver can publish a new copy. Taking
+ * "whatever is current" would pair prose from one version with citations from
+ * another, and every staleness verdict afterwards would be computed against
+ * notes that never backed this text. A miscounted banner is worse than no
+ * banner: it is the one part of the surface whose whole job is to be believed.
  *
- * The snapshot has to describe the draft the text was written from, and the
- * approval form is open for as long as it takes somebody to read a page and
- * rewrite it. A generation run finishing in that window replaces the draft
- * underneath them — so taking "the current row" would pair prose edited from
- * one draft with citations taken from another, and every staleness verdict
- * afterwards would be computed against notes that never backed this text.
- * A miscounted banner is worse than no banner: it is the one part of the
- * surface whose whole job is to be believed.
+ * So the caller names its `basis`, and there are exactly two, because there
+ * are exactly two things the form can open on:
  *
- * So the approver names the draft, and a mismatch is refused rather than
- * reconciled. Nothing can be reconciled here — the superseded draft is gone
- * (`store` replaces the row in place), and the person is the only one who can
- * say whether their edits still hold against a write-up that has changed.
+ * - **`draft`** — the text came from the generated write-up, so the snapshot
+ *   is that draft's citations. Named by `generatedAt`.
+ * - **`approved`** — the text came from the copy the lab already has, which is
+ *   the ordinary case for a revision, so the snapshot is *carried forward*
+ *   from that copy rather than adopted from a draft the prose never saw.
+ *   Named by `approvedAt`.
+ *
+ * The second exists because of a real bug: a revision seeded from the approved
+ * prose while a newer draft sat below it used to be stored against the new
+ * draft's citations, which the prose had never rested on. Withdrawals were
+ * then counted against the wrong set of notes, in both directions — a copy
+ * could be flagged stale over a note it never cited, or stay silent while the
+ * notes it actually came from were taken back. Binding the snapshot to what
+ * was seeded, and moving it only when the approver explicitly starts again
+ * from the draft, is the fix.
+ *
+ * A mismatch is refused rather than reconciled. Nothing here can be
+ * reconciled — the superseded draft is gone (`store` replaces the row in
+ * place) — and the person is the only one who can say whether their edits
+ * still hold against a version that has changed.
  */
 export const approve = mutation({
   args: {
     sessionId: v.id("sessions"),
     text: v.string(),
-    /** `generatedAt` of the draft this text was edited from. */
-    draftGeneratedAt: v.number(),
+    /** Which version this text was edited from, and which one it was. */
+    basis: v.union(
+      v.object({
+        from: v.literal("draft"),
+        /** `generatedAt` of the draft the text was assembled from. */
+        generatedAt: v.number(),
+      }),
+      v.object({
+        from: v.literal("approved"),
+        /** `synthesisApprovedAt` of the copy the text was opened on. */
+        approvedAt: v.number(),
+      }),
+    ),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
@@ -1524,32 +1582,56 @@ export const approve = mutation({
       );
     }
 
-    const synthesis = await ctx.db
-      .query("syntheses")
-      .withIndex("by_session", (q) => q.eq("sessionId", args.sessionId))
-      .unique();
-    if (synthesis === null) {
-      throw new ConvexError(
-        "There's no draft to approve yet. Generate the write-up first — an approved copy is a version of something the lab's own notes back.",
-      );
-    }
-    if (!isSameDraft(synthesis, args.draftGeneratedAt)) {
-      throw new ConvexError(
-        "The draft was written again while this was open, so what you edited is no longer the write-up it came from. Nothing has been saved — read the new draft, then approve your version against it.",
-      );
+    // What the prose rests on, according to what it was seeded from. Each
+    // branch checks that its own basis is still the one it names before
+    // reading a citation out of it.
+    let citations: Iterable<Id<"annotations">>;
+    if (args.basis.from === "draft") {
+      const synthesis = await ctx.db
+        .query("syntheses")
+        .withIndex("by_session", (q) => q.eq("sessionId", args.sessionId))
+        .unique();
+      // There has to be a generated draft. Not because the text must come from
+      // it — it need not — but because a write-up with nothing behind it is
+      // the unfalsifiable prose this whole feature is built to refuse.
+      if (synthesis === null) {
+        throw new ConvexError(
+          "There's no draft to approve yet. Generate the write-up first — an approved copy is a version of something the lab's own notes back.",
+        );
+      }
+      if (!isSameDraft(synthesis, args.basis.generatedAt)) {
+        throw new ConvexError(
+          "The draft was written again while this was open, so what you edited is no longer the write-up it came from. Nothing has been saved — read the new draft, then approve your version against it.",
+        );
+      }
+      citations = collectCitations(synthesis.sections);
+    } else {
+      if (
+        session.synthesis === undefined ||
+        session.synthesisApprovedAt === undefined
+      ) {
+        throw new ConvexError(
+          "There's no approved copy to revise. Approve the draft first.",
+        );
+      }
+      if (!isSameApproval(session, args.basis.approvedAt)) {
+        throw new ConvexError(
+          "Somebody else approved a new version while this was open, so what you edited is no longer the lab's copy. Nothing has been saved — read the version that's there now, then approve yours against it.",
+        );
+      }
+      // Carried forward, not adopted from the current draft: this text came
+      // out of the approved copy, so the notes it rests on are that copy's.
+      citations = session.synthesisCitedAnnotationIds ?? [];
     }
 
-    const stillShared = await stillSharedAmong(
-      ctx,
-      session.labId,
-      collectCitations(synthesis.sections),
-    );
+    const stillShared = await stillSharedAmong(ctx, session.labId, citations);
+    const snapshot = approvalSnapshot(citations, stillShared);
     const reapproved = session.synthesisApprovedAt !== undefined;
 
     await ctx.db.patch(args.sessionId, {
       synthesis: text,
       synthesisApprovedAt: Date.now(),
-      synthesisCitedAnnotationIds: [...stillShared],
+      synthesisCitedAnnotationIds: snapshot,
     });
 
     await recordEvent(ctx, {
@@ -1558,7 +1640,7 @@ export const approve = mutation({
       paperId: session.paperId,
       sessionId: args.sessionId,
       type: "synthesis.approved",
-      citationCount: stillShared.size,
+      citationCount: snapshot.length,
       reapproved,
     });
     return null;
