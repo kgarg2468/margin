@@ -29,6 +29,12 @@ export type RailCard = {
   top: number;
   /** How its passage was found again, when the page it is on has resolved. */
   state?: AnchorState;
+  /**
+   * The page the passage actually turned up on, when that is not the page the
+   * note was written on. Set only for a note recovered from a neighbouring
+   * page; absent — which is almost always — the note is where it says it is.
+   */
+  foundOnPage?: number;
 };
 
 /** Breathing room between two cards that want the same line. */
@@ -152,6 +158,11 @@ export function MarginRail({
   function card(entry: RailCard) {
     return (
       <div
+        // The measured element is the wrapper rather than the card itself,
+        // because a note recovered from a neighbouring page carries a line of
+        // explanation underneath it, and the typesetting pass above has to
+        // count that line or the card below lands on top of it.
+        ref={(element) => register(entry.annotation._id, element)}
         className="relative"
         onClick={(event) => {
           if (
@@ -178,8 +189,22 @@ export function MarginRail({
           anchorState={entry.state}
           active={activeId === entry.annotation._id}
           onActivate={onActivate}
-          registerElement={register}
         />
+        {/* The paper repaginated and the passage turned up next door. The mark
+            is drawn on the sentence in the ordinary way, because that is where
+            the sentence is — but the margin says so out loud rather than
+            quietly relocating somebody's note to a page they never opened.
+            Both numbers: "found on page 8" alone is not the interesting half,
+            and the page it was written on is the one the lab remembers. */}
+        {entry.foundOnPage !== undefined && (
+          <p
+            title="This copy of the paper paginates differently from the one the note was written on. Nothing about the note itself has changed."
+            className="mt-1 pl-3 font-sans text-[11px] leading-snug text-ink-faint"
+          >
+            Found on page {entry.foundOnPage + 1}, noted on page{" "}
+            {entry.annotation.anchor.pageIndex + 1}.
+          </p>
+        )}
       </div>
     );
   }
