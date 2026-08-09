@@ -22,24 +22,6 @@ import { VisibilityToggle } from "./visibility-toggle";
 type Visibility = Doc<"annotations">["visibility"];
 
 /**
- * The two things Base UI puts on its dismissal object that `PopoverDismissal`
- * does not name: the native event behind the dismissal, and the one call that
- * lets a cancelled event keep travelling outward.
- *
- * Both are on every details object Base UI builds
- * (`internals/createBaseUIEventDetails.js`), so the optionality here is the
- * shared type's caution rather than a real maybe. Widening `PopoverDismissal`
- * by the one line is the tidier home for `allowPropagation` — the plan's own
- * coordinator note anticipated exactly that — but `popover.tsx` is outside this
- * task's allowlist, so the extra shape is stated locally instead. See the
- * report.
- */
-type NativeDismissal = PopoverDismissal & {
-  event?: Event;
-  allowPropagation?: () => void;
-};
-
-/**
  * Which surface an Escape was pressed on, read off the event's own target.
  *
  * `role="dialog"` is the question asked, because that is how every layer over
@@ -190,10 +172,9 @@ export function Composer({
       return;
     }
     if (details.reason === "escape-key") {
-      const native = details as NativeDismissal;
       if (
         !composerHandlesEscape(
-          pressedIn(native.event?.target ?? null, insideSheet.current),
+          pressedIn(details.event?.target ?? null, insideSheet.current),
         )
       ) {
         // Something is open over the sheet and this Escape is its business.
@@ -203,7 +184,7 @@ export function Composer({
         // have seen it. Without this the topmost surface is the one thing on
         // screen Escape cannot close.
         details.cancel();
-        native.allowPropagation?.();
+        details.allowPropagation?.();
         return;
       }
       // Base UI would close the sheet here. It does not get to decide what

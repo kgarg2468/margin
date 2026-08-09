@@ -17,6 +17,16 @@ import type { ComponentProps, ReactNode } from "react";
 export type PopoverDismissal = {
   reason: string;
   cancel: () => void;
+  /** The native event behind the dismissal, when an event caused it. */
+  event?: Event;
+  /**
+   * Let the event that caused this dismissal keep bubbling. Base UI stops it
+   * by default; a caller that cancelled the dismissal because the event
+   * belongs to a surface above (the ⌘K palette over the composer) calls this
+   * so that surface still hears it. Both fields are on every details object
+   * Base UI builds; the optionality is this type's caution, not a real maybe.
+   */
+  allowPropagation?: () => void;
 };
 
 /**
