@@ -307,11 +307,28 @@ export const eventDoc = v.union(
     annotationType,
     visibility: annotationVisibility,
   }),
+  /**
+   * A note was rewritten or retyped, and the state it was in before that was
+   * preserved.
+   *
+   * `version` is the ordinal of the state this edit *replaced* — the row in
+   * `annotationVersions` the edit created. A number, not the prose: pointing
+   * at the prior state is a reference, and the ledger holds references. The
+   * thing pointed at is deletable and this row is not, which is the whole
+   * reason the split exists (see `annotationVersions`). A reader that follows
+   * the pointer and finds nothing has learned the truth: the note was edited,
+   * and what it used to say is no longer kept.
+   *
+   * Optional because rows written before annotation history shipped have no
+   * version to name, and the ledger is append-only — there is no pass that
+   * could go back and give them one.
+   */
   v.object({
     ...eventBase,
     type: v.literal("annotation.edited"),
     paperId: v.id("papers"),
     annotationId: v.id("annotations"),
+    version: v.optional(v.number()),
   }),
   v.object({
     ...eventBase,
@@ -840,6 +857,30 @@ export default defineSchema({
     mentions: v.optional(v.array(v.id("users"))),
     parentId: v.optional(v.id("annotations")),
     editedAt: v.optional(v.number()),
+    /**
+     * How many states this note has had, counting the one it is in now.
+     *
+     * Absent means one — a note nobody has edited — so an untouched margin
+     * carries no extra bytes and no backfill was needed to ship this.
+     *
+     * A denormalized count under the same obligation as `labs.memberCount` and
+     * `reactionTallies.count`: every write that files a prior state into
+     * `annotationVersions` moves this in the same transaction, and Convex
+     * mutations are atomic, so it cannot drift. It is here rather than counted
+     * from the version rows because the margin needs it for every note it
+     * draws, and counting would be a read per card — the fan-out
+     * `listForPaper` refuses everywhere else.
+     *
+     * It counts *states*, not surviving rows. Past the retention cap the
+     * oldest version rows are dropped and this keeps climbing, which is what
+     * lets the history panel say "3 of 60 versions are still kept" instead of
+     * quietly presenting the tail as the whole story.
+     *
+     * Cleared when a note is withdrawn, alongside the rows themselves: a
+     * tombstone has no history, because withdrawing a note that still offered
+     * its previous drafts would not be withdrawing anything.
+     */
+    versionCount: v.optional(v.number()),
     deletedAt: v.optional(v.number()),
   })
     .index("by_paper", ["paperId"])
@@ -863,6 +904,72 @@ export default defineSchema({
       searchField: "body",
       filterFields: ["labId", "visibility", "memberId"],
     }),
+
+  /**
+   * What a note used to say — one row per state an annotation has been in and
+   * left.
+   *
+   * ## Why this is not in the ledger
+   *
+   * It is the obvious place for it, and it is the one place it can never go.
+   * `events` is append-only: nothing updates a row and nothing deletes one.
+   * A body written there could never afterwards be redacted, withdrawn, or
+   * made private again — the author of a note would lose the right to take
+   * their own words back the moment they edited them once. The ledger
+   * therefore keeps doing what it does (a member edited this note, at this
+   * time, replacing this version ordinal) and the prose lives here, in a
+   * mutable table whose rows are allowed to die.
+   *
+   * ## Rows that die with the thing they describe
+   *
+   * These rows are not independent objects. They are the earlier states of one
+   * annotation, and they last exactly as long as it does:
+   *
+   * - Withdrawing or deleting a note hard-deletes every version of it
+   *   (`sweepVersions`). A withdrawn note whose drafts were still readable
+   *   would be a withdrawal that withdrew nothing.
+   * - **No visibility is stored here.** A version's audience is read from the
+   *   parent annotation at read time, every time, so flipping a note to
+   *   private hides its history in the same instant and by the same act. A
+   *   `visibility` column on this table would be a second copy of the rule,
+   *   and a second copy is a copy that can be stale — the one failure mode
+   *   this whole table is arranged to make impossible.
+   *
+   * There is deliberately no `memberId` either. Only a note's author can edit
+   * it, so every version of it is theirs by construction, and storing the fact
+   * again would invite a future reader to trust the copy instead of the parent.
+   *
+   * ## Bounded
+   *
+   * Capped at `MAX_VERSIONS_KEPT` rows per annotation, oldest dropped first
+   * (see `convex/annotationVersions.ts`). Refusing the edit instead was the
+   * alternative and it is the wrong one: an author must always be able to fix
+   * their own sentence, and a product that says "you have revised this too
+   * many times" to a person correcting a typo has chosen its bookkeeping over
+   * its user. What is owed instead is honesty about the loss, which is what
+   * `annotations.versionCount` and the panel's truncation line are for.
+   */
+  annotationVersions: defineTable({
+    annotationId: v.id("annotations"),
+    /**
+     * Which state this was, counting from 1 — the ordinal the note carried
+     * before the edit that replaced it. Never reused and never renumbered, so
+     * the gap between 1 and the lowest surviving row is exactly how much
+     * history the cap has taken.
+     */
+    version: v.number(),
+    /** What it said. Empty is a real value: a bare highlight is a real note. */
+    body: v.string(),
+    type: annotationType,
+    /** When this state stopped being the current one. */
+    replacedAt: v.number(),
+  })
+    /**
+     * Both reads this table has, from one index: on the `annotationId` prefix
+     * it is a note's history in order, and full-width it is the exact row the
+     * retention cap drops.
+     */
+    .index("by_annotation_and_version", ["annotationId", "version"]),
 
   /**
    * The Ledger: append-only, never updated, never deleted. Every row is a
