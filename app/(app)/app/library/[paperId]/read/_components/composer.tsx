@@ -13,6 +13,7 @@ import { useCallback, useRef, useState } from "react";
 import type { EscapePressedIn } from "./composer-escape";
 import {
   composerEscape,
+  composerFocusOut,
   composerHandlesEscape,
   dismissalAsksFirst,
   escapeBelongsTo,
@@ -192,6 +193,30 @@ export function Composer({
     }
   }
 
+  /**
+   * Focus has gone somewhere; decide what that was.
+   *
+   * Both callers hand in where it landed — Base UI's own `focus-out` reason
+   * carries the event, and the sheet watches its own `focusout` besides,
+   * because Base UI reports nothing at all for a Tab out of a portalled popup
+   * (measured: five Tabs walked textarea → PRIVATE → Save note → focus guard →
+   * `<body>` in silence). Returns whether it handled the departure, so the
+   * dismissal path knows to cancel.
+   */
+  function focusLeft(landedOn: EventTarget | null): boolean {
+    switch (composerFocusOut(pressedIn(landedOn, insideSheet.current), body)) {
+      case "stay":
+      case "cancel-silently":
+        return true;
+      case "ask-before-discarding":
+        setConfirming(true);
+        return true;
+      case "close":
+        onClose();
+        return false;
+    }
+  }
+
   function dismissal(open: boolean, details: PopoverDismissal) {
     if (open) {
       return;
@@ -219,6 +244,20 @@ export function Composer({
       escape();
       return;
     }
+    if (details.reason === "focus-out") {
+      // Where focus went decides this, and the event knows: `relatedTarget` is
+      // the element taking it. Falling back to what holds it now covers the
+      // frame where nothing does.
+      const event = details.event;
+      const landedOn =
+        event instanceof FocusEvent && event.relatedTarget !== null
+          ? event.relatedTarget
+          : (insideSheet.current?.ownerDocument.activeElement ?? null);
+      if (focusLeft(landedOn)) {
+        details.cancel();
+      }
+      return;
+    }
     if (dismissalAsksFirst(details.reason, body)) {
       details.cancel();
       setConfirming(true);
@@ -244,107 +283,136 @@ export function Composer({
       onOpenChange={dismissal}
       className="w-80 max-w-[calc(100vw-3rem)]"
     >
-      <p
-        ref={insideSheet}
-        className="mb-3 border-l-2 border-rule pl-2.5 font-serif text-sm leading-snug text-ink-muted"
-      >
-        <span className="line-clamp-3 italic">{draft.anchor.quote}</span>
-      </p>
-
-      <TypeChips value={type} onChange={setType} />
-
-      <div className="mt-3">
-        <MentionField
-          autoFocus
-          paperId={paperId}
-          value={body}
-          onChange={setBody}
-          onPick={(candidate) =>
-            setPicked((previous) =>
-              previous.some((entry) => entry.id === candidate.id)
-                ? previous
-                : [...previous, candidate],
-            )
+      {/*
+       * `display: contents`, so this is a listener and not a box — the sheet's
+       * layout is unchanged by it.
+       *
+       * It is here because Base UI's `focus-out` never fires for a Tab out of a
+       * portalled popup: the walk goes textarea → PRIVATE → Save note → Base
+       * UI's own focus guard → `<body>`, and the sheet is told nothing. The
+       * guard is outside the popup, so the hop onto it is exactly the moment
+       * focus leaves, and `relatedTarget` names where it went. Everything
+       * inside the sheet answers `"stay"`.
+       */}
+      <div
+        className="contents"
+        onBlur={(event) => {
+          if (event.relatedTarget === null) {
+            // Focus went nowhere this event can name — the window losing it, or
+            // the browser's own chrome taking it. Neither is somebody walking
+            // away from the note, and asking about it would be a question
+            // raised behind a tab that is not even on screen.
+            return;
           }
-          dismissedAt={dismissedAt}
-          onDismissedAtChange={setDismissedAt}
-          onMenuOpenChange={onMenuOpenChange}
-          onSubmit={() => void save()}
-          rows={3}
-          placeholder="Say something, or just save the highlight. Type @ to name a labmate."
-          className="w-full resize-y rounded-sm border border-rule bg-page px-2.5 py-2 font-serif text-sm leading-relaxed text-ink placeholder:text-ink-faint hover:border-ink-faint"
-        />
-      </div>
+          focusLeft(event.relatedTarget);
+        }}
+      >
+        <p
+          ref={insideSheet}
+          className="mb-3 border-l-2 border-rule pl-2.5 font-serif text-sm leading-snug text-ink-muted"
+        >
+          <span className="line-clamp-3 italic">{draft.anchor.quote}</span>
+        </p>
 
-      <div className="mt-3 flex flex-col gap-3">
-        <VisibilityToggle value={visibility} onChange={setVisibility} />
+        <TypeChips value={type} onChange={setType} />
 
-        {/*
-         * Said out loud, and only when it is actually true. A note kept
-         * private is a note nobody is told about, however many names are in
-         * it — so a composer that showed "Sara will be notified" beside a
-         * private toggle would be promising something the server will refuse
-         * to do. This is the one place a member can see which of the two
-         * they are about to do.
-         */}
-        {mentions.length > 0 && (
-          <p className="font-sans text-xs text-ink-faint">
-            {visibility === "lab"
-              ? `${mentions.length === 1 ? "1 person" : `${mentions.length} people`} will be told about this note.`
-              : "Private, so nobody is told. Share it with the lab and the people you named hear about it then."}
-          </p>
-        )}
+        <div className="mt-3">
+          <MentionField
+            autoFocus
+            paperId={paperId}
+            value={body}
+            onChange={setBody}
+            onPick={(candidate) =>
+              setPicked((previous) =>
+                previous.some((entry) => entry.id === candidate.id)
+                  ? previous
+                  : [...previous, candidate],
+              )
+            }
+            dismissedAt={dismissedAt}
+            onDismissedAtChange={setDismissedAt}
+            onMenuOpenChange={onMenuOpenChange}
+            onSubmit={() => void save()}
+            rows={3}
+            placeholder="Say something, or just save the highlight. Type @ to name a labmate."
+            className="w-full resize-y rounded-sm border border-rule bg-page px-2.5 py-2 font-serif text-sm leading-relaxed text-ink placeholder:text-ink-faint hover:border-ink-faint"
+          />
+        </div>
 
-        {confirming ? (
-          // In the sheet rather than in a dialog on top of it: a second modal
-          // over a modal brings a second Escape owner, which is the class of
-          // bug this whole task is about.
-          <div className="flex flex-col gap-2 border-l-2 border-accent-strong pl-3">
-            <p className="font-sans text-sm text-ink">
-              Throw this note away?
+        <div className="mt-3 flex flex-col gap-3">
+          <VisibilityToggle value={visibility} onChange={setVisibility} />
+
+          {/*
+           * Said out loud, and only when it is actually true. A note kept
+           * private is a note nobody is told about, however many names are in
+           * it — so a composer that showed "Sara will be notified" beside a
+           * private toggle would be promising something the server will refuse
+           * to do. This is the one place a member can see which of the two
+           * they are about to do.
+           */}
+          {mentions.length > 0 && (
+            <p className="font-sans text-xs text-ink-faint">
+              {visibility === "lab"
+                ? `${mentions.length === 1 ? "1 person" : `${mentions.length} people`} will be told about this note.`
+                : "Private, so nobody is told. Share it with the lab and the people you named hear about it then."}
             </p>
+          )}
+
+          {confirming ? (
+            // In the sheet rather than in a dialog on top of it: a second modal
+            // over a modal brings a second Escape owner, which is the class of
+            // bug this whole task is about.
+            <div className="flex flex-col gap-2 border-l-2 border-accent-strong pl-3">
+              <p className="font-sans text-sm text-ink">
+                Throw this note away?
+              </p>
+              <div className="flex items-center gap-4">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="pressable inline-flex items-center justify-center rounded-sm border border-rule bg-surface px-3 py-1.5 font-sans text-sm text-ink hover:border-ink-faint"
+                >
+                  Discard
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirming(false)}
+                  className="font-sans text-sm text-accent underline-offset-4 hover:underline"
+                >
+                  Keep writing
+                </button>
+              </div>
+            </div>
+          ) : (
             <div className="flex items-center gap-4">
               <button
                 type="button"
-                onClick={onClose}
-                className="pressable inline-flex items-center justify-center rounded-sm border border-rule bg-surface px-3 py-1.5 font-sans text-sm text-ink hover:border-ink-faint"
+                disabled={saving}
+                onClick={() => void save()}
+                className="pressable inline-flex items-center justify-center rounded-sm bg-accent px-3 py-1.5 font-sans text-sm text-accent-contrast hover:bg-accent-strong disabled:opacity-50"
               >
-                Discard
+                {saving
+                  ? "Saving…"
+                  : body.trim().length > 0
+                    ? "Save note"
+                    : "Highlight"}
               </button>
               <button
                 type="button"
-                onClick={() => setConfirming(false)}
-                className="font-sans text-sm text-accent underline-offset-4 hover:underline"
+                onClick={escape}
+                className="font-sans text-sm text-ink-faint underline-offset-4 hover:underline"
               >
-                Keep writing
+                Cancel
               </button>
             </div>
-          </div>
-        ) : (
-          <div className="flex items-center gap-4">
-            <button
-              type="button"
-              disabled={saving}
-              onClick={() => void save()}
-              className="pressable inline-flex items-center justify-center rounded-sm bg-accent px-3 py-1.5 font-sans text-sm text-accent-contrast hover:bg-accent-strong disabled:opacity-50"
-            >
-              {saving ? "Saving…" : body.trim().length > 0 ? "Save note" : "Highlight"}
-            </button>
-            <button
-              type="button"
-              onClick={escape}
-              className="font-sans text-sm text-ink-faint underline-offset-4 hover:underline"
-            >
-              Cancel
-            </button>
-          </div>
-        )}
+          )}
 
-        {error !== null && (
-          <p role="alert" className={errorClass}>
-            {error}
-          </p>
-        )}
+          {error !== null && (
+            <p role="alert" className={errorClass}>
+              {error}
+            </p>
+          )}
+        </div>
       </div>
     </Popover>
   );

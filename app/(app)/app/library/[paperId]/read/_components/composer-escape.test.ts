@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   composerEscape,
+  composerFocusOut,
   composerHandlesEscape,
   dismissalAsksFirst,
   escapeBelongsTo,
@@ -163,5 +164,44 @@ describe("Escape and the surface it belongs to", () => {
     // topmost thing open: Escape has to keep working there, or a note becomes
     // un-dismissable by keyboard the moment the reader clicks the page.
     expect(composerHandlesEscape("page")).toBe(true);
+  });
+});
+
+/**
+ * The same question asked of focus instead of of a key — and the three rows
+ * that were, between them, wrong in both directions at once.
+ */
+describe("focus leaving the sheet", () => {
+  it("says nothing when another surface takes focus, and keeps the draft", () => {
+    // BP-1/BP-3: ⌘K raised "Throw this note away?" merely because focus moved
+    // into the palette. Nobody was leaving the note — a layer arrived over it.
+    expect(composerFocusOut("surface-above", "half-written note one")).toBe(
+      "cancel-silently",
+    );
+  });
+
+  it("asks before letting a written note go to the page", () => {
+    // ADD-1: five Tabs walked out to `<body>` and the question never came.
+    expect(composerFocusOut("page", "the effect size is")).toBe(
+      "ask-before-discarding",
+    );
+  });
+
+  it("closes on the way out when there is nothing to lose", () => {
+    expect(composerFocusOut("page", "")).toBe("close");
+    expect(composerFocusOut("page", "  \n ")).toBe("close");
+  });
+
+  it("is not a departure at all while focus is still in the sheet", () => {
+    // Tabbing from the box to the chips fires the same event.
+    expect(composerFocusOut("composer", "a note")).toBe("stay");
+    expect(composerFocusOut("composer", "")).toBe("stay");
+  });
+
+  it("does not ask a surface above about the body, either way", () => {
+    // Deliberately the same answer empty or not: a palette over the sheet is
+    // not a decision about the note, so neither closing it nor questioning it
+    // is something to do behind the reader's back.
+    expect(composerFocusOut("surface-above", "")).toBe("cancel-silently");
   });
 });

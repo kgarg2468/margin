@@ -110,12 +110,59 @@ export function composerHandlesEscape(pressedIn: EscapePressedIn): boolean {
  * string: a list would have to be right about names this file does not own,
  * and being wrong about one of them costs somebody their writing. `focus-out`
  * is exactly that mistake, already made once.
+ *
+ * `focus-out` now has an answer of its own too — see `composerFocusOut`, which
+ * needs to know *where* focus went and this cannot. The row below stands as
+ * the fallback for a focus-out that never reaches it, and it errs the same way
+ * everything here errs: it asks.
  */
 export function dismissalAsksFirst(reason: string, body: string): boolean {
   if (reason === "escape-key") {
     return false;
   }
   return body.trim().length > 0;
+}
+
+export type ComposerFocusOutAction =
+  | "stay"
+  | "cancel-silently"
+  | "ask-before-discarding"
+  | "close";
+
+/**
+ * What it means when focus leaves the sheet.
+ *
+ * This was inverted in both directions at once, which is what made it one bug
+ * rather than two. Tab-walking out of a composer with half a paragraph in it
+ * reached `<body>` and never raised the question — the note survived, but
+ * silently, and nothing told the reader the sheet was no longer theirs. And
+ * pressing ⌘K raised "Throw this note away?" merely because focus had moved
+ * into the palette, so the question arrived over a note nobody was leaving and
+ * the next Escape spent itself taking it back.
+ *
+ * The rule is the one `escapeBelongsTo` already states, applied to focus
+ * instead of to a key press: **the innermost open surface owns what just
+ * happened.** Focus moving into another surface is not the reader abandoning
+ * the note, it is a layer arriving on top of it — nothing to ask about, and
+ * the draft stays exactly where it is. Focus leaving to the page underneath is
+ * the reader walking away, and a note with writing in it does not go quietly.
+ *
+ * Taking `EscapePressedIn` rather than a type of its own is the point: one
+ * reading of "where is this happening" answers both keys and focus, so the two
+ * cannot drift apart.
+ */
+export function composerFocusOut(
+  landedIn: EscapePressedIn,
+  body: string,
+): ComposerFocusOutAction {
+  if (landedIn === "composer") {
+    // Moving between the box and the chips is not leaving.
+    return "stay";
+  }
+  if (landedIn === "surface-above") {
+    return "cancel-silently";
+  }
+  return body.trim().length > 0 ? "ask-before-discarding" : "close";
 }
 
 export function composerEscape(state: ComposerEscapeState): ComposerEscapeAction {
