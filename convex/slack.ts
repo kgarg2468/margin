@@ -583,13 +583,24 @@ export const briefPayload = internalQuery({
     const stillShared = await stillSharedAmong(ctx, session.labId, cited);
 
     const sections = redactWithdrawn(brief.sections, stillShared)
-      .map((section) => ({
-        heading: section.heading,
-        items: section.items
-          .filter((item) => item.text !== WITHDRAWN_ITEM_TEXT)
-          .map((item) => item.text),
-        droppedCount: section.droppedCount,
-      }))
+      .map((section) => {
+        const kept = section.items.filter(
+          (item) => item.text !== WITHDRAWN_ITEM_TEXT,
+        );
+        return {
+          heading: section.heading,
+          items: kept.map((item) => item.text),
+          // Lines withdrawn since the brief was assembled are counted in with
+          // the ones the cap held back. In the app a withdrawal leaves a marker
+          // where the line was, so the section still accounts for itself; here
+          // the line is simply gone, and a count that ignored it would have the
+          // section quietly show fewer items than it says it has. What the
+          // sentence means to somebody reading it in Slack is "this section has
+          // more in it than you can see", and that is true of both kinds.
+          droppedCount:
+            section.droppedCount + (section.items.length - kept.length),
+        };
+      })
       .filter((section) => section.items.length > 0);
     // A brief whose every line has been withdrawn is not a brief. Nothing is
     // posted, and the in-app panel already says so to the two people it is for.
@@ -772,7 +783,13 @@ export const boundaryPayload = internalQuery({
       id: a._id,
       paperId: a.paperId,
       memberId: a.memberId,
-      memberName: names.get(a.memberId) ?? "A lab member",
+      // "Someone", not the "A lab member" this module uses for a presenter or
+      // an approver: this field is fed to the digest engine, whose own contract
+      // names it, and whose lines are written around it — "Someone marked the
+      // same passage" reads as English where "A lab member marked" does not.
+      // The same line should not read one way in a lab's mail and another in
+      // their channel.
+      memberName: names.get(a.memberId) ?? "Someone",
       type: a.type,
       pageIndex: a.anchor.pageIndex,
       start: a.anchor.start,
