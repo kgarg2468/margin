@@ -38,6 +38,29 @@ export const annotationVisibility = v.union(
 );
 
 /**
+ * Where the lab says a claim stands: the second axis on an annotation, and the
+ * only one that is not its author's.
+ *
+ * `annotationType` is what the writer meant by writing it. This is what the
+ * group decided afterwards, which is why it is a different field with a
+ * different permission on it (see `annotations.setStatus`) and why it exists at
+ * all: without it a position the lab argued down and a note somebody deleted
+ * vanish identically, and "did we change our mind?" has no answer in the data.
+ *
+ * Four words, and unmarked as the fifth state — deliberately unspelled, because
+ * almost every note in a margin is unmarked and stamping them all `PROPOSED`
+ * would turn reading into filing. Every transition between them is written by
+ * a person; nothing in this backend infers one. The vocabulary and the rules
+ * that govern the moves live in `lib/epistemic/status.ts`, tested there.
+ */
+export const epistemicStatus = v.union(
+  v.literal("accepted"),
+  v.literal("disputed"),
+  v.literal("resolved"),
+  v.literal("superseded"),
+);
+
+/**
  * The five marks a member can put on someone else's note.
  *
  * A closed set, and deliberately a scholarly one: these are the things a
@@ -358,6 +381,54 @@ export const eventDoc = v.union(
     annotationId: v.id("annotations"),
     /** The visibility the annotation was moved *to*. */
     visibility: annotationVisibility,
+  }),
+  /**
+   * The lab ruled on a note: accepted it, disputed it, resolved it, or replaced
+   * it with a later one.
+   *
+   * The fact the memory layer is built to read back, and the reason it is here
+   * rather than only on the annotation. The row carries where a claim stands
+   * *now*; this carries the walk that got it there, in a table nothing can
+   * rewrite — so "what did we think in March, and what changed our mind" is a
+   * question about stored facts rather than about a field's last value.
+   *
+   * References only, like every other variant. `status` is a closed vocabulary
+   * (four words chosen from a menu, not prose) and `supersededBy` is an id, so
+   * nothing here can outlive the audience of the writing it describes. The
+   * reason a member gave for the ruling — the argument — belongs in an
+   * annotation, where its author can still take it back.
+   *
+   * `at` is both times a bitemporal record needs, because they are the same
+   * time: a human-authored transition takes effect at the moment it is
+   * asserted. When AI-*suggested* edges arrive (Phase 3, always acceptance-
+   * gated) the moment of proposal and the moment of assent come apart, and that
+   * is when a second stamp earns its place — not before.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("annotation.status_set"),
+    paperId: v.id("papers"),
+    annotationId: v.id("annotations"),
+    /** The status the note was moved *to*. */
+    status: epistemicStatus,
+    /** The note that replaces it — on `superseded` and nowhere else. */
+    supersededBy: v.optional(v.id("annotations")),
+  }),
+  /**
+   * And the ruling was taken off again, leaving the note unmarked.
+   *
+   * Its own variant rather than an absent `status` on the one above, for the
+   * reason `annotation.unreacted` is its own variant: the ledger is a list of
+   * facts and "accepted, then withdrew that" is two of them. It also keeps
+   * every reader of `status_set` honest — an optional field means a reader that
+   * forgets to check it reports a verdict the lab has since retracted, and the
+   * readers of this table are digests and briefs.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("annotation.status_cleared"),
+    paperId: v.id("papers"),
+    annotationId: v.id("annotations"),
   }),
   v.object({
     ...eventBase,
@@ -986,6 +1057,58 @@ export default defineSchema({
      * its previous drafts would not be withdrawing anything.
      */
     versionCount: v.optional(v.number()),
+    /**
+     * Where the lab says this claim stands. Absent means nobody has ruled,
+     * which is what almost every note in a margin is.
+     *
+     * ## Why a field and not a table
+     *
+     * A status is exactly one value per annotation, and the margin needs it for
+     * every card it draws. An adjacent `annotationStatuses` table would be a
+     * row per note to hold a single word, read either by a query per card — the
+     * fan-out `listForPaper` refuses everywhere else — or by a second indexed
+     * read that answers a question the first read has already answered. The
+     * tables that do exist beside `annotations` are there because their rows
+     * are *many* per note and grow without a natural ceiling (`reactions`,
+     * `annotationVersions`); this is not that shape. The precedent is
+     * `versionCount` and `editedAt`: one fact per note, on the note.
+     *
+     * What that costs is the thing a table would have given for free — an index
+     * on the status, so "everything the lab still disputes" is not a query yet.
+     * That is the temporal derived index in the roadmap's Phase 2 and it wants
+     * its own shape (per-lab, per-session, time-ordered) rather than an index
+     * on this. When it lands, this stays: a projection reads from the ledger,
+     * and the current value belongs where the card is.
+     *
+     * ## The audience rule this field does not carry
+     *
+     * A status is a lab-level claim about a lab-visible note, and the field
+     * stores no copy of that rule: `listForPaper` reads the audience off the
+     * annotation it is already holding and returns no status for a note that is
+     * private or withdrawn. Flipping a note to private therefore takes the
+     * lab's verdict off the wire in the same instant and by the same act, with
+     * no second write to get wrong — the same discipline `annotationVersions`
+     * is arranged around. Sharing it again brings the verdict back, because
+     * nothing destroyed it: the lab's ruling was not the author's to erase by
+     * changing their mind about the audience.
+     */
+    status: v.optional(epistemicStatus),
+    /**
+     * The note that replaces this one, on a `superseded` note and nowhere else.
+     *
+     * A citation, and treated as one: it is re-checked against the annotation
+     * it names on every read (`isStillShared`, the rule syntheses and briefs
+     * already apply to theirs) and redacted honestly when that note has been
+     * withdrawn or taken private. A plain id with no referential guarantee for
+     * the same reason `savedFilters.collectionId` is one — the row it points at
+     * belongs to somebody else, and cascading into it would be one member
+     * silently editing another's record.
+     */
+    supersededBy: v.optional(v.id("annotations")),
+    /** When the lab ruled — the status's effective date, and its provenance. */
+    statusSetAt: v.optional(v.number()),
+    /** Who ruled. A verdict nobody's name is on is not a verdict. */
+    statusSetBy: v.optional(v.id("users")),
     deletedAt: v.optional(v.number()),
   })
     .index("by_paper", ["paperId"])

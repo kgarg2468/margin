@@ -11,8 +11,15 @@ import {
   anchor,
   annotationType,
   annotationVisibility,
+  epistemicStatus,
   reactionKind,
 } from "./schema";
+import { canApprove } from "./sessions";
+import { isStillShared } from "./synthesis";
+import {
+  checkTransition,
+  grantsPresenterStanding,
+} from "../lib/epistemic/status";
 import { disambiguate, MAX_MENTIONS_PER_NOTE } from "../lib/mentions";
 
 /**
@@ -56,6 +63,17 @@ import { disambiguate, MAX_MENTIONS_PER_NOTE } from "../lib/mentions";
  *
  * The ids come from a picker the author used, never from parsing prose. See
  * `lib/mentions/` for why that distinction is doing real work.
+ *
+ * ## Epistemic status, and the one thing in here that is not the author's
+ *
+ * Everything above is a member's own writing, and the permission on all of it
+ * is authorship (`requireOwn`). A note's *status* — accepted, disputed,
+ * resolved, superseded — is the exception, and deliberately so: it is not a
+ * claim about the note, it is the lab's claim about the passage, and the author
+ * of a critique does not get to record that the lab accepted it. So `setStatus`
+ * is gated on the standing to speak for the group (see `mayRuleOnStatus`), it
+ * refuses any note the lab cannot see, and every transition is written by a
+ * person — nothing in this file infers one from replies, reactions, or types.
  */
 
 /** Long enough for a paragraph of argument; short enough to stay one document. */
@@ -150,6 +168,46 @@ const MAX_CONTEXT_LENGTH = 64;
  */
 const MIN_QUOTE_CHARS = 4;
 
+/**
+ * How many sessions on one paper are consulted to decide whether the caller has
+ * ever presented it.
+ *
+ * A paper a lab has discussed a hundred times is not a thing, and this is far
+ * past the ceiling of any real library. It is a cap rather than a page for the
+ * usual reason: the read has to be bounded, and the honest failure of a bound
+ * this high is that somebody who presented the 101st meeting about one paper is
+ * told to ask the PI.
+ */
+const MAX_SESSIONS_CONSULTED = 100;
+
+/**
+ * Where the lab says this claim stands, as the margin draws it.
+ *
+ * Composed here rather than handed over as raw columns because two of the
+ * fields are answers to questions only the server can ask: who ruled (a name,
+ * resolved like every other name in this query) and whether the note named as
+ * the replacement is still one the reader may see. A client given a bare
+ * `supersededBy` id could render the word and nothing else, which is the one
+ * outcome this feature must not produce — a citation the reader cannot check
+ * and is not told they cannot check.
+ */
+const statusView = v.object({
+  value: epistemicStatus,
+  /** When the lab ruled. The status's effective date, and the card's timestamp. */
+  at: v.number(),
+  /** Who ruled. A verdict with nobody's name on it is not a verdict. */
+  byName: v.string(),
+  /** The author of the note that replaces this one, while it is still shared. */
+  supersededByName: v.optional(v.string()),
+  /**
+   * This note names a replacement the reader can no longer see — withdrawn,
+   * deleted, or taken private since the ruling. The card says so in those
+   * words rather than drawing a bare "Superseded", which would read as a
+   * complete fact instead of a withheld one.
+   */
+  supersededByRedacted: v.boolean(),
+});
+
 const annotationView = v.object({
   _id: v.id("annotations"),
   paperId: v.id("papers"),
@@ -185,6 +243,16 @@ const annotationView = v.object({
    * states rather than surviving rows.
    */
   versionCount: v.optional(v.number()),
+  /**
+   * The lab's ruling on this note, if it has made one. Absent is the ordinary
+   * case and the card draws nothing at all for it.
+   *
+   * Absent also for a note that is private or withdrawn, whatever the row says
+   * — a status is a lab-level claim about a lab-visible note, and the audience
+   * is decided on the annotation at read time rather than copied anywhere. See
+   * `listForPaper`.
+   */
+  status: v.optional(statusView),
   /** Withdrawn: the body is gone, the thread it holds up is not. */
   deleted: v.boolean(),
   /** Replies by anyone, which is what freezes visibility and blocks deletion. */
@@ -419,6 +487,61 @@ async function requireOwn(
   // Membership can have lapsed since it was written.
   await requireMembership(ctx, annotation.labId);
   return { annotation, userId };
+}
+
+/**
+ * Whether the caller may say where a claim stands on this paper: the lab's PI,
+ * or anyone who has presented a session about it.
+ *
+ * Taken from `canApprove` in `convex/sessions.ts` rather than invented, and the
+ * argument there transfers exactly. Approving a write-up is narrower than
+ * managing a session because the approved copy is *the lab's account of what it
+ * worked out*, and an organiser who booked the room has no standing to put
+ * words in the presenter's mouth; the two people who do are the one who ran the
+ * discussion and the one who answers for the lab. A status is the same object
+ * one claim at a time — "we accepted this", "we still dispute this" — so it
+ * takes the same two people. `canApprove` is called rather than restated,
+ * because a permission with two definitions has one that is out of date.
+ *
+ * The one adaptation: a status hangs off a *note*, and a note is written on a
+ * paper rather than in a session — the reader can be opened either way, so most
+ * annotations carry no `sessionId` at all. Reading "presenter" off the note's
+ * own session would therefore make the rule PI-only for the whole library,
+ * which is a bottleneck exactly where the roadmap wants a habit. So the
+ * question asked is "have you ever run this lab's discussion of this paper",
+ * which is the standing the rule is actually about.
+ *
+ * The standing comes from meetings that were *held* — `live`, `ended`,
+ * `synthesized` — and never from one that is merely on the calendar. Being
+ * assigned to present next Thursday is not having run a discussion, so a member
+ * who could rule on this paper's claims the moment the session was booked would
+ * be signing the lab's name to their own reading of a paper the lab has not met
+ * to argue about. It is also the hole a person could open at will: book a
+ * session on any paper, acquire standing over every note in its margin, cancel.
+ * `grantsPresenterStanding` is the same hour `canRecord` admits outcomes in
+ * (`lib/actions/outcomes.ts`) — during the meeting is exactly when verdicts get
+ * recorded, before it is not.
+ *
+ * What this cannot yet express: a lab whose PI has left, and a lab that would
+ * rather every member could rule. Both are settings, and settings are a surface
+ * this PR does not have — the narrow rule is the reversible one.
+ */
+async function mayRuleOnStatus(
+  ctx: QueryCtx | MutationCtx,
+  paperId: Id<"papers">,
+  membership: Doc<"memberships">,
+): Promise<boolean> {
+  if (membership.role === "pi") {
+    return true;
+  }
+  const sessions = await ctx.db
+    .query("sessions")
+    .withIndex("by_paper", (q) => q.eq("paperId", paperId))
+    .take(MAX_SESSIONS_CONSULTED);
+  return sessions.some(
+    (session) =>
+      grantsPresenterStanding(session.status) && canApprove(session, membership),
+  );
 }
 
 /**
@@ -730,17 +853,27 @@ export const listForPaper = query({
     annotations: v.array(annotationView),
     /** The cap was hit: there are notes on this paper that are not in here. */
     truncated: v.boolean(),
+    /**
+     * Whether the caller may rule on this paper's claims — decided once for the
+     * margin rather than re-derived per card, the way `sessions.get` hands the
+     * client `canApprove`. It gates which controls are drawn and nothing else:
+     * `setStatus` asks the same question again on the way in, because a rule
+     * about who may speak for the lab is a rule about the data, not about which
+     * buttons rendered.
+     */
+    canSetStatus: v.boolean(),
   }),
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
     const paper = await ctx.db.get(args.paperId);
     if (paper === null) {
-      return { annotations: [], truncated: false };
+      return { annotations: [], truncated: false, canSetStatus: false };
     }
     // A stale link renders an empty margin rather than an error, and the answer
     // is the same whether the paper is missing or forbidden.
-    if ((await getMembership(ctx, paper.labId, userId)) === null) {
-      return { annotations: [], truncated: false };
+    const membership = await getMembership(ctx, paper.labId, userId);
+    if (membership === null) {
+      return { annotations: [], truncated: false, canSetStatus: false };
     }
 
     const shared = await ctx.db
@@ -800,6 +933,76 @@ export const listForPaper = query({
         resolved.push(await nameOf(userId));
       }
       mentionNames.set(annotation._id, resolved);
+    }
+
+    // The lab's rulings, and the citation each superseded note carries.
+    //
+    // Two things are decided here rather than stored anywhere:
+    //
+    // **Who may see a status.** A status is a lab-level claim about a
+    // lab-visible note, so it is read off the annotation's own audience on
+    // every read — a note that has since gone private or been withdrawn hands
+    // back no status at all, in the same instant and by the same act, with no
+    // second write to get wrong. The field on the row is left alone: the lab's
+    // verdict was not the author's to erase by changing their mind about who
+    // may read the sentence, and sharing the note again brings it back.
+    //
+    // **Whether the supersession still stands up.** `supersededBy` is a
+    // citation, and this backend re-checks citations on read rather than
+    // trusting what it wrote (`isStillShared`, the same test syntheses and
+    // briefs apply to theirs). A replacement that has been withdrawn, deleted,
+    // or taken private is reported as redacted rather than dropped, because a
+    // bare "Superseded" would read as a complete fact where the truth is that
+    // the reader is not being shown the other half of it.
+    //
+    // Resolved out of the notes this query already returned, at no extra read:
+    // `setStatus` refuses a target that is not a lab-visible note on this same
+    // paper, so a live target is in `shared` by construction. The one case that
+    // resolution cannot tell apart from a withdrawal is a margin over its
+    // ceiling, where the target may simply not have been read — and that margin
+    // is already saying `truncated`.
+    const statuses = new Map<
+      Id<"annotations">,
+      {
+        value: NonNullable<Doc<"annotations">["status"]>;
+        at: number;
+        byName: string;
+        supersededByName?: string;
+        supersededByRedacted: boolean;
+      }
+    >();
+    for (const annotation of annotations) {
+      if (
+        annotation.status === undefined ||
+        annotation.visibility !== "lab" ||
+        annotation.deletedAt !== undefined
+      ) {
+        continue;
+      }
+      let supersededByName: string | undefined;
+      let supersededByRedacted = false;
+      if (annotation.supersededBy !== undefined) {
+        const target = byId.get(annotation.supersededBy) ?? null;
+        if (target !== null && isStillShared(target, paper.labId)) {
+          supersededByName = await nameOf(target.memberId);
+        } else {
+          supersededByRedacted = true;
+        }
+      }
+      statuses.set(annotation._id, {
+        value: annotation.status,
+        // `_creationTime` is not a fallback worth reaching for: a status with
+        // no stamp is a row written by something other than `setStatus`, and
+        // dating it from the note would put the lab's ruling before the
+        // argument that produced it.
+        at: annotation.statusSetAt ?? 0,
+        byName:
+          annotation.statusSetBy === undefined
+            ? "A lab member"
+            : await nameOf(annotation.statusSetBy),
+        ...(supersededByName !== undefined ? { supersededByName } : {}),
+        supersededByRedacted,
+      });
     }
 
     // The marks, in three reads that each answer exactly one question.
@@ -948,6 +1151,7 @@ export const listForPaper = query({
 
     return {
       truncated,
+      canSetStatus: await mayRuleOnStatus(ctx, paper._id, membership),
       annotations: annotations.map((annotation) => ({
         _id: annotation._id,
         paperId: annotation.paperId,
@@ -964,6 +1168,7 @@ export const listForPaper = query({
         createdAt: annotation._creationTime,
         editedAt: annotation.editedAt,
         versionCount: annotation.versionCount,
+        status: statuses.get(annotation._id),
         deleted: annotation.deletedAt !== undefined,
         replyCount: replyCounts.get(annotation._id) ?? 0,
         reactions: reactionsFor(annotation._id),
@@ -1223,6 +1428,176 @@ export const setVisibility = mutation({
           await announceMentions(ctx, row);
         }
       }
+    }
+    return null;
+  },
+});
+
+/**
+ * Say where a claim stands — accepted, disputed, resolved, superseded — or take
+ * the ruling off again.
+ *
+ * The one mutation in this file that is not the author's. Everything else here
+ * is somebody's own writing and is gated on authorship; a status is the lab
+ * speaking about a passage, so it is gated on the standing to speak for the lab
+ * (`mayRuleOnStatus`) and refuses the author-only path entirely. A member may
+ * well rule on their own note — a person conceding their own hypothesis is the
+ * best thing that happens in a journal club — but they do it as the presenter
+ * or the PI, not as the author.
+ *
+ * Four refusals, and each is a rule rather than a guard:
+ *
+ * - **Nothing private.** A status is a claim about a note the lab can see. A
+ *   ruling on a note nobody else may read would be the product asserting a
+ *   group verdict on a sentence the group has never been shown — and the
+ *   ruling would then leak the note's existence the moment anything aggregated
+ *   it.
+ * - **Nothing withdrawn.** A tombstone says one thing.
+ * - **Not on a reply.** A reply is part of the discussion that produces a
+ *   verdict; the verdict goes on the claim it is about. This also keeps the
+ *   object the margin marks the same object the rail can draw.
+ * - **A supersession points at a live, lab-visible note on the same paper.**
+ *   Same-paper because the reader is the surface this renders in and a
+ *   cross-paper replacement would be a citation nobody can follow from here.
+ *   That is a real limit on the memory layer — "this 2019 assay was superseded
+ *   by the 2024 paper's" is exactly the cross-paper claim the roadmap wants —
+ *   and it wants a surface that can show two papers at once, which does not
+ *   exist yet.
+ *
+ * Nothing here infers anything, and that is the feature. There is no path that
+ * writes a status from a count of critiques, a reaction tally, or a model's
+ * opinion; every row this mutation writes has a person's id on it. AI-suggested
+ * edges, when they come, arrive as proposals that a human accepts *through*
+ * this mutation — never as a second writer of it.
+ *
+ * The ledger takes the fact and the row takes the state, the same split the
+ * rest of this backend uses: `annotation.status_set` / `status_cleared` carry a
+ * closed vocabulary and two ids and no prose, so the walk between states
+ * survives in a table nothing can rewrite, while the current value stays where
+ * a reader can be told it has changed.
+ */
+export const setStatus = mutation({
+  args: {
+    annotationId: v.id("annotations"),
+    /** Absent takes the ruling off, leaving the note unmarked. */
+    status: v.optional(epistemicStatus),
+    /** The note that replaces this one. Only ever with `superseded`. */
+    supersededBy: v.optional(v.id("annotations")),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    const annotation = await ctx.db.get(args.annotationId);
+    if (annotation === null) {
+      throw new ConvexError("That note is no longer there.");
+    }
+    const membership = await requireMembership(ctx, annotation.labId);
+
+    if (annotation.deletedAt !== undefined) {
+      throw new ConvexError("That note was withdrawn.");
+    }
+    if (annotation.visibility !== "lab") {
+      throw new ConvexError(
+        "That note isn't shared with the lab, so the lab can't say where it stands.",
+      );
+    }
+    if (annotation.parentId !== undefined) {
+      throw new ConvexError(
+        "A reply is part of the discussion — the status goes on the note it answers.",
+      );
+    }
+    if (!(await mayRuleOnStatus(ctx, annotation.paperId, membership))) {
+      throw new ConvexError(
+        "Only the lab's PI or someone who has presented this paper can say where a claim stands.",
+      );
+    }
+
+    // The shape of the move, decided in `lib/epistemic/status.ts` where it can
+    // be tested without a database. No transition is forbidden — a lab that
+    // accepts a claim in March and disputes it in June is using this correctly
+    // — so what comes back is incoherence (a supersession naming nothing, a
+    // reference on a word that takes none) or a no-op.
+    const check = checkTransition({
+      self: annotation._id,
+      current: annotation.status ?? null,
+      currentSupersededBy: annotation.supersededBy ?? null,
+      next: args.status ?? null,
+      supersededBy: args.supersededBy ?? null,
+    });
+    if (!check.ok) {
+      throw new ConvexError(check.reason);
+    }
+    // A ruling that changes nothing writes nothing, the way `setType` refuses
+    // to spend a version slot on a chip somebody tapped twice. The ledger
+    // answers "when did we last change our mind about this", and a row for a
+    // double-click would answer it with the double-click.
+    if (!check.changed) {
+      return null;
+    }
+
+    if (args.supersededBy !== undefined) {
+      const target = await ctx.db.get(args.supersededBy);
+      // One message for every way the target fails to be visible: which of
+      // them applies is exactly what an id-prober would be asking.
+      if (target === null || !isStillShared(target, annotation.labId)) {
+        throw new ConvexError("That isn't a note the lab can see.");
+      }
+      if (target.paperId !== annotation.paperId) {
+        throw new ConvexError(
+          "A note is superseded by another note on the same paper.",
+        );
+      }
+      if (target.parentId !== undefined) {
+        throw new ConvexError(
+          "A reply can't be the note that supersedes another one.",
+        );
+      }
+      // Two notes each claiming to replace the other is a record that answers
+      // "what do we believe now" with a circle. Only the direct case is
+      // checked: a longer cycle needs a walk of the chain, and a walk of a
+      // chain of unbounded length is the thing every other read in this file is
+      // written to avoid.
+      if (target.supersededBy === annotation._id) {
+        throw new ConvexError(
+          "Those two notes would supersede each other. Take the other one's status off first.",
+        );
+      }
+    }
+
+    // `undefined` clears the column in a Convex patch, which is what taking a
+    // ruling off means: the note goes back to unmarked rather than to a stored
+    // "nobody has ruled", and the stamps go with it — a date and a name with no
+    // verdict attached would be provenance for a fact that is not there.
+    const at = Date.now();
+    await ctx.db.patch(annotation._id, {
+      status: args.status,
+      supersededBy: args.supersededBy,
+      statusSetAt: args.status === undefined ? undefined : at,
+      statusSetBy: args.status === undefined ? undefined : userId,
+    });
+
+    if (args.status === undefined) {
+      await recordEvent(ctx, {
+        labId: annotation.labId,
+        type: "annotation.status_cleared",
+        actorId: userId,
+        paperId: annotation.paperId,
+        sessionId: annotation.sessionId,
+        annotationId: annotation._id,
+      });
+    } else {
+      await recordEvent(ctx, {
+        labId: annotation.labId,
+        type: "annotation.status_set",
+        actorId: userId,
+        paperId: annotation.paperId,
+        sessionId: annotation.sessionId,
+        annotationId: annotation._id,
+        status: args.status,
+        ...(args.supersededBy !== undefined
+          ? { supersededBy: args.supersededBy }
+          : {}),
+      });
     }
     return null;
   },
