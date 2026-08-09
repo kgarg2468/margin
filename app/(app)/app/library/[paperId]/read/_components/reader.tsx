@@ -999,7 +999,19 @@ export function Reader({
           >
             White page
           </button>
-          <div className="flex shrink-0 items-center gap-1">
+          {/* `gap-3.5`, not the `gap-1` this group was drawn with, and
+              `tap-target` on all three rather than on the outer two.
+              `@utility tap-target` is a 44x44 `::after` that takes no part in
+              layout and — deliberately — no part in pointer-events either, so
+              on a ~21px button it overhangs ~11.7px past each edge. At a 4px
+              gap the − and + boxes reached ~7px into a ~40px fit-width button
+              that had no box of its own to win the overlap with, so a third of
+              its face zoomed the wrong way and did it silently: a stolen click
+              is indistinguishable from a misclick. 14px clears every overhang
+              by ~2px and puts ~43.5px between the centres, which is the 44px
+              rhythm the utility's own doc comment asks for where two of these
+              sit side by side. */}
+          <div className="flex shrink-0 items-center gap-3.5">
             <button
               type="button"
               aria-label="Zoom out"
@@ -1027,7 +1039,7 @@ export function Reader({
               aria-label={`Fit the page to the column. Currently ${zoomLabel(zoom, { columnWidth, baseWidth: baseSize?.width ?? 0 })}.`}
               onClick={() => changeZoom("fit-width")}
               className={
-                "pressable rounded-sm border px-1.5 py-0.5 font-sans text-[11px] tabular-nums " +
+                "pressable tap-target rounded-sm border px-1.5 py-0.5 font-sans text-[11px] tabular-nums " +
                 (zoom === "fit-width"
                   ? "border-ink-faint text-ink"
                   : "border-rule text-ink-faint hover:border-ink-faint hover:text-accent")
