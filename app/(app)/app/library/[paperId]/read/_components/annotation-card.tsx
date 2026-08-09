@@ -11,6 +11,7 @@ import type { PickedMention } from "./mention-field";
 import { MentionedBody, MentionField } from "./mention-field";
 import type { AnnotationType } from "./ontology";
 import { typeStyle } from "./ontology";
+import { Reactions } from "./reactions";
 import { TypeChips } from "./type-chips";
 import type { AnchorState, AnnotationId, AnnotationView } from "./types";
 import { VisibilityToggle } from "./visibility-toggle";
@@ -297,6 +298,15 @@ export function AnnotationCard({
             className="mt-1.5 whitespace-pre-wrap font-serif text-sm leading-relaxed text-ink"
           />
         )
+      )}
+
+      {/* Sits with the note rather than down in the action row, because a mark
+          is a thing said *about the note* — and above the thread, because a
+          reply answers the note too and the two should read in that order. A
+          withdrawn note shows none: the tombstone says one thing and endorsements
+          of a body nobody can read are not a second thing it should say. */}
+      {!annotation.deleted && !editing && (
+        <Reactions annotation={annotation} onError={setError} />
       )}
 
       {visibleReplies.length > 0 && (

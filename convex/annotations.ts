@@ -1,11 +1,17 @@
 import { ConvexError, v } from "convex/values";
+import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
-import { mutation, query } from "./_generated/server";
+import { internalMutation, mutation, query } from "./_generated/server";
 import { getMembership, requireMembership, requireUserId } from "./lib/authz";
 import { recordEvent } from "./lib/ledger";
 import { clearNotificationsFor, raiseNotification } from "./notifications";
-import { anchor, annotationType, annotationVisibility } from "./schema";
+import {
+  anchor,
+  annotationType,
+  annotationVisibility,
+  reactionKind,
+} from "./schema";
 import { disambiguate, MAX_MENTIONS_PER_NOTE } from "../lib/mentions";
 
 /**
@@ -63,6 +69,74 @@ const MAX_BODY_LENGTH = 4_000;
  */
 const MAX_ANNOTATIONS_PER_PAPER = 1_000;
 
+/** How many kinds of mark there are (see `reactionKind`). */
+const REACTION_KIND_COUNT = 5;
+
+/**
+ * The most notes `listForPaper` can hand back.
+ *
+ * Twice the page size, because it reads two pages that are allowed not to
+ * overlap: the lab-visible notes, and the caller's own. A margin of 1 000
+ * shared notes and 1 000 private ones by the caller is 2 000 rows returned,
+ * and anything sized to cover "the notes this query returns" has to be sized
+ * to that rather than to one page of it.
+ */
+const MAX_ANNOTATIONS_RETURNED = 2 * MAX_ANNOTATIONS_PER_PAPER;
+
+/**
+ * The ceiling on a paper's tallies, and on one member's own marks.
+ *
+ * Both sets are bounded by the *content* rather than by the size of the lab:
+ * there is at most one tally row per (note, kind), and at most one mark per
+ * (note, kind) per member. So this is exactly enough rows for every note the
+ * margin can return, whatever the lab's membership does — which is the
+ * property the counts rest on and the reason they are read from
+ * `reactionTallies` rather than counted from `reactions`.
+ */
+const MAX_REACTION_ROWS_PER_PAPER =
+  REACTION_KIND_COUNT * MAX_ANNOTATIONS_RETURNED;
+
+/**
+ * The ceiling on the roster read — the one that says *who*.
+ *
+ * This one does grow with the lab, and so it is the one read here that can be
+ * cut short. That is survivable precisely because nothing depends on it but
+ * the names in a tooltip: counts come from the tallies and `mine` comes from
+ * the caller's own marks, both exact. Losing rows here costs which names a
+ * chip lists, and the sentence it builds ("Nadia, Tom and 12 others") stays
+ * true because the 12 is derived from a count this read did not produce.
+ */
+const MAX_REACTION_ROSTER_ROWS = 8_000;
+
+/** How many marks are cleared per page when a note is deleted outright. */
+const REACTION_DELETE_PAGE = 256;
+
+/**
+ * And how many of those pages one mutation will do before handing the rest to
+ * a scheduled follow-up.
+ *
+ * The per-note total really is bounded — the uniqueness index allows one row
+ * per (member, kind), so a note carries at most five times the lab's member
+ * count — and at any real lab that is a few hundred rows in a single pass. But
+ * "the bound is small" is an argument, and what is wanted here is a property.
+ * A mutation is one transaction: an unbounded drain inside it is a transaction
+ * that can grow until the platform refuses it, and a refused transaction rolls
+ * back the note's deletion with it. That failure mode is the unacceptable one
+ * — the author of a note must always be able to take it back, whatever the
+ * lab did to it — so the drain is capped and the remainder is swept
+ * afterwards, out of the caller's way.
+ */
+const MAX_REACTION_DELETE_PAGES = 8;
+
+/**
+ * How many names a chip's tooltip carries.
+ *
+ * The count beside a mark is always exact; this bounds only the list of who,
+ * because "Nadia, Tom, Wren and 40 others" and "…and 400 others" are the same
+ * sentence to a reader and only one of them costs 400 reads.
+ */
+const MAX_REACTION_NAMES = 8;
+
 /** Guards against an anchor built by something other than `lib/anchoring`. */
 const MAX_QUOTE_LENGTH = 400;
 const MAX_CONTEXT_LENGTH = 64;
@@ -103,6 +177,30 @@ const annotationView = v.object({
   deleted: v.boolean(),
   /** Replies by anyone, which is what freezes visibility and blocks deletion. */
   replyCount: v.number(),
+  /**
+   * The marks on this note, one entry per kind anyone has used. Kinds nobody
+   * has used are absent rather than present with a zero — the margin draws
+   * what was said, not a scoreboard of what could have been.
+   *
+   * Empty for a withdrawn note. A tombstone says one thing ("withdrawn by its
+   * author") and endorsements of a body that is gone are not a second thing it
+   * should be saying.
+   */
+  reactions: v.array(
+    v.object({
+      kind: reactionKind,
+      /** Exact, however many names came back. */
+      count: v.number(),
+      /** The caller is one of them — the chip draws itself as theirs. */
+      mine: v.boolean(),
+      /**
+       * Who, for the chip's tooltip, excluding the caller: `mine` already says
+       * they are in there and the client is what knows how to write "You".
+       * Bounded by `MAX_REACTION_NAMES`; `count` is not.
+       */
+      names: v.array(v.string()),
+    }),
+  ),
 });
 
 /** Falls back through the fields a member might not have filled in. */
@@ -123,6 +221,8 @@ function cleanBody(body: string): string {
 }
 
 type Anchor = Doc<"annotations">["anchor"];
+
+type ReactionKind = Doc<"reactions">["kind"];
 
 /**
  * An anchor from the client is a claim like any other.
@@ -476,6 +576,125 @@ export const reply = mutation({
 });
 
 /**
+ * Put a mark on a note, or take it back off.
+ *
+ * One mutation rather than a react/unreact pair, because from the member's
+ * side it is one control: the chip is either yours or it isn't, and tapping it
+ * flips that. The server decides which way by reading first — the row's
+ * presence *is* the state — so a double-tap on a slow connection lands as one
+ * add and one remove rather than two rows the uniqueness index would have to
+ * refuse.
+ *
+ * Marks go on anything the caller can see, which includes their own private
+ * notes. Marking your own note is not vanity when nobody else can read it; it
+ * is a reader flagging their own margin — "come back to this", "raise it
+ * Thursday" — and the alternative is a rule that exists only to stop something
+ * harmless.
+ *
+ * A withdrawn note takes no new marks and shows none. Removing one is still
+ * allowed, so a note withdrawn between the render and the tap un-marks quietly
+ * instead of erroring at someone who was trying to take it back anyway.
+ */
+export const react = mutation({
+  args: { annotationId: v.id("annotations"), kind: reactionKind },
+  returns: v.union(v.literal("added"), v.literal("removed")),
+  handler: async (ctx, args) => {
+    const annotation = await ctx.db.get(args.annotationId);
+    if (annotation === null) {
+      throw new ConvexError("That note is no longer there.");
+    }
+    const membership = await requireMembership(ctx, annotation.labId);
+    // Unreachable through the UI — a private note is not in anyone else's
+    // margin to tap — which is exactly why it is checked. Visibility is a rule
+    // about the data, not about which buttons got rendered.
+    if (
+      annotation.visibility !== "lab" &&
+      annotation.memberId !== membership.userId
+    ) {
+      throw new ConvexError("That note isn't shared with the lab.");
+    }
+
+    const existing = await ctx.db
+      .query("reactions")
+      .withIndex("by_annotation_and_member_and_kind", (q) =>
+        q
+          .eq("annotationId", annotation._id)
+          .eq("memberId", membership.userId)
+          .eq("kind", args.kind),
+      )
+      .unique();
+
+    // The count this note carries for this kind, moved by one in the same
+    // transaction as the row itself — the `labs.memberCount` contract. Convex
+    // mutations are atomic, so the pair cannot come apart; the only way to
+    // drift would be a write path that touches one and not the other, and this
+    // is the only write path there is.
+    const tally = await ctx.db
+      .query("reactionTallies")
+      .withIndex("by_annotation_and_kind", (q) =>
+        q.eq("annotationId", annotation._id).eq("kind", args.kind),
+      )
+      .unique();
+
+    if (existing !== null) {
+      await ctx.db.delete(existing._id);
+      if (tally !== null) {
+        // Deleted rather than left at zero: an absent row and a zero mean the
+        // same thing to every reader, and only one of them accumulates.
+        if (tally.count <= 1) {
+          await ctx.db.delete(tally._id);
+        } else {
+          await ctx.db.patch(tally._id, { count: tally.count - 1 });
+        }
+      }
+      await recordEvent(ctx, {
+        labId: annotation.labId,
+        type: "annotation.unreacted",
+        actorId: membership.userId,
+        paperId: annotation.paperId,
+        sessionId: annotation.sessionId,
+        annotationId: annotation._id,
+        kind: args.kind,
+      });
+      return "removed";
+    }
+
+    if (annotation.deletedAt !== undefined) {
+      throw new ConvexError("That note was withdrawn.");
+    }
+
+    await ctx.db.insert("reactions", {
+      labId: annotation.labId,
+      paperId: annotation.paperId,
+      annotationId: annotation._id,
+      memberId: membership.userId,
+      kind: args.kind,
+      createdAt: Date.now(),
+    });
+    if (tally === null) {
+      await ctx.db.insert("reactionTallies", {
+        paperId: annotation.paperId,
+        annotationId: annotation._id,
+        kind: args.kind,
+        count: 1,
+      });
+    } else {
+      await ctx.db.patch(tally._id, { count: tally.count + 1 });
+    }
+    await recordEvent(ctx, {
+      labId: annotation.labId,
+      type: "annotation.reacted",
+      actorId: membership.userId,
+      paperId: annotation.paperId,
+      sessionId: annotation.sessionId,
+      annotationId: annotation._id,
+      kind: args.kind,
+    });
+    return "added";
+  },
+});
+
+/**
  * Everything on a paper the caller is allowed to see: the lab's, plus their own
  * private notes.
  *
@@ -543,19 +762,20 @@ export const listForPaper = query({
       }
     }
 
-    // One read per distinct person rather than one per annotation: a session's
-    // worth of margins is dozens of notes by a handful of people, and the
-    // people named in them are drawn from the same small roster.
+    // One read per distinct person rather than one per row: a session's worth
+    // of margin is dozens of notes and a few hundred marks by a handful of
+    // people. Shared by the note authors, the people named in them, and by
+    // the reactors below.
     const names = new Map<Id<"users">, string>();
-    const nameOf = async (userId: Id<"users">): Promise<string> => {
-      const known = names.get(userId);
+    async function nameOf(id: Id<"users">): Promise<string> {
+      const known = names.get(id);
       if (known !== undefined) {
         return known;
       }
-      const resolved = displayName(await ctx.db.get(userId));
-      names.set(userId, resolved);
+      const resolved = displayName(await ctx.db.get(id));
+      names.set(id, resolved);
       return resolved;
-    };
+    }
 
     const mentionNames = new Map<Id<"annotations">, string[]>();
     for (const annotation of annotations) {
@@ -570,9 +790,149 @@ export const listForPaper = query({
       mentionNames.set(annotation._id, resolved);
     }
 
+    // The marks, in three reads that each answer exactly one question.
+    //
+    // They are split rather than derived from one scan of `reactions` because
+    // only one of the three answers can survive being cut short. Counting rows
+    // at read time means reading a set that grows with the lab's membership,
+    // and a bounded read of it produces a chip reading "3" when five people
+    // agreed — a number that is wrong with nothing on screen admitting it.
+    // Counts and `mine` therefore come from reads whose size is fixed by the
+    // paper's notes rather than by the lab's size, and the only read that can
+    // run out is the one whose loss is a shorter list of names.
+    //
+    // All three are plain capped reads, and what makes that enough is one
+    // property a bounded read has for free: **a read that comes back short has
+    // returned everything.** Under the ceiling there is nothing left in the
+    // table to have missed, so the counts are exact by construction — which is
+    // the case every real margin is in, because a tally row exists per (note,
+    // kind) and a member's own marks per (note, kind) for one member, so both
+    // sets are bounded by the paper's content rather than by the lab's size.
+    //
+    // A read that comes back *full* is not chased. An earlier version fell
+    // back to a read per returned note, which bought exactness in a regime
+    // nobody is in by issuing thousands of indexed queries in one transaction
+    // — past Convex's scan budget, so the margin would throw rather than
+    // render, which is a worse answer than an imperfect one. Reaching these
+    // ceilings means the paper holds more marked notes than the query returns
+    // at all, and the note list is already truncated and already says so. The
+    // honest behaviour there is to serve what the reads produced and disclose
+    // it through the flag the rail is already rendering, not to spend the
+    // whole transaction pretending the ceiling is not there.
+    const tallyRows = await ctx.db
+      .query("reactionTallies")
+      .withIndex("by_paper", (q) => q.eq("paperId", paper._id))
+      .take(MAX_REACTION_ROWS_PER_PAPER);
+    const ownMarks = await ctx.db
+      .query("reactions")
+      .withIndex("by_paper_and_member", (q) =>
+        q.eq("paperId", paper._id).eq("memberId", userId),
+      )
+      .take(MAX_REACTION_ROWS_PER_PAPER);
+    const roster = await ctx.db
+      .query("reactions")
+      .withIndex("by_paper", (q) => q.eq("paperId", paper._id))
+      .take(MAX_REACTION_ROSTER_ROWS);
+
+    /**
+     * Whether a note's marks belong in the answer at all. The note decides who
+     * sees anything attached to it, and a withdrawn one has stopped saying
+     * anything — so both are dropped here rather than filtered in the client,
+     * which would mean shipping them first.
+     */
+    function marksVisible(annotationId: Id<"annotations">): boolean {
+      const annotation = byId.get(annotationId);
+      return annotation !== undefined && annotation.deletedAt === undefined;
+    }
+
+    type Tally = { count: number; mine: boolean; others: Id<"users">[] };
+    const tallies = new Map<Id<"annotations">, Map<ReactionKind, Tally>>();
+    function tallyFor(
+      annotationId: Id<"annotations">,
+      kind: ReactionKind,
+    ): Tally {
+      let forNote = tallies.get(annotationId);
+      if (forNote === undefined) {
+        forNote = new Map();
+        tallies.set(annotationId, forNote);
+      }
+      const existing = forNote.get(kind);
+      if (existing !== undefined) {
+        return existing;
+      }
+      const fresh: Tally = { count: 0, mine: false, others: [] };
+      forNote.set(kind, fresh);
+      return fresh;
+    }
+
+    for (const row of tallyRows) {
+      if (!marksVisible(row.annotationId)) {
+        continue;
+      }
+      tallyFor(row.annotationId, row.kind).count = row.count;
+    }
+    for (const mark of ownMarks) {
+      if (!marksVisible(mark.annotationId)) {
+        continue;
+      }
+      const tally = tallyFor(mark.annotationId, mark.kind);
+      tally.mine = true;
+      // The row exists, so the count is at least one. Belt and braces against
+      // a tally that somehow fell behind the rows it counts: the margin should
+      // never draw a chip that is yours and empty.
+      tally.count = Math.max(tally.count, 1);
+    }
+    for (const mark of roster) {
+      // The caller is named by `mine`, not by the roster — the client is what
+      // knows how to write "You".
+      if (mark.memberId === userId || !marksVisible(mark.annotationId)) {
+        continue;
+      }
+      const tally = tallies.get(mark.annotationId)?.get(mark.kind);
+      // No tally means no count, which means nothing to attach a name to.
+      if (tally === undefined || tally.others.length >= MAX_REACTION_NAMES) {
+        continue;
+      }
+      tally.others.push(mark.memberId);
+      await nameOf(mark.memberId);
+    }
+
+    /** The tally for one note, in the order the kinds were first marked. */
+    function reactionsFor(
+      annotationId: Id<"annotations">,
+    ): { kind: ReactionKind; count: number; mine: boolean; names: string[] }[] {
+      const forNote = tallies.get(annotationId);
+      if (forNote === undefined) {
+        return [];
+      }
+      return [...forNote.entries()].map(([kind, tally]) => ({
+        kind,
+        count: tally.count,
+        mine: tally.mine,
+        names: tally.others.map((id) => names.get(id) ?? "A lab member"),
+      }));
+    }
+
+    // The notes, and the two reads that have to be exact to be worth drawing.
+    //
+    // A tally or own-mark read that came back full is a margin whose counts
+    // may understate and whose chips may draw unpressed, and that is the one
+    // thing a count must not do quietly. It cannot be fixed here — see above —
+    // so it is disclosed here instead, through the flag that already means
+    // "what you are looking at is not all of it". In practice the note reads
+    // will have tripped this first: both sets are bounded by the paper's
+    // content, so reaching their ceiling takes more marked notes than this
+    // query returns at all.
+    //
+    // The roster read is deliberately absent. Running it short costs which
+    // names a tooltip lists, never a count and never `mine`, and claiming
+    // "there is more" over an otherwise whole margin would be the query lying
+    // in the other direction.
     const truncated =
       shared.length >= MAX_ANNOTATIONS_PER_PAPER ||
-      own.length >= MAX_ANNOTATIONS_PER_PAPER;
+      own.length >= MAX_ANNOTATIONS_PER_PAPER ||
+      tallyRows.length >= MAX_REACTION_ROWS_PER_PAPER ||
+      ownMarks.length >= MAX_REACTION_ROWS_PER_PAPER;
 
     return {
       truncated,
@@ -593,6 +953,7 @@ export const listForPaper = query({
         editedAt: annotation.editedAt,
         deleted: annotation.deletedAt !== undefined,
         replyCount: replyCounts.get(annotation._id) ?? 0,
+        reactions: reactionsFor(annotation._id),
       })),
     };
   },
@@ -823,6 +1184,77 @@ export const setVisibility = mutation({
 });
 
 /**
+ * Clear the marks off a note that is going away, up to a bounded amount of
+ * work. Returns whether it finished.
+ *
+ * Marks are not kept for a note that no longer exists: a reaction pointing at
+ * an id nothing answers to is not a fact about anything, and it would sit in
+ * the table forever, consuming the reader's row budget for that paper, because
+ * the only thing that could ever have cleaned it up is this.
+ *
+ * Bounded per page *and* in total, which is the difference from the first
+ * version of this: a page-bounded loop with no ceiling is still an unbounded
+ * transaction. When the ceiling is reached this stops and says so, and the
+ * caller decides what to do about it — which is never "fail".
+ */
+async function sweepMarks(
+  ctx: MutationCtx,
+  annotationId: Id<"annotations">,
+): Promise<boolean> {
+  for (let page = 0; page < MAX_REACTION_DELETE_PAGES; page += 1) {
+    const marks = await ctx.db
+      .query("reactions")
+      .withIndex("by_annotation_and_member_and_kind", (q) =>
+        q.eq("annotationId", annotationId),
+      )
+      .take(REACTION_DELETE_PAGE);
+    for (const mark of marks) {
+      await ctx.db.delete(mark._id);
+    }
+    if (marks.length < REACTION_DELETE_PAGE) {
+      // The index came back short, so that was the last of them. The counts go
+      // last: while any mark survives they are still describing something, and
+      // clearing them first would leave a window where a retry of this saw
+      // rows with nothing counting them.
+      for (const tally of await ctx.db
+        .query("reactionTallies")
+        .withIndex("by_annotation_and_kind", (q) =>
+          q.eq("annotationId", annotationId),
+        )
+        .take(REACTION_KIND_COUNT)) {
+        await ctx.db.delete(tally._id);
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The rest of a sweep that did not fit in the mutation that started it.
+ *
+ * Re-entrant by construction: it does one bounded pass and schedules itself
+ * again if there is more, so the work drains in transaction-sized pieces no
+ * matter how many marks a note collected. It takes a bare id and asks nothing
+ * about the annotation — by the time this runs the row is already gone, which
+ * is the point.
+ */
+export const sweepAnnotationMarks = internalMutation({
+  args: { annotationId: v.id("annotations") },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    if (!(await sweepMarks(ctx, args.annotationId))) {
+      await ctx.scheduler.runAfter(
+        0,
+        internal.annotations.sweepAnnotationMarks,
+        args,
+      );
+    }
+    return null;
+  },
+});
+
+/**
  * Take a note back.
  *
  * Two endings, decided by whether anyone answered it:
@@ -849,8 +1281,26 @@ export const remove = mutation({
     const replies = await repliesTo(ctx, annotation._id);
 
     if (replies.length === 0) {
+      // The marks go with the row they were put on — but the note goes either
+      // way. Deleting it is the thing the author asked for and the one part of
+      // this that is theirs by right; the marks are bookkeeping, and
+      // bookkeeping does not get a veto. So the sweep is attempted inline,
+      // where it almost always finishes, and anything left over follows on its
+      // own schedule after the row is already gone.
+      const swept = await sweepMarks(ctx, annotation._id);
       await ctx.db.delete(annotation._id);
+      if (!swept) {
+        await ctx.scheduler.runAfter(
+          0,
+          internal.annotations.sweepAnnotationMarks,
+          { annotationId: annotation._id },
+        );
+      }
     } else {
+      // A withdrawn note keeps its row, so its marks keep pointing at
+      // something real. They are simply never returned again (see
+      // `listForPaper`): a tombstone says one thing, and "four people agreed
+      // with a sentence you can no longer read" is not it.
       await ctx.db.patch(annotation._id, { body: "", deletedAt: Date.now() });
     }
 
