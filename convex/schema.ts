@@ -41,6 +41,20 @@ export const annotationVisibility = v.union(
 export const membershipRole = v.union(v.literal("pi"), v.literal("member"));
 
 /**
+ * The two reasons Margin will interrupt a person: somebody named them, or
+ * somebody answered them.
+ *
+ * Both are *addressed* — a fact about a note written to you specifically —
+ * which is what separates a notification from a digest. Everything ambient
+ * ("the lab annotated four papers this week") belongs to the boundary digest
+ * and stays there; there is no notification kind for activity.
+ */
+export const notificationKind = v.union(
+  v.literal("mention"),
+  v.literal("reply"),
+);
+
+/**
  * Where a journal-club meeting is in its life: `scheduled → live → ended →
  * synthesized`, with `scheduled → cancelled` as the one way out. Every other
  * transition is refused (see `convex/sessions.ts`).
@@ -218,6 +232,34 @@ export const eventDoc = v.union(
     paperId: v.id("papers"),
     annotationId: v.id("annotations"),
     parentId: v.id("annotations"),
+  }),
+  /**
+   * Somebody named a labmate in a note the lab can see.
+   *
+   * A lab fact, and recorded as one: who addressed whom, on which passage. It
+   * is written when the mention actually becomes live — which for a note
+   * written privately and shared later is the moment it is shared, not the
+   * moment it was typed. A mention inside a private note is nobody's business
+   * but its author's, and there is deliberately no ledger row for it.
+   *
+   * One row per *delivery*, not per pair of people. While a note stays shared
+   * it announces each person once, however many times it is edited. Un-sharing
+   * takes the recipient's copy back, so re-sharing hands it over again and
+   * appends a second row — which is the honest record: the ledger says what
+   * happened, and what happened is that they were told twice.
+   *
+   * There is no matching `annotation.mention_acknowledged`. Whether a
+   * notification has been dismissed is the recipient's own state, not
+   * something the lab gets to read back out of the ledger — that would be a
+   * read receipt with extra steps.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("annotation.mentioned"),
+    paperId: v.id("papers"),
+    annotationId: v.id("annotations"),
+    /** The member who was named. */
+    subjectUserId: v.id("users"),
   }),
   v.object({
     ...eventBase,
@@ -521,6 +563,21 @@ export default defineSchema({
     type: annotationType,
     body: v.string(),
     visibility: annotationVisibility,
+    /**
+     * The labmates this note names, as ids the author *picked* from a menu.
+     *
+     * Structured rather than parsed. The body keeps the plain text the author
+     * wrote ("@Sara Chen") and this keeps who that meant — so nothing has to
+     * regex names or email addresses back out of prose, and an address quoted
+     * from a methods section can never become a message to a stranger.
+     *
+     * Stored on private notes too, and inert there: a mention is only ever
+     * *delivered* from a lab-visible note, so the field is a record of who the
+     * author addressed and the visibility is what decides whether anyone is
+     * told. That is what lets a note written privately and shared a day later
+     * notify the right people at the moment it is shared.
+     */
+    mentions: v.optional(v.array(v.id("users"))),
     parentId: v.optional(v.id("annotations")),
     editedAt: v.optional(v.number()),
     deletedAt: v.optional(v.number()),
@@ -560,6 +617,59 @@ export default defineSchema({
     .index("by_session", ["sessionId"])
     .index("by_session_and_at", ["sessionId", "at"])
     .index("by_actor", ["actorId"]),
+
+  /**
+   * One person's mail: somebody named you, or somebody answered you.
+   *
+   * The exception to Margin's boundary-delivery rule, and it is narrow on
+   * purpose. Digests exist so the product does not page a lab about every
+   * write; a notification exists because being *addressed* is not ambient
+   * activity — a question written to you and never delivered is just a
+   * question nobody answered. Two kinds, both addressed, and no third that
+   * quietly grows into an activity feed.
+   *
+   * ## Why `acknowledgedAt` and not `readAt`
+   *
+   * The privacy constitution forbids read tracking, and it does not stop being
+   * forbidden because the thing being read is a notification. This timestamp
+   * moves when a person *acts* — clicks the item, or dismisses the panel — and
+   * never because a panel scrolled into view or a query ran. The name says
+   * which of the two it is, and `convex/privacy.guard.test.ts` fails the build
+   * on the other one.
+   *
+   * Per-recipient private state, so unlike the ledger these rows are mutable
+   * and deletable: a notification pointing at a note that has since been
+   * withdrawn or made private is cleared, because the alternative is mail
+   * whose only remaining content is that somebody once said something.
+   */
+  notifications: defineTable({
+    recipientId: v.id("users"),
+    labId: v.id("labs"),
+    kind: notificationKind,
+    /** The note that names or answers the recipient. */
+    annotationId: v.id("annotations"),
+    paperId: v.id("papers"),
+    actorId: v.id("users"),
+    /** Stamped rather than read off `_creationTime`, so a backfill can be honest about when the fact happened. */
+    createdAt: v.number(),
+    /** Set by an explicit act of the recipient's. Absent means outstanding. */
+    acknowledgedAt: v.optional(v.number()),
+  })
+    .index("by_recipient", ["recipientId"])
+    .index("by_recipient_and_lab", ["recipientId", "labId"])
+    /**
+     * The count in the rail. Reading outstanding items through the index means
+     * a member with a decade of acknowledged mail pays for the ones that are
+     * still outstanding and nothing else.
+     */
+    .index("by_recipient_lab_and_ack", ["recipientId", "labId", "acknowledgedAt"])
+    /**
+     * "Has this person already been told about this note?" — asked before every
+     * insert, so re-sharing a note cannot mail the same mention twice, and
+     * asked again when a note is withdrawn so its mail can be taken back.
+     */
+    .index("by_annotation", ["annotationId"])
+    .index("by_annotation_and_recipient", ["annotationId", "recipientId"]),
 
   /** Per-recipient staleness: how far into the ledger a member has caught up, per paper or per session. */
   seenCursors: defineTable({

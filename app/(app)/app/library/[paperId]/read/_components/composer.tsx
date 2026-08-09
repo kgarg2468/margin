@@ -3,9 +3,12 @@
 import { readableError } from "@/app/(app)/app/_components/errors";
 import { api } from "@/convex/_generated/api";
 import type { Doc, Id } from "@/convex/_generated/dataModel";
+import { collectMentionedIds } from "@/lib/mentions";
 import { errorClass } from "@/lib/ui";
 import { useMutation } from "convex/react";
 import { useEffect, useRef, useState } from "react";
+import type { PickedMention } from "./mention-field";
+import { MentionField } from "./mention-field";
 import type { AnnotationType } from "./ontology";
 import { TypeChips } from "./type-chips";
 import type { Draft } from "./types";
@@ -48,6 +51,14 @@ export function Composer({
   const [error, setError] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
 
+  /**
+   * Everyone picked out of the `@` menu while this note was being written —
+   * including names since deleted from the body, which is why the list is
+   * reconciled against the final text at save time rather than sent as is.
+   */
+  const [picked, setPicked] = useState<PickedMention[]>([]);
+  const mentions = collectMentionedIds(body, picked);
+
   useEffect(() => {
     function onKey(event: globalThis.KeyboardEvent) {
       if (event.key === "Escape") {
@@ -69,6 +80,7 @@ export function Composer({
         body,
         anchor: draft.anchor,
         visibility,
+        ...(mentions.length > 0 ? { mentions } : {}),
       });
       window.getSelection()?.removeAllRanges();
       onClose();
@@ -93,17 +105,43 @@ export function Composer({
 
       <TypeChips value={type} onChange={setType} />
 
-      <textarea
-        autoFocus
-        value={body}
-        onChange={(event) => setBody(event.target.value)}
-        rows={3}
-        placeholder="Say something, or just save the highlight."
-        className="mt-3 w-full resize-y rounded-sm border border-rule bg-page px-2.5 py-2 font-serif text-sm leading-relaxed text-ink placeholder:text-ink-faint hover:border-ink-faint"
-      />
+      <div className="mt-3">
+        <MentionField
+          autoFocus
+          paperId={paperId}
+          value={body}
+          onChange={setBody}
+          onPick={(candidate) =>
+            setPicked((previous) =>
+              previous.some((entry) => entry.id === candidate.id)
+                ? previous
+                : [...previous, candidate],
+            )
+          }
+          rows={3}
+          placeholder="Say something, or just save the highlight. Type @ to name a labmate."
+          className="w-full resize-y rounded-sm border border-rule bg-page px-2.5 py-2 font-serif text-sm leading-relaxed text-ink placeholder:text-ink-faint hover:border-ink-faint"
+        />
+      </div>
 
       <div className="mt-3 flex flex-col gap-3">
         <VisibilityToggle value={visibility} onChange={setVisibility} />
+
+        {/*
+         * Said out loud, and only when it is actually true. A note kept
+         * private is a note nobody is told about, however many names are in
+         * it — so a composer that showed "Sara will be notified" beside a
+         * private toggle would be promising something the server will refuse
+         * to do. This is the one place a member can see which of the two
+         * they are about to do.
+         */}
+        {mentions.length > 0 && (
+          <p className="font-sans text-xs text-ink-faint">
+            {visibility === "lab"
+              ? `${mentions.length === 1 ? "1 person" : `${mentions.length} people`} will be told about this note.`
+              : "Private, so nobody is told. Share it with the lab and the people you named hear about it then."}
+          </p>
+        )}
 
         <div className="flex items-center gap-4">
           <button

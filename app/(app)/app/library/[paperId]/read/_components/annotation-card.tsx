@@ -3,9 +3,12 @@
 import { ConfirmAction } from "@/app/(app)/app/_components/confirm-action";
 import { readableError } from "@/app/(app)/app/_components/errors";
 import { api } from "@/convex/_generated/api";
+import { collectMentionedIds } from "@/lib/mentions";
 import { errorClass } from "@/lib/ui";
 import { useMutation } from "convex/react";
 import { useState } from "react";
+import type { PickedMention } from "./mention-field";
+import { MentionedBody, MentionField } from "./mention-field";
 import type { AnnotationType } from "./ontology";
 import { typeStyle } from "./ontology";
 import { TypeChips } from "./type-chips";
@@ -96,8 +99,11 @@ export function AnnotationCard({
   const [expanded, setExpanded] = useState(false);
   const [draftBody, setDraftBody] = useState(annotation.body);
   const [replyBody, setReplyBody] = useState("");
+  const [replyPicked, setReplyPicked] = useState<PickedMention[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  const replyMentions = collectMentionedIds(replyBody, replyPicked);
 
   async function run(action: () => Promise<unknown>, fallback: string) {
     setBusy(true);
@@ -285,9 +291,11 @@ export function AnnotationCard({
         </div>
       ) : (
         annotation.body.length > 0 && (
-          <p className="mt-1.5 whitespace-pre-wrap font-serif text-sm leading-relaxed text-ink">
-            {annotation.body}
-          </p>
+          <MentionedBody
+            body={annotation.body}
+            names={annotation.mentionNames}
+            className="mt-1.5 whitespace-pre-wrap font-serif text-sm leading-relaxed text-ink"
+          />
         )
       )}
 
@@ -298,13 +306,17 @@ export function AnnotationCard({
               <p className="font-sans text-[11px] text-ink-faint">
                 {child.mine ? "You" : child.authorName} · {when(child.createdAt)}
               </p>
-              <p className="whitespace-pre-wrap font-serif text-sm leading-snug text-ink">
-                {child.deleted ? (
-                  <span className="italic text-ink-faint">Withdrawn.</span>
-                ) : (
-                  child.body
-                )}
-              </p>
+              {child.deleted ? (
+                <p className="font-serif text-sm leading-snug italic text-ink-faint">
+                  Withdrawn.
+                </p>
+              ) : (
+                <MentionedBody
+                  body={child.body}
+                  names={child.mentionNames}
+                  className="whitespace-pre-wrap font-serif text-sm leading-snug text-ink"
+                />
+              )}
             </li>
           ))}
         </ul>
@@ -323,12 +335,20 @@ export function AnnotationCard({
 
       {replying ? (
         <div className="pop-in mt-2 flex flex-col gap-2">
-          <textarea
+          <MentionField
             autoFocus
-            rows={2}
+            paperId={annotation.paperId}
             value={replyBody}
-            onChange={(event) => setReplyBody(event.target.value)}
-            placeholder="Answer this"
+            onChange={setReplyBody}
+            onPick={(candidate) =>
+              setReplyPicked((previous) =>
+                previous.some((entry) => entry.id === candidate.id)
+                  ? previous
+                  : [...previous, candidate],
+              )
+            }
+            rows={2}
+            placeholder="Answer this — type @ to bring somebody in"
             className="w-full resize-y rounded-sm border border-rule bg-page px-2 py-1.5 font-serif text-sm leading-relaxed text-ink placeholder:text-ink-faint"
           />
           <div className="flex items-center gap-3">
@@ -337,8 +357,15 @@ export function AnnotationCard({
               disabled={busy || replyBody.trim().length === 0}
               onClick={() =>
                 void run(async () => {
-                  await reply({ parentId: annotation._id, body: replyBody });
+                  await reply({
+                    parentId: annotation._id,
+                    body: replyBody,
+                    ...(replyMentions.length > 0
+                      ? { mentions: replyMentions }
+                      : {}),
+                  });
                   setReplyBody("");
+                  setReplyPicked([]);
                   setReplying(false);
                   setExpanded(true);
                 }, "That reply didn't send.")
