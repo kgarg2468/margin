@@ -46,6 +46,31 @@ type Move = "ended" | "cancelled";
 const UNDO_TOAST_MS = 15_000;
 
 /**
+ * Which sessions have an undo already on its way to the server.
+ *
+ * The two entrances are open at the same time — for fifteen seconds the
+ * toast's Undo and the row on the session page are both on screen, and
+ * pressing both is one flustered second's work. Unguarded, the second call
+ * reaches a server that has already granted the first and comes back refused,
+ * so the move succeeds *and* the corner of the screen says it failed.
+ * Whichever press lands second does nothing instead.
+ *
+ * Module-level rather than a ref inside the hook, and that is the point: after
+ * an End the two doors are not in the same component. The toast was pushed by
+ * the projector view and the row is rendered by `ManageSession`, so two hook
+ * instances — two refs — would each believe they were the only caller. What
+ * has to be shared is the fact of the call, not any component's state. Keyed
+ * by session because it is a claim about that session, and never read during
+ * render, so a module-scoped mutable set is safe on the server too: nothing
+ * puts anything in it except a click.
+ *
+ * It only covers the in-flight span. Once the call resolves the page has
+ * re-rendered without the row, and a call that resolved *unhappily* should
+ * leave both doors open to try again.
+ */
+const undoInFlight = new Set<Id<"sessions">>();
+
+/**
  * The way back from a forward move: the toast that offers it, and the call
  * that takes it.
  *
@@ -76,20 +101,31 @@ export function useUndoableMove() {
   const restoreSession = useMutation(api.sessions.restoreSession);
 
   const undoMove = useCallback(
-    (move: Move, sessionId: Id<"sessions">) =>
-      runWithFeedback(
-        () =>
-          move === "ended"
-            ? reopenSession({ sessionId })
-            : restoreSession({ sessionId }),
-        {
-          errorMessage:
+    async (move: Move, sessionId: Id<"sessions">) => {
+      // See `undoInFlight`: the second of two presses does nothing rather
+      // than collecting a refusal for work the first one already did.
+      if (undoInFlight.has(sessionId)) {
+        return undefined;
+      }
+      undoInFlight.add(sessionId);
+      try {
+        return await runWithFeedback(
+          () =>
             move === "ended"
-              ? "That session didn't reopen."
-              : "That session didn't come back.",
-          toast,
-        },
-      ),
+              ? reopenSession({ sessionId })
+              : restoreSession({ sessionId }),
+          {
+            errorMessage:
+              move === "ended"
+                ? "That session didn't reopen."
+                : "That session didn't come back.",
+            toast,
+          },
+        );
+      } finally {
+        undoInFlight.delete(sessionId);
+      }
+    },
     [toast, reopenSession, restoreSession],
   );
 

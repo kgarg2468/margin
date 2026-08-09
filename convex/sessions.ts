@@ -836,7 +836,7 @@ export const reopenSession = mutation({
     }
     if (!withinUndoWindow(session.endedAt)) {
       throw new ConvexError(
-        "That session ended more than ten minutes ago. Undo is for the press you regret while the toast is still up — to meet about this paper again, schedule another session.",
+        "That session ended more than ten minutes ago. An End can be taken back for ten minutes — from the toast, or from the session's own page while the window is open. Past that, meeting about this paper again is a new session.",
       );
     }
 
@@ -886,7 +886,7 @@ export const restoreSession = mutation({
     }
     if (!withinUndoWindow(session.cancelledAt)) {
       throw new ConvexError(
-        "That session was cancelled more than ten minutes ago. Undo is for the press you regret while the toast is still up — to hold the meeting after all, put it back on the calendar as a new one.",
+        "That session was cancelled more than ten minutes ago. A cancellation can be taken back for ten minutes — from the toast, or from the session's own page while the window is open. Past that, holding the meeting after all means putting it back on the calendar as a new one.",
       );
     }
 

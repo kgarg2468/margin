@@ -182,8 +182,11 @@ describe("reopenSession", () => {
       expect.unreachable("a session ended 11 minutes ago is past the window");
     } catch (caught) {
       expect(caught).toBeInstanceOf(ConvexError);
+      // The phrase this handler alone can say: `restoreSession`'s lapse copy
+      // is the same shape about a cancellation, and pinning only "more than
+      // ten minutes ago" would pass if the two handlers swapped messages.
       expect((caught as ConvexError<string>).data).toContain(
-        "more than ten minutes ago",
+        "ended more than ten minutes ago",
       );
     }
     expect((await sessionRow(ctx, sessionId)).status).toBe("ended");
@@ -330,7 +333,7 @@ describe("restoreSession", () => {
     } catch (caught) {
       expect(caught).toBeInstanceOf(ConvexError);
       expect((caught as ConvexError<string>).data).toContain(
-        "more than ten minutes ago",
+        "was cancelled more than ten minutes ago",
       );
     }
     expect((await sessionRow(ctx, sessionId)).status).toBe("cancelled");
