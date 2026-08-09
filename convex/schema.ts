@@ -848,8 +848,28 @@ export default defineSchema({
     kind: reactionKind,
     createdAt: v.number(),
   })
-    /** The reader's single read: every mark on the paper it is showing. */
+    /**
+     * Every mark on the paper, for the hover roster only.
+     *
+     * Deliberately *not* what the counts are computed from: this table grows
+     * with the lab's membership, so any cap on reading it is a cap that a
+     * big enough lab walks past — and a count that quietly understates is
+     * worse than no count. Counts come from `reactionTallies`. Truncating
+     * this read costs *which* names a tooltip lists, never how many there
+     * are and never whether the mark is yours.
+     */
     .index("by_paper", ["paperId"])
+    /**
+     * The caller's own marks on one paper, which is what decides whether each
+     * chip draws as theirs.
+     *
+     * `mine` cannot come from the roster read above for the same reason the
+     * counts cannot: a member whose rows fell past the cap would see their own
+     * marks render unpressed and un-toggle them by tapping. One member's marks
+     * on one paper are bounded by kinds x notes, so this read has a ceiling
+     * that does not move with the size of the lab.
+     */
+    .index("by_paper_and_member", ["paperId", "memberId"])
     /**
      * Both the uniqueness check and the by-annotation read, from one index.
      *
@@ -864,4 +884,36 @@ export default defineSchema({
       "memberId",
       "kind",
     ]),
+
+  /**
+   * How many members have put one kind of mark on one note.
+   *
+   * A denormalized count, in the same spirit — and under the same obligation —
+   * as `labs.memberCount`: `annotations.react` moves this in the same
+   * transaction as the `reactions` row it inserts or deletes, and Convex
+   * mutations are atomic, so it cannot drift.
+   *
+   * It exists because the honest alternative does not scale. Counting the
+   * `reactions` rows at read time means reading a set that grows with the
+   * lab's membership, and every bounded read of it is a number that silently
+   * understates once a paper gets popular enough — a chip reading "3" when
+   * five people agreed, with nothing on screen admitting it. This table is
+   * bounded by the *content* instead: at most one row per (note, kind), so a
+   * paper's tallies are capped by its notes times the five kinds however many
+   * people are in the lab.
+   *
+   * A row is deleted rather than left at zero, so the reader's "kinds nobody
+   * has used are absent rather than present with a zero" stays true of the
+   * storage as well as of the view.
+   */
+  reactionTallies: defineTable({
+    paperId: v.id("papers"),
+    annotationId: v.id("annotations"),
+    kind: reactionKind,
+    count: v.number(),
+  })
+    /** The reader's single read for a whole paper's counts. */
+    .index("by_paper", ["paperId"])
+    /** The toggle's exact row, to move by one. */
+    .index("by_annotation_and_kind", ["annotationId", "kind"]),
 });
