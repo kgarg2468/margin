@@ -550,25 +550,34 @@ export const getPaper = query({
 });
 
 /**
- * A URL for the stored PDF, mintable by members of the paper's lab only.
+ * The membership check behind `GET /pdf`, run on the caller's behalf.
  *
- * Read that precisely: the membership check gates the *minting*, not the URL.
- * `storage.getUrl` returns a permanent, unauthenticated link — anyone it is
- * forwarded to can fetch the file, for as long as the file exists, whether or
- * not they are in the lab. For a library that will hold paywalled PDFs that
- * gap has to close, and closing it means serving the bytes through a
- * membership-checked HTTP action instead of handing out a storage URL.
- * Tracked in https://github.com/kgarg2468/margin/issues/9.
+ * There used to be a `getPdfUrl` query here that handed back
+ * `storage.getUrl(...)`, and the membership check gated the *minting* rather
+ * than the URL: what came back was a permanent, unauthenticated link that
+ * anybody it was forwarded to could fetch, for as long as the file existed,
+ * whether or not they were in the lab. For a library that will hold paywalled
+ * PDFs that gap had to close, and closing it means the bytes leave through a
+ * membership-checked HTTP action instead (`convex/http.ts`).
+ *
+ * An HTTP action has no database, so it cannot ask this question itself. It
+ * runs this instead, which inherits the caller's identity from the request's
+ * bearer token and so refuses exactly where `getPaper` would. Note what comes
+ * back: a storage id, which is meaningless outside the deployment. No URL for
+ * a PDF is ever handed to a client again.
  */
-export const getPdfUrl = query({
+export const pdfForDelivery = internalQuery({
   args: { paperId: v.id("papers") },
-  returns: v.union(v.null(), v.string()),
+  returns: v.union(
+    v.null(),
+    v.object({ storageId: v.id("_storage"), title: v.string() }),
+  ),
   handler: async (ctx, args) => {
     const { paper } = await requirePaperAccess(ctx, args.paperId);
     if (paper.storageId === undefined) {
       return null;
     }
-    return await ctx.storage.getUrl(paper.storageId);
+    return { storageId: paper.storageId, title: paper.title };
   },
 });
 

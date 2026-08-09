@@ -2,8 +2,10 @@
 
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import { pdfAuthHeaders, pdfEndpoint } from "@/lib/pdf/delivery";
 import { loadPdfjs } from "@/lib/pdf/extract";
 import { eyebrowClass, skeletonClass } from "@/lib/ui";
+import { useAuthToken } from "@convex-dev/auth/react";
 import { useQuery } from "convex/react";
 import Link from "next/link";
 import type {
@@ -67,11 +69,8 @@ export function Reader({
   sessionId?: Id<"sessions">;
 }) {
   const paper = useQuery(api.papers.getPaper, { paperId });
-  const pdfUrl = useQuery(
-    api.papers.getPdfUrl,
-    paper?.hasPdf === true ? { paperId } : "skip",
-  );
   const annotations = useQuery(api.annotations.listForPaper, { paperId });
+  const token = useAuthToken();
   const aligned = useAligned();
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -122,16 +121,50 @@ export function Reader({
     });
 
   // --- the document ------------------------------------------------------
+  //
+  // The PDF is fetched from a membership-checked endpoint (see
+  // `lib/pdf/delivery.ts`), so pdf.js has to carry the member's auth token on
+  // the request. The token is read through a ref rather than depended on,
+  // because it rotates: an effect that re-ran on rotation would tear down the
+  // document and its worker under somebody an hour into a paper, and re-open
+  // it at page one. Nothing needs the fresh one — the whole file is fetched
+  // up front, and by the time a token expires the bytes are long since here.
+  const tokenRef = useRef(token);
   useEffect(() => {
-    if (pdfUrl === undefined || pdfUrl === null) {
+    tokenRef.current = token;
+  }, [token]);
+
+  // One boolean, so this flips once (when the paper and the token have both
+  // arrived) rather than tracking either of them.
+  //
+  // The token half is what keeps the reader out of the trap the text-layer
+  // hook had to be dug out of: opening without one gets a 401, and a 401 read
+  // as a verdict on the file is a good paper called broken. Here it only ever
+  // meant a wrong sentence on screen — this component records nothing — but
+  // waiting is still the honest thing, and it costs a few milliseconds on a
+  // cold load.
+  const canFetch = paper?.hasPdf === true && token !== null;
+
+  useEffect(() => {
+    if (!canFetch) {
       return;
     }
     let cancelled = false;
     let task: PDFDocumentLoadingTask | null = null;
 
     const run = async () => {
+      // Stated rather than defaulted: `canFetch` is the guarantee that this
+      // is here, and an empty bearer smuggled in behind a `??` would turn a
+      // broken invariant into a puzzling 401 instead of a loud failure.
+      const authToken = tokenRef.current;
+      if (authToken === null) {
+        return;
+      }
       const pdfjs = await loadPdfjs();
-      task = pdfjs.getDocument({ url: pdfUrl });
+      task = pdfjs.getDocument({
+        url: pdfEndpoint(paperId),
+        httpHeaders: pdfAuthHeaders(authToken),
+      });
       const loaded = await task.promise;
       if (cancelled) {
         return;
@@ -161,7 +194,7 @@ export function Reader({
       void task?.destroy();
       setDoc(null);
     };
-  }, [pdfUrl]);
+  }, [canFetch, paperId]);
 
   // --- geometry ----------------------------------------------------------
   useEffect(() => {
