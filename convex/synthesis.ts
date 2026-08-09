@@ -13,6 +13,7 @@ import {
 import { annotationType, synthesisSectionKey } from "./schema";
 import { getMembership, requireUserId } from "./lib/authz";
 import { recordEvent } from "./lib/ledger";
+import { slackIsConfigured } from "./lib/slack";
 import { canApprove } from "./sessions";
 
 /**
@@ -1627,10 +1628,13 @@ export const approve = mutation({
     const stillShared = await stillSharedAmong(ctx, session.labId, citations);
     const snapshot = approvalSnapshot(citations, stillShared);
     const reapproved = session.synthesisApprovedAt !== undefined;
+    // Read before the patch, while `session` is still the copy that was there.
+    const unchanged = session.synthesis === text;
 
+    const approvedAt = Date.now();
     await ctx.db.patch(args.sessionId, {
       synthesis: text,
-      synthesisApprovedAt: Date.now(),
+      synthesisApprovedAt: approvedAt,
       synthesisCitedAnnotationIds: snapshot,
     });
 
@@ -1643,6 +1647,34 @@ export const approve = mutation({
       citationCount: snapshot.length,
       reapproved,
     });
+
+    // The write-up is the lab's distribution artifact — the thing that outlives
+    // the hour and the thing the person who missed Thursday actually reads — so
+    // a lab with a Slack channel gets it there, at the moment a person put
+    // their name on it. A revision goes too: the channel holding last week's
+    // version of the record should hold the correction to it.
+    //
+    // `approvedBy` travels on the job because `sessions` records when a
+    // write-up was approved and not by whom, and the post names the person.
+    // `approvedAt` travels with it so the send can refuse to post underneath a
+    // newer approval that has landed in the meantime.
+    //
+    // Re-approving the same prose posts nothing. It is a real thing people do
+    // — open the write-up, read it again, press the button — and the channel
+    // would get a second "Revised write-up" whose body is character-for-
+    // character the first one. That is exactly the duplicate the transport
+    // above declines to risk on an ambiguous 502, and it would be worse coming
+    // from here, because here it is not a risk taken to recover a lost post:
+    // it is a post nobody wanted, sent on purpose. The approval is still
+    // recorded and the ledger still holds it; only the channel is spared.
+    if (!unchanged && slackIsConfigured(await ctx.db.get(session.labId))) {
+      await ctx.scheduler.runAfter(0, internal.slack.deliverSynthesis, {
+        sessionId: args.sessionId,
+        approvedAt,
+        approvedBy: userId,
+        revised: reapproved,
+      });
+    }
     return null;
   },
 });

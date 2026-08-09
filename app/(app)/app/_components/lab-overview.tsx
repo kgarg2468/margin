@@ -22,6 +22,7 @@ import { readableError } from "./errors";
 import { InviteNotice } from "./lab-provider";
 import type { LabSummary } from "./lab-provider";
 import { JoinLabCard } from "./onboarding";
+import { SlackDelivery } from "./slack-delivery";
 
 /**
  * Emailing an invitation needs a Resend key on the Convex deployment, which
@@ -60,6 +61,8 @@ export function LabOverview({ lab }: { lab: LabSummary }) {
 
       <Members lab={lab} />
       {lab.role === "pi" && <Invites lab={lab} />}
+      {/* Every member, not only the PI — the section explains why. */}
+      <SlackDelivery lab={lab} />
 
       <section className="flex flex-col gap-4 border-t border-rule pt-8">
         <details className="group flex flex-col gap-4">

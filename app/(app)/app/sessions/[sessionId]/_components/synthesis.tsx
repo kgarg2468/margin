@@ -546,6 +546,7 @@ function ApprovalForm({
   onDone: () => void;
 }) {
   const approve = useMutation(api.synthesis.approve);
+  const slack = useQuery(api.slack.status, { labId: session.labId });
   const [text, setText] = useState(initial);
   const [basis, setBasis] = useState<Basis>(seededFrom);
   const [error, setError] = useState<string | null>(null);
@@ -665,6 +666,18 @@ function ApprovalForm({
           Discard changes
         </button>
       </div>
+
+      {/*
+        The write-up is the artifact that travels furthest, and approving it is
+        what sends it. Said here rather than only in lab settings, because the
+        person about to put their name on a version of the lab's record should
+        know where that version is about to be read.
+      */}
+      {slack?.connected === true && (
+        <p className="max-w-prose font-sans text-xs text-ink-faint">
+          Approving also posts this to the lab&rsquo;s Slack channel.
+        </p>
+      )}
 
       {error !== null && (
         <p role="alert" aria-live="polite" className={`${errorClass} max-w-prose`}>

@@ -340,6 +340,66 @@ export const eventDoc = v.union(
     type: v.literal("invite.revoked"),
     inviteId: v.id("invites"),
   }),
+  /**
+   * The lab's margin started, or stopped, leaving the building.
+   *
+   * A PI wiring a Slack channel to the lab decides that briefs, boundary posts
+   * and approved write-ups — all of them built out of what members wrote — are
+   * readable by whoever is in that channel, which may not be only the lab. That
+   * is precisely the kind of collective fact the ledger exists to hold: every
+   * member can see, in the record, when it started and who decided it.
+   *
+   * The URL is not carried, and could not be. It is a credential — anyone
+   * holding it can post as the lab — and `events` rows are never deleted, so a
+   * copy of one here would outlive every disconnection. `connected` says which
+   * way the switch moved, which is the whole fact.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("slack.delivery_changed"),
+    connected: v.boolean(),
+  }),
+  /**
+   * Slack refused one of this lab's posts outright.
+   *
+   * The counterpart to the fact above, and recorded for the same reason: a lab
+   * that decided its margin should leave the building is owed the record of the
+   * times it did not. Without this, a channel archived in March means every
+   * brief since has quietly gone nowhere, with the settings page still saying a
+   * channel is wired and nothing anywhere saying otherwise.
+   *
+   * Only permanent refusals — a `404` for a channel that is gone, a `403` for a
+   * webhook that was revoked. Slack having a bad minute is not a fact about the
+   * lab and does not belong in the lab's record.
+   *
+   * `statusCode`, `artifact` and `deliveryAt`, and nothing else. Not the URL,
+   * which is a credential these rows would outlive; not Slack's response body,
+   * which is useful in a deployment log and is not ours to keep.
+   *
+   * `deliveryAt` is the version stamp of the artifact the post was carrying —
+   * the `approvedAt` of a brief or a write-up, the scheduled time of a session
+   * boundary. It is what makes a row identifiable as being about *one*
+   * delivery, so being told twice about the same failed post files one row,
+   * while two separate approvals that both failed stay two. An append-only
+   * ledger cannot take a duplicate back.
+   *
+   * `actorId` is the session's presenter, for want of anyone truer: a scheduled
+   * delivery has nobody pressing a button, and the same convention is what
+   * `briefs.buildForSession` uses when it files a two-in-the-morning assembly.
+   * The `type` is what keeps it from reading as a person having done something
+   * wrong — nobody did.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("slack.delivery_failed"),
+    artifact: v.union(
+      v.literal("brief"),
+      v.literal("boundary"),
+      v.literal("write-up"),
+    ),
+    statusCode: v.number(),
+    deliveryAt: v.number(),
+  }),
   v.object({
     ...eventBase,
     type: v.literal("paper.added"),
@@ -880,6 +940,85 @@ export default defineSchema({
      * transaction — Convex mutations are atomic, so it cannot drift.
      */
     memberCount: v.number(),
+    /**
+     * Where this lab's artifacts are posted, if the PI has wired up a channel.
+     *
+     * A Slack incoming-webhook URL and nothing else — no team id, no channel
+     * name, no bot token, no OAuth grant. The URL *is* the credential and it
+     * *is* the destination, which is the whole reason the webhook shape was
+     * chosen over a Slack app: a PI pastes one string and the lab is wired,
+     * with no workspace admin in the loop and nothing for Margin to keep
+     * beyond the one field.
+     *
+     * It never leaves the server. `convex/slack.ts` holds the only reads, and
+     * every one of them is an `internalQuery` or a mutation that writes it —
+     * no public query returns it, not even to the PI who pasted it, because a
+     * webhook URL in a query result is a webhook URL in the browser's cache and
+     * in every dev tools pane it is ever opened in. `convex/slack.guard.test.ts`
+     * asserts that structurally against the schema's own validators.
+     *
+     * Absent means Slack delivery is off, and that is the only representation
+     * of "off" there is: clearing the field is what disconnecting does. A
+     * separate boolean would be a second source of truth for one question, and
+     * the failure mode of the two disagreeing is a lab that believes it has
+     * stopped posting and has not.
+     */
+    slackWebhookUrl: v.optional(v.string()),
+    /**
+     * When the webhook above was pasted — the credential's non-secret identity.
+     *
+     * A delivery outcome is recorded by a mutation scheduled from an action,
+     * and nothing orders that against a PI in the settings page. So a `404`
+     * from a post made at two o'clock can be handed to a lab that replaced its
+     * webhook at two-oh-one, and without a way to tell the two apart the lab
+     * would be told the new channel is dead on the evidence of the old one.
+     *
+     * This is what travels with a post instead of the URL: replacing the
+     * webhook writes a new timestamp, so an outcome that names the old one can
+     * be recognised as describing a credential the lab no longer has. It is
+     * safe to hand around precisely because it is not the secret — it says
+     * *which* webhook, never what it was.
+     */
+    slackConnectedAt: v.optional(v.number()),
+    /**
+     * How the most recent post to Slack went.
+     *
+     * A webhook can die without anyone touching this row: archive the channel,
+     * or remove the app from the workspace, and Slack starts answering `404
+     * no_service` forever. The lab has no way to notice — the setting still
+     * says a channel is wired, because it is, and the posts simply stop. This
+     * field is what lets the settings page say the true thing instead.
+     *
+     * It records posts that *landed* as well as ones that were refused, which
+     * is the part that is easy to get wrong. Outcomes are written by mutations
+     * scheduled from actions, so they can arrive in any order; without a record
+     * of the successes, a refusal from two o'clock has no way to know that a
+     * post at two-oh-one went through, and would stamp a lab whose channel is
+     * demonstrably alive. `at` is the attempt's own time and is what makes that
+     * comparison possible — an outcome older than the one recorded here is
+     * stale by definition and is dropped.
+     *
+     * `statusCode` present means refused, absent means it arrived.
+     * `connectedAt` says which webhook did the posting, so an outcome naming a
+     * credential the lab has since replaced can be recognised and dropped too.
+     *
+     * Only permanent refusals are ever recorded as failures. Transient trouble
+     * — a `5xx`, a rate limit that outlasted the retries — writes nothing at
+     * all, since a banner about a channel that might be gone is worse than
+     * silence when the channel is fine.
+     *
+     * A derived, self-healing summary of facts the ledger holds permanently,
+     * not a second source of truth: it exists so that reading it costs one
+     * document get on a page every member loads, rather than a scan back
+     * through `events`.
+     */
+    slackLastDelivery: v.optional(
+      v.object({
+        at: v.number(),
+        connectedAt: v.number(),
+        statusCode: v.optional(v.number()),
+      }),
+    ),
   }).index("by_creator", ["createdBy"]),
 
   /** Join table between users and labs; the single source of truth for authorization. */
