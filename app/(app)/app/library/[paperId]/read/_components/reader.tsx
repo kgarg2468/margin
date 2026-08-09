@@ -88,7 +88,6 @@ export function Reader({
   );
   const [columnWidth, setColumnWidth] = useState(0);
   const [columnHeight, setColumnHeight] = useState(0);
-  const [originTop, setOriginTop] = useState(0);
   const [window_, setWindow] = useState<Set<number>>(new Set([0, 1, 2]));
   const [currentPage, setCurrentPage] = useState(0);
   const [activeId, setActiveId] = useState<AnnotationId | null>(null);
@@ -208,7 +207,6 @@ export function Reader({
     const observer = new ResizeObserver(() => {
       setColumnWidth(column.clientWidth);
       setColumnHeight(column.offsetHeight);
-      setOriginTop(column.offsetTop);
     });
     observer.observe(column);
     return () => observer.disconnect();
@@ -901,8 +899,7 @@ export function Reader({
             loading={loading}
             truncated={annotations?.truncated ?? false}
             aligned={aligned}
-            originTop={originTop}
-            height={columnHeight}
+            columnHeight={columnHeight}
             activeId={activeId}
             onActivate={setActiveId}
             onFocusPassage={focusPassage}

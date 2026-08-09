@@ -1,9 +1,10 @@
 "use client";
 
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AnnotationCard } from "./annotation-card";
 import { typeStyle } from "./ontology";
+import { DEFAULT_GAP, relaxColumn } from "@/lib/rail/relax";
 import { eyebrowClass, skeletonClass } from "@/lib/ui";
 import type { AnchorState, AnnotationId, AnnotationView } from "./types";
 
@@ -38,7 +39,20 @@ export type RailCard = {
 };
 
 /** Breathing room between two cards that want the same line. */
-const GAP = 10;
+const GAP = DEFAULT_GAP;
+
+/**
+ * The height a card is assumed to have for the single frame between its first
+ * render and the layout effect that measures it.
+ *
+ * It is never painted: the measuring pass is a `useLayoutEffect`, so the state
+ * it sets re-renders before the browser draws anything. Zero rather than an
+ * average, because an unmeasured card that claimed 90px of space — the number
+ * that used to be here — pushed everything below it down and then pulled it
+ * back once the real height arrived, on the one frame a reader is most likely
+ * to be looking at the rail.
+ */
+const UNMEASURED = 0;
 
 /**
  * How far a card has to be pushed before the gap between it and its passage
@@ -52,14 +66,14 @@ const TETHER_MIN = 12;
  *
  * Cards line up with the passages they are about, which is the whole point of
  * the layout and also the only hard part of it: two notes on adjacent lines
- * want the same forty pixels. The pass below is the one a typesetter would do —
- * take them in document order and push each one down until it clears the last —
- * so a card never sits above its passage, only below it, and the reading order
- * of the margin always matches the reading order of the page.
+ * want the same forty pixels. `lib/rail/relax.ts` settles that — it places a
+ * crowded run so the displacement is shared rather than handed to whichever
+ * note happens to be last, which means a card may sit slightly above its
+ * passage as well as below it.
  *
- * It needs measured heights, which a ResizeObserver supplies: a card's height
- * does not depend on where it ended up, so measuring and placing never chase
- * each other.
+ * It needs measured heights, which a ResizeObserver supplies plus one
+ * synchronous read for cards it has not seen yet: a card's height does not
+ * depend on where it ended up, so measuring and placing never chase each other.
  */
 export function MarginRail({
   cards,
@@ -67,8 +81,7 @@ export function MarginRail({
   loading,
   truncated,
   aligned,
-  originTop,
-  height,
+  columnHeight,
   activeId,
   onActivate,
   onFocusPassage,
@@ -81,9 +94,8 @@ export function MarginRail({
   truncated: boolean;
   /** Wide enough to place cards against passages. Narrow screens get a list. */
   aligned: boolean;
-  /** The y the reader's page column starts at, which is the rail's own origin. */
-  originTop: number;
-  height: number;
+  /** How tall the pages are, which is the least the rail can be. */
+  columnHeight: number;
   activeId: AnnotationId | null;
   onActivate: (id: AnnotationId | null) => void;
   onFocusPassage: (annotation: AnnotationView) => void;
@@ -91,6 +103,18 @@ export function MarginRail({
   const elements = useRef(new Map<AnnotationId, HTMLElement>());
   const sizes = useRef<ResizeObserver | null>(null);
   const [heights, setHeights] = useState<Map<AnnotationId, number>>(new Map());
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const spacerRef = useRef<HTMLDivElement | null>(null);
+  /**
+   * The rail's own top-left inside the reader's content box.
+   *
+   * Measured, not inherited. The old pass took the page column's `offsetTop`
+   * and used it as the rail's origin, which was only ever true because both
+   * columns were flex children of the same row with the same padding — so a
+   * toolbar or a heading added to either one silently moved every card in the
+   * margin. This asks the spacer where it actually is.
+   */
+  const [origin, setOrigin] = useState({ top: 0, left: 0 });
   const reduce = useReducedMotion();
   const entrance = reduce === true ? {} : CARD_ENTER;
 
@@ -142,18 +166,89 @@ export function MarginRail({
     sizes.current?.observe(element);
   }, []);
 
-  const placed: { card: RailCard; top: number; drift: number }[] = [];
-  if (aligned) {
-    let floor = 0;
-    for (const card of [...cards].sort((a, b) => a.top - b.top)) {
-      const wanted = card.top - originTop;
-      const top = Math.max(wanted, floor);
-      // How far the pass above had to move it. Everything the reader needs to
-      // be told about the gap is already known here.
-      placed.push({ card, top, drift: top - wanted });
-      floor = top + (heights.get(card.annotation._id) ?? 90) + GAP;
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    if (root === null) {
+      return;
     }
-  }
+    const measure = () => {
+      const spacer = spacerRef.current;
+      setOrigin((previous) => {
+        const top = spacer?.offsetTop ?? 0;
+        const left = spacer?.offsetLeft ?? 0;
+        return previous.top === top && previous.left === left
+          ? previous
+          : { top, left };
+      });
+    };
+    measure();
+    // Anything that can move the spacer changes the size of something above or
+    // around it, which is what this catches. `aligned` is a dependency because
+    // the spacer does not exist at all in the narrow layout.
+    const observer = new ResizeObserver(measure);
+    observer.observe(root);
+    return () => observer.disconnect();
+  }, [aligned]);
+
+  // The ResizeObserver above only reports a card once it has been observed for
+  // a frame, so a card's first render used to be placed against a made-up
+  // height and corrected afterwards — a visible overlap on the frame a reader
+  // most notices. This reads the real height before the browser paints.
+  //
+  // Only for cards with no measurement yet: everything already in the map is
+  // the observer's business, and reading `offsetHeight` for a thousand cards on
+  // every commit would be a forced reflow per scroll frame.
+  //
+  // No dependency array on purpose — it has to see every commit, because that
+  // is when a newly registered element first exists. It cannot chain: the
+  // updater returns `previous` unchanged once every card has been measured, and
+  // React bails out of re-rendering on an unchanged state.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useLayoutEffect(() => {
+    setHeights((previous) => {
+      let next = previous;
+      for (const [id, element] of elements.current) {
+        if (previous.has(id)) {
+          continue;
+        }
+        if (next === previous) {
+          next = new Map(previous);
+        }
+        next.set(id, element.offsetHeight);
+      }
+      return next;
+    });
+  });
+
+  const byId = useMemo(() => {
+    const map = new Map<AnnotationId, RailCard>();
+    for (const entry of cards) {
+      map.set(entry.annotation._id, entry);
+    }
+    return map;
+  }, [cards]);
+
+  // `relaxColumn` orders by `wanted` alone — it carries no document ordinal,
+  // which is sound here because this rail is a single column whose anchor y
+  // *is* the document order of the page.
+  const layout = useMemo(() => {
+    if (!aligned) {
+      return { placements: [], contentHeight: 0 };
+    }
+    return relaxColumn(
+      cards.map((entry) => ({
+        id: entry.annotation._id,
+        wanted: entry.top - origin.top,
+        height: heights.get(entry.annotation._id) ?? UNMEASURED,
+      })),
+      { gap: GAP, floor: 0 },
+    );
+  }, [aligned, cards, heights, origin.top]);
+
+  const placed = layout.placements.flatMap((placement) => {
+    const entry = byId.get(placement.id as AnnotationId);
+    return entry === undefined ? [] : [{ card: entry, ...placement }];
+  });
 
   function card(entry: RailCard) {
     return (
@@ -210,14 +305,20 @@ export function MarginRail({
   }
 
   return (
-    <div className="w-full shrink-0 lg:w-80">
+    <div ref={rootRef} className="w-full shrink-0 lg:w-80">
       {aligned ? (
         // The spacer is only as tall as the pages when there is something to
         // place against them; an empty rail must not push its own empty state
         // eighteen pages down.
         <div
+          ref={spacerRef}
           className="relative"
-          style={{ height: placed.length === 0 ? 0 : Math.max(height, 1) }}
+          style={{
+            height:
+              placed.length === 0
+                ? 0
+                : Math.max(columnHeight, layout.contentHeight, 1),
+          }}
         >
 
           <AnimatePresence initial={false}>
@@ -249,15 +350,20 @@ export function MarginRail({
               tether at the cards' own left edge is hidden behind exactly the
               card that displaced it. Decorative — the card already quotes its
               passage in words, and clicking it still goes there. */}
-          {placed.map(({ card: entry, top, drift }) =>
-            drift < TETHER_MIN ? null : (
+          {placed.map(({ card: entry, top, wanted, drift }) =>
+            Math.abs(drift) < TETHER_MIN ? null : (
               <span
                 key={`${entry.annotation._id}-tether`}
                 aria-hidden
-                className="pointer-events-none absolute -left-2 w-px motion-safe:transition-opacity"
+                // Eased on the same curve and over the same 300ms as the card
+                // it belongs to. Set inline and untransitioned, it jumped to
+                // its new length the instant a thread expanded while the card
+                // was still sliding — a line drawn to where the note was about
+                // to be.
+                className="pointer-events-none absolute -left-2 w-px motion-safe:transition-[top,height,opacity] motion-safe:duration-300 motion-safe:ease-[cubic-bezier(0.16,1,0.3,1)]"
                 style={{
-                  top: top - drift,
-                  height: drift,
+                  top: Math.min(top, wanted),
+                  height: Math.abs(drift),
                   backgroundColor: typeStyle(entry.annotation.type).ink,
                   opacity: activeId === entry.annotation._id ? 0.8 : 0.3,
                 }}
