@@ -218,6 +218,22 @@ function ToastCard({
 }
 
 /**
+ * What one toast sounds like: the notice, and whether there is a way back.
+ *
+ * The action is the point of a toast — "Session ended." is information, "Undo
+ * available" is a door, and it closes in five seconds. Announcing only the
+ * message tells a screen-reader user the thing they cannot change and hides
+ * the one thing they can, on the surface whose headline interaction is undo.
+ * The label is spoken as written on the button, so what they go looking for
+ * is what is there.
+ */
+function spokenText(toast: Toast): string {
+  return toast.action === undefined
+    ? toast.message
+    : `${toast.message} ${toast.action.label} available.`;
+}
+
+/**
  * What a screen reader hears.
  *
  * A toast card is inserted into the page already carrying its text, and a
@@ -241,7 +257,7 @@ function Announcer({ toasts }: { toasts: Toast[] }) {
       announced.current = Math.max(announced.current, toast.id);
     }
     if (fresh.length > 0) {
-      setAnnouncement(fresh.map((toast) => toast.message).join(". "));
+      setAnnouncement(fresh.map(spokenText).join(". "));
     }
   }, [toasts]);
 
