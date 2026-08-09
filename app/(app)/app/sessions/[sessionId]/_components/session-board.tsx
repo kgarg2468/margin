@@ -4,6 +4,7 @@ import type { Id } from "@/convex/_generated/dataModel";
 import { cleanQuote } from "@/lib/quotes";
 import { eyebrowClass } from "@/lib/ui";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import Link from "next/link";
 import type { AnnotationType } from "../../../library/[paperId]/read/_components/ontology";
 import { typeStyle } from "../../../library/[paperId]/read/_components/ontology";
 import type { AnnotationView } from "../../../library/[paperId]/read/_components/types";
@@ -201,12 +202,12 @@ export function PassageBoard({
       {hidden > 0 && (
         <p className="font-sans text-xs text-ink-faint">
           {hidden} more marked {hidden === 1 ? "passage" : "passages"} —{" "}
-          <a
+          <Link
             href={readHref}
             className="text-accent underline-offset-4 hover:underline"
           >
             read the paper
-          </a>{" "}
+          </Link>{" "}
           to see them in place.
         </p>
       )}
@@ -238,9 +239,12 @@ export function MarginElsewhere({
     <p className="font-sans text-xs text-ink-faint tabular-nums">
       {count} more lab {count === 1 ? "note" : "notes"} on this paper{" "}
       {count === 1 ? "was" : "were"} written outside this session —{" "}
-      <a href={readHref} className="text-accent underline-offset-4 hover:underline">
+      <Link
+        href={readHref}
+        className="text-accent underline-offset-4 hover:underline"
+      >
         read them in the margin
-      </a>
+      </Link>
       .
     </p>
   );
