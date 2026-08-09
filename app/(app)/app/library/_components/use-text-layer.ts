@@ -7,7 +7,7 @@ import { PdfAuthError, fetchPdfBytes } from "@/lib/pdf/delivery";
 import { describePdfOpenError, extractPdf } from "@/lib/pdf/extract";
 import { useAuthToken } from "@convex-dev/auth/react";
 import { useMutation } from "convex/react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 
 /**
  * Read the text layer out of a PDF that Margin already has.
@@ -36,21 +36,21 @@ export function useTextLayer() {
   const saveExtractedText = useMutation(api.papers.saveExtractedText);
   const markIngestFailed = useMutation(api.papers.markIngestFailed);
 
-  // The token's *value* is held in a ref rather than closed over, so that a
-  // rotation does not change `read`'s identity — `PdfPanel` starts extraction
-  // from an effect that depends on `read`, and a `read` that changed under it
-  // would ask again.
+  // Closed over, and a dependency of `read` below — not hidden in a ref.
   //
-  // Its *presence* is a different question and is deliberately not hidden in
-  // the ref: `read` refuses to start without one, so it must get a new
-  // identity when auth arrives or the paper that was skipped is never picked
-  // up. Presence flips once per sign-in; the value changes every hour.
+  // The instinct is to keep `read` stable, because `PdfPanel` starts
+  // extraction from an effect that depends on it. But stability was never
+  // what stopped that effect from working twice; `attempted` is, and it
+  // still does. What a stable `read` *would* stop is recovery: a paper
+  // skipped or abandoned over auth has to be picked up again once auth is
+  // good, and a `read` whose identity never changes gives the effect no
+  // reason to fire.
+  //
+  // Presence alone is not enough to key that on. An expiring session is
+  // refreshed by swapping the token's value, and it need never pass through
+  // `null` on the way — so a hook watching only "is there a token" would
+  // sleep through exactly the event it exists to notice.
   const token = useAuthToken();
-  const hasToken = token !== null;
-  const tokenRef = useRef(token);
-  useEffect(() => {
-    tokenRef.current = token;
-  }, [token]);
 
   /**
    * A phase per paper, not one for the hook.
@@ -71,8 +71,9 @@ export function useTextLayer() {
     [phases],
   );
 
-  // Stable, so `read` is too — `PdfPanel` starts extraction from an effect and
-  // a `read` that changed identity every render would be a loop.
+  // Stable, so that `read` changes identity when the token does and at no
+  // other time. `PdfPanel` starts extraction from an effect that depends on
+  // `read`: once an hour is a retry, every render would be a loop.
   const setPhase = useCallback((paperId: Id<"papers">, phase: TextLayerPhase) => {
     setPhases((previous) => new Map(previous).set(paperId, phase));
   }, []);
@@ -80,6 +81,10 @@ export function useTextLayer() {
   // Extraction is idempotent but not cheap — eighteen pages of pdf.js — and
   // the callers below are reactive, so they will ask more than once for the
   // same paper. One attempt each.
+  //
+  // An attempt means a run that got as far as the file and formed an opinion
+  // about it. A run that never had a usable session formed no opinion, and
+  // neither adds itself here nor stays here — see both auth branches below.
   const attempted = useRef<Set<string>>(new Set());
 
   const read = useCallback(
@@ -97,11 +102,11 @@ export function useTextLayer() {
        * nothing retries a paper that has already failed.
        *
        * So: bail before `attempted` records anything, leaving this paper
-       * untouched and its phase idle. `hasToken` is in this callback's deps,
-       * so `read` gets a new identity the moment auth arrives and the
-       * caller's effect fires again — that run is the real first attempt.
+       * untouched and its phase idle. `token` is in this callback's deps, so
+       * `read` gets a new identity the moment auth arrives and the caller's
+       * effect fires again — that run is the real first attempt.
        */
-      if (!hasToken) {
+      if (token === null) {
         if (force) {
           // Except when somebody pressed the button, where silence would read
           // as a dead control. A phase, deliberately — it says so in the
@@ -122,7 +127,7 @@ export function useTextLayer() {
 
       try {
         setPhase(paperId, { kind: "working", message: "Fetching the PDF…" });
-        const data = await fetchPdfBytes(paperId, tokenRef.current);
+        const data = await fetchPdfBytes(paperId, token);
         const extraction = await extractPdf(data, {
           onProgress: (pagesDone, pages) =>
             setPhase(paperId, {
@@ -141,7 +146,16 @@ export function useTextLayer() {
         // sentence too — the generic classifiers below would flatten "your
         // session has expired" into "that PDF wouldn't open", which is the
         // one reading that sends a member off to re-upload a working file.
+        //
+        // And it is struck from `attempted`, because it was not one. That set
+        // means "this paper has had its go", and leaving an auth failure in it
+        // is the same bug as marking the paper failed, one layer up: the
+        // automatic caller would find the guard closed for the rest of the
+        // page's life and the paper would wait for a remount or for somebody
+        // to press the button. Clearing it lets the retry that a refreshed
+        // token triggers actually get through.
         if (caught instanceof PdfAuthError) {
+          attempted.current.delete(paperId);
           setPhase(paperId, { kind: "failed", message: caught.message });
           return false;
         }
@@ -166,7 +180,7 @@ export function useTextLayer() {
         return false;
       }
     },
-    [hasToken, saveExtractedText, markIngestFailed, setPhase],
+    [token, saveExtractedText, markIngestFailed, setPhase],
   );
 
   return { phaseFor, read };
