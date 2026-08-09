@@ -77,16 +77,15 @@ export function SessionSpine({ notes }: { notes: SessionNotes }) {
   if (notes.total === 0) {
     return null;
   }
-  const summary = notes.counts
-    .map(({ type, count }) => `${count} ${typeStyle(type).label.toLowerCase()}`)
-    .join(", ");
 
   return (
     <div className="flex flex-col gap-2.5">
+      {/* The strip is decoration: every number in it is spelled out in the
+          legend below, in the same order, so an assistive reader that met
+          both would hear the session's counts twice. */}
       <div
-        role="img"
-        aria-label={`${notes.total} notes in this session: ${summary}`}
-        className="flex h-1.5 w-full gap-px overflow-hidden bg-rule"
+        aria-hidden="true"
+        className="flex h-2.5 w-full gap-px overflow-hidden bg-rule"
       >
         {notes.counts.map(({ type, count }) => (
           <span
@@ -96,25 +95,56 @@ export function SessionSpine({ notes }: { notes: SessionNotes }) {
             // whole rule re-cutting itself in one frame.
             className="motion-safe:transition-[flex-grow] motion-safe:duration-500 motion-safe:ease-[cubic-bezier(0.16,1,0.3,1)]"
             style={{
-              flex: `${count} 0 0%`,
-              backgroundColor: typeStyle(type).ink,
+              // A floor, not pure proportion: one note in forty is 2.5% of the
+              // rule — thinner than the gap beside it — and a type the lab
+              // actually wrote would read as absent. `flexBasis` buys every
+              // present type 10px before the counts divide what's left, so
+              // proportion still dominates once the numbers are real.
+              flexGrow: count,
+              flexBasis: "10px",
+              flexShrink: 0,
+              backgroundColor: spineInk(type),
             }}
           />
         ))}
       </div>
-      <ul aria-hidden="true" className="flex flex-wrap gap-x-4 gap-y-1">
+      <ul
+        aria-label={`${notes.total} notes in this session`}
+        className="flex flex-wrap gap-x-4 gap-y-1"
+      >
         {notes.counts.map(({ type, count }) => (
           <li
             key={type}
-            style={{ color: typeStyle(type).ink }}
-            className="font-sans text-[11px] uppercase tracking-[0.12em] tabular-nums"
+            className="flex items-baseline gap-1.5 font-sans text-[11px]"
           >
-            {typeStyle(type).label} {count}
+            <span
+              style={{ color: typeStyle(type).ink }}
+              className="uppercase tracking-[0.08em]"
+            >
+              {typeStyle(type).label}
+            </span>
+            {/* The count leaves the type's ink: at 11px a mid violet or a
+                faint neutral is the least readable thing on the row, and the
+                number is the part you came for. */}
+            <span className="text-ink tabular-nums">{count}</span>
           </li>
         ))}
       </ul>
     </div>
   );
+}
+
+/**
+ * The spine's band colour, which is `typeStyle().ink` for six of the seven.
+ *
+ * `note` is drawn in `--ink-faint`, which is right everywhere it labels text
+ * but wrong here: the band sits on a `bg-rule` track, and in dark mode faint
+ * ink on that track is a smear — on the one type that is the untyped default
+ * and so usually the widest band on the rule. The remap is local to the spine
+ * because `note`'s ink is load-bearing in the reader and the cards.
+ */
+function spineInk(type: AnnotationType): string {
+  return type === "note" ? "var(--ink-muted)" : typeStyle(type).ink;
 }
 
 /**
