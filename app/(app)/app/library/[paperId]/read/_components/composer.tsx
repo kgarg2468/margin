@@ -9,8 +9,9 @@ import { collectMentionedIds } from "@/lib/mentions";
 import { errorClass } from "@/lib/ui";
 import { useMutation } from "convex/react";
 import type { ComponentProps } from "react";
-import { useCallback, useState } from "react";
-import { composerEscape } from "./composer-escape";
+import { useCallback, useRef, useState } from "react";
+import type { EscapePressedIn } from "./composer-escape";
+import { composerEscape, composerHandlesEscape } from "./composer-escape";
 import type { PickedMention } from "./mention-field";
 import { MentionField } from "./mention-field";
 import type { AnnotationType } from "./ontology";
@@ -19,6 +20,49 @@ import type { Draft } from "./types";
 import { VisibilityToggle } from "./visibility-toggle";
 
 type Visibility = Doc<"annotations">["visibility"];
+
+/**
+ * The two things Base UI puts on its dismissal object that `PopoverDismissal`
+ * does not name: the native event behind the dismissal, and the one call that
+ * lets a cancelled event keep travelling outward.
+ *
+ * Both are on every details object Base UI builds
+ * (`internals/createBaseUIEventDetails.js`), so the optionality here is the
+ * shared type's caution rather than a real maybe. Widening `PopoverDismissal`
+ * by the one line is the tidier home for `allowPropagation` — the plan's own
+ * coordinator note anticipated exactly that — but `popover.tsx` is outside this
+ * task's allowlist, so the extra shape is stated locally instead. See the
+ * report.
+ */
+type NativeDismissal = PopoverDismissal & {
+  event?: Event;
+  allowPropagation?: () => void;
+};
+
+/**
+ * Which surface an Escape was pressed on, read off the event's own target.
+ *
+ * `role="dialog"` is the question asked, because that is how every layer over
+ * the page announces itself — Base UI gives its popup the role, and the ⌘K
+ * palette sets it by hand. A target under no dialog at all is the page, and the
+ * page is the composer's to answer for.
+ */
+function pressedIn(
+  target: EventTarget | null,
+  within: Element | null,
+): EscapePressedIn {
+  const element = target instanceof Element ? target : null;
+  if (element === null) {
+    return "page";
+  }
+  // Up to the popup itself, not just the content: an Escape can land on Base
+  // UI's dialog rather than on anything the composer rendered inside it.
+  const sheet = within?.closest('[role="dialog"]') ?? within;
+  if (sheet !== null && sheet.contains(element)) {
+    return "composer";
+  }
+  return element.closest('[role="dialog"]') === null ? "page" : "surface-above";
+}
 
 /**
  * What happens when you let go of a selection.
@@ -72,6 +116,14 @@ export function Composer({
   });
   const [dismissedAt, setDismissedAt] = useState<number | null>(null);
   const [confirming, setConfirming] = useState(false);
+  /**
+   * Anything that is reliably inside the sheet, so an Escape can be placed
+   * against it. The quoted passage is the one element the composer always
+   * renders, and `pressedIn` only ever walks up from here to the popup —
+   * `Popover` hands back no ref of its own, and a wrapper `<div>` for the
+   * purpose would be a DOM node earning nothing.
+   */
+  const insideSheet = useRef<HTMLParagraphElement | null>(null);
 
   /**
    * Stable, and it keeps the old state object when nothing actually moved.
@@ -138,6 +190,22 @@ export function Composer({
       return;
     }
     if (details.reason === "escape-key") {
+      const native = details as NativeDismissal;
+      if (
+        !composerHandlesEscape(
+          pressedIn(native.event?.target ?? null, insideSheet.current),
+        )
+      ) {
+        // Something is open over the sheet and this Escape is its business.
+        // Cancel, so the composer neither closes nor asks anything — and hand
+        // the event back its propagation, because Base UI otherwise stops it at
+        // `document`, one bubble before the palette's `window` listener would
+        // have seen it. Without this the topmost surface is the one thing on
+        // screen Escape cannot close.
+        details.cancel();
+        native.allowPropagation?.();
+        return;
+      }
       // Base UI would close the sheet here. It does not get to decide what
       // Escape means while there is a roster open or a half-written note in
       // the box — see `composer-escape.ts`.
@@ -167,7 +235,10 @@ export function Composer({
       onOpenChange={dismissal}
       className="w-80 max-w-[calc(100vw-3rem)]"
     >
-      <p className="mb-3 border-l-2 border-rule pl-2.5 font-serif text-sm leading-snug text-ink-muted">
+      <p
+        ref={insideSheet}
+        className="mb-3 border-l-2 border-rule pl-2.5 font-serif text-sm leading-snug text-ink-muted"
+      >
         <span className="line-clamp-3 italic">{draft.anchor.quote}</span>
       </p>
 

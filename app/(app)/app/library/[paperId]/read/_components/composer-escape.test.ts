@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { composerEscape } from "./composer-escape";
+import { composerEscape, composerHandlesEscape } from "./composer-escape";
 
 /**
  * One key, several things it could plausibly mean, and exactly one answer per
@@ -51,5 +51,32 @@ describe("Escape with the mention menu open", () => {
     expect(
       composerEscape({ menuOpen: true, confirming: true, body: "a note" }),
     ).toBe("close-menu");
+  });
+});
+
+/**
+ * Which surface the key belongs to, asked before what it means. The ordering
+ * above only applies when the composer is the thing on top — and "on top" is
+ * not the same question as "focused".
+ */
+describe("Escape and the surface it belongs to", () => {
+  it("answers for an Escape pressed inside the composer's own sheet", () => {
+    expect(composerHandlesEscape("composer")).toBe(true);
+  });
+
+  it("leaves an Escape alone when something is layered over the composer", () => {
+    // The ⌘K palette closes on a `window` listener; Base UI's dismissal runs on
+    // `document`, one bubble earlier, and stops the event dead. A composer that
+    // answered this Escape would leave the palette open with no way out but the
+    // mouse — and would put "Throw this note away?" behind it for good measure.
+    expect(composerHandlesEscape("surface-above")).toBe(false);
+  });
+
+  it("still answers when the Escape belongs to no surface at all", () => {
+    // The row a naive "was it pressed inside my sheet?" test gets wrong. An
+    // outside press leaves focus on the page, and the composer is still the
+    // topmost thing open: Escape has to keep working there, or a note becomes
+    // un-dismissable by keyboard the moment the reader clicks the page.
+    expect(composerHandlesEscape("page")).toBe(true);
   });
 });
