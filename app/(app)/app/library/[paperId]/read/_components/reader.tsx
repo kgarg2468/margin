@@ -16,7 +16,14 @@ import type {
   PDFDocumentProxy,
 } from "pdfjs-dist/types/src/display/api";
 import type { ReactNode } from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Composer } from "./composer";
 import { nextDraftBox } from "./draft-box";
 import type { RailCard } from "./margin-rail";
@@ -31,6 +38,15 @@ import type {
   DraftBox,
   PageResolution,
 } from "./types";
+import {
+  MAX_SCALE,
+  MIN_SCALE,
+  parsePageJump,
+  stepZoom,
+  zoomLabel,
+  zoomScale,
+  type ZoomMode,
+} from "./zoom";
 
 /**
  * The reader.
@@ -311,16 +327,75 @@ export function Reader({
     return () => observer.disconnect();
   }, [doc]);
 
-  const scale = useMemo(() => {
-    if (baseSize === null || columnWidth === 0) {
-      return 1;
-    }
-    return Math.min(2, Math.max(0.4, columnWidth / baseSize.width));
-  }, [baseSize, columnWidth]);
+  const [zoom, setZoom] = useState<ZoomMode>("fit-width");
+  const [pageBox, setPageBox] = useState("");
+
+  const scale = useMemo(
+    () => zoomScale(zoom, { columnWidth, baseWidth: baseSize?.width ?? 0 }),
+    [zoom, columnWidth, baseSize],
+  );
 
   const pageCount = doc?.numPages ?? 0;
   const pageWidth = baseSize === null ? 0 : Math.floor(baseSize.width * scale);
   const pageHeight = baseSize === null ? 0 : Math.floor(baseSize.height * scale);
+
+  /**
+   * Where the reader was when the scale changed.
+   *
+   * A zoom re-renders every canvas at a new size, which changes the height of
+   * everything above the viewport — so without this the paper jumps, usually
+   * several pages, and the reader has to find their place again. Kept as a
+   * fraction of the current page rather than a scroll offset, because the
+   * offset is exactly the thing that is about to be invalidated.
+   */
+  const holding = useRef<{ page: number; fraction: number } | null>(null);
+
+  const changeZoom = useCallback(
+    (next: ZoomMode) => {
+      // A press that does not change the size must not leave a place held.
+      // Clicking the fit-width button while already at fit width bails React
+      // out of the re-render, so the layout effect below never runs to spend
+      // what was just recorded — and the next thing that *does* change the
+      // page height, a window resize an hour later, would restore to it.
+      if (next === zoom) {
+        return;
+      }
+      const root = scrollRef.current;
+      const element = pageElements.current.get(currentPage);
+      if (root !== null && element !== undefined) {
+        const box = element.getBoundingClientRect();
+        const rootBox = root.getBoundingClientRect();
+        holding.current = {
+          page: currentPage,
+          fraction: (rootBox.top - box.top) / Math.max(1, box.height),
+        };
+      }
+      setZoom(next);
+    },
+    [currentPage, zoom],
+  );
+
+  useLayoutEffect(() => {
+    const held = holding.current;
+    const root = scrollRef.current;
+    if (held === null || root === null) {
+      return;
+    }
+    const element = pageElements.current.get(held.page);
+    if (element === undefined) {
+      return;
+    }
+    holding.current = null;
+    const box = element.getBoundingClientRect();
+    const rootBox = root.getBoundingClientRect();
+    root.scrollTop += box.top - rootBox.top + held.fraction * box.height;
+  }, [pageHeight]);
+
+  const goToPage = useCallback((index: number) => {
+    pageElements.current
+      .get(index)
+      ?.scrollIntoView({ block: "start", behavior: "smooth" });
+  }, []);
 
   const registerPage = useCallback(
     (index: number, element: HTMLDivElement | null) => {
@@ -748,6 +823,35 @@ export function Reader({
     pageOf,
   ]);
 
+  const counts = useMemo(() => {
+    const map = new Map<AnnotationType, number>();
+    for (const row of rows) {
+      if (row.parentId === undefined && !row.deleted) {
+        map.set(row.type, (map.get(row.type) ?? 0) + 1);
+      }
+    }
+    return map;
+  }, [rows]);
+
+  /**
+   * Whether to hold the chip band's height open.
+   *
+   * The band used to appear when the annotations landed, which shrank the
+   * scroll viewport by its own height and moved every page and every card in
+   * the margin — on the frame a reader is most likely to be looking at. So the
+   * space is held from the first paint, and once a paper has shown chips it
+   * keeps holding it, or withdrawing the last note would do the same thing in
+   * reverse. What is *not* held is the row itself: an empty "Show" reads as a
+   * control that failed to load.
+   */
+  const [bandUsed, setBandUsed] = useState(false);
+  useEffect(() => {
+    if (counts.size > 0) {
+      setBandUsed(true);
+    }
+  }, [counts.size]);
+  const reserveBand = loading || counts.size > 0 || bandUsed;
+
   const toggleFilter = (type: AnnotationType) =>
     setFilter((previous) => {
       const next = new Set(previous);
@@ -788,13 +892,6 @@ export function Reader({
         </p>
       </ReaderShell>
     );
-  }
-
-  const counts = new Map<AnnotationType, number>();
-  for (const row of rows) {
-    if (row.parentId === undefined && !row.deleted) {
-      counts.set(row.type, (counts.get(row.type) ?? 0) + 1);
-    }
   }
 
   return (
@@ -889,55 +986,150 @@ export function Reader({
           >
             White page
           </button>
-          <span className="shrink-0 font-sans text-xs tabular-nums text-ink-faint">
-            {pageCount > 0 ? `Page ${currentPage + 1} of ${pageCount}` : "…"}
-          </span>
+          <div className="flex shrink-0 items-center gap-1">
+            <button
+              type="button"
+              aria-label="Zoom out"
+              disabled={
+                zoomScale(zoom, {
+                  columnWidth,
+                  baseWidth: baseSize?.width ?? 0,
+                }) <= MIN_SCALE
+              }
+              onClick={() =>
+                changeZoom(
+                  stepZoom(zoom, -1, {
+                    columnWidth,
+                    baseWidth: baseSize?.width ?? 0,
+                  }),
+                )
+              }
+              className="pressable tap-target rounded-sm border border-rule px-1.5 py-0.5 font-sans text-[11px] tabular-nums text-ink-faint hover:border-ink-faint hover:text-accent disabled:opacity-40"
+            >
+              −
+            </button>
+            <button
+              type="button"
+              aria-pressed={zoom === "fit-width"}
+              aria-label={`Fit the page to the column. Currently ${zoomLabel(zoom, { columnWidth, baseWidth: baseSize?.width ?? 0 })}.`}
+              onClick={() => changeZoom("fit-width")}
+              className={
+                "pressable rounded-sm border px-1.5 py-0.5 font-sans text-[11px] tabular-nums " +
+                (zoom === "fit-width"
+                  ? "border-ink-faint text-ink"
+                  : "border-rule text-ink-faint hover:border-ink-faint hover:text-accent")
+              }
+            >
+              {zoomLabel(zoom, {
+                columnWidth,
+                baseWidth: baseSize?.width ?? 0,
+              })}
+            </button>
+            <button
+              type="button"
+              aria-label="Zoom in"
+              disabled={
+                zoomScale(zoom, {
+                  columnWidth,
+                  baseWidth: baseSize?.width ?? 0,
+                }) >= MAX_SCALE
+              }
+              onClick={() =>
+                changeZoom(
+                  stepZoom(zoom, 1, {
+                    columnWidth,
+                    baseWidth: baseSize?.width ?? 0,
+                  }),
+                )
+              }
+              className="pressable tap-target rounded-sm border border-rule px-1.5 py-0.5 font-sans text-[11px] tabular-nums text-ink-faint hover:border-ink-faint hover:text-accent disabled:opacity-40"
+            >
+              +
+            </button>
+          </div>
+
+          {/* The page counter, made into the way you get somewhere. A reader
+              who can see "Page 4 of 31" and cannot type 19 into it is being
+              shown a fact and denied the obvious action on it. */}
+          <form
+            className="flex shrink-0 items-baseline gap-1 font-sans text-xs tabular-nums text-ink-faint"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const index = parsePageJump(pageBox, pageCount);
+              if (index === null) {
+                return;
+              }
+              setPageBox("");
+              goToPage(index);
+              event.currentTarget.querySelector("input")?.blur();
+            }}
+          >
+            <label htmlFor="reader-page-jump" className="sr-only">
+              Go to page
+            </label>
+            <input
+              id="reader-page-jump"
+              value={pageBox}
+              inputMode="numeric"
+              disabled={pageCount === 0}
+              placeholder={pageCount > 0 ? String(currentPage + 1) : "…"}
+              onChange={(event) => setPageBox(event.target.value)}
+              onBlur={() => setPageBox("")}
+              className="w-10 rounded-sm border border-rule bg-surface px-1 py-0.5 text-center text-xs tabular-nums text-ink placeholder:text-ink-faint hover:border-ink-faint focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-1 focus-visible:outline-accent"
+            />
+            <span>{pageCount > 0 ? `of ${pageCount}` : ""}</span>
+          </form>
         </div>
 
-        {/* No notes, no filter: a "Show" with nothing after it reads like a
-            control that failed to load. */}
-        {counts.size > 0 && (
-          <div className="flex items-center gap-x-1.5 overflow-x-auto border-t border-rule px-4 py-2 [scrollbar-width:none] sm:px-6 [&::-webkit-scrollbar]:hidden">
-            <span className={`${eyebrowClass} mr-1 shrink-0`}>Show</span>
-            {ANNOTATION_TYPES.filter(
-              (style) => (counts.get(style.value) ?? 0) > 0,
-            ).map((style) => {
-              const on = filter.size === 0 || filter.has(style.value);
-              return (
-                <button
-                  key={style.value}
-                  type="button"
-                  // The effective state, not the set membership: with no filter
-                  // at all every chip is on, and a row of "off" chips over a
-                  // margin showing everything is a lie a screen reader has no
-                  // way to see through.
-                  aria-pressed={on}
-                  onClick={() => toggleFilter(style.value)}
-                  style={
-                    on
-                      ? { color: style.ink, backgroundColor: style.wash }
-                      : undefined
-                  }
-                  className={
-                    "shrink-0 whitespace-nowrap rounded-full border px-2.5 py-1 font-sans text-[10px] uppercase tracking-[0.1em] " +
-                    "motion-safe:transition-[color,background-color,border-color,transform] motion-safe:duration-200 active:scale-[0.96] " +
-                    (on
-                      ? "border-transparent"
-                      : "border-rule text-ink-faint hover:border-ink-faint hover:text-ink-muted")
-                  }
-                >
-                  {style.label} {counts.get(style.value)}
-                </button>
-              );
-            })}
-            {filter.size > 0 && (
-              <button
-                type="button"
-                onClick={() => setFilter(new Set())}
-                className="shrink-0 px-1.5 font-sans text-[11px] text-accent underline-offset-4 hover:underline"
-              >
-                All
-              </button>
+        {/* Reserved from the first paint. The band used to arrive with the
+            annotations and take 37px out of the scroll viewport as it did,
+            which moved every page and every card in the margin at once. */}
+        {reserveBand && (
+          <div className="flex min-h-[2.375rem] items-center gap-x-1.5 overflow-x-auto border-t border-rule px-4 py-2 [scrollbar-width:none] sm:px-6 [&::-webkit-scrollbar]:hidden">
+            {counts.size > 0 && (
+              <>
+                <span className={`${eyebrowClass} mr-1 shrink-0`}>Show</span>
+                {ANNOTATION_TYPES.filter(
+                  (style) => (counts.get(style.value) ?? 0) > 0,
+                ).map((style) => {
+                  const on = filter.size === 0 || filter.has(style.value);
+                  return (
+                    <button
+                      key={style.value}
+                      type="button"
+                      // The effective state, not the set membership: with no
+                      // filter at all every chip is on, and a row of "off"
+                      // chips over a margin showing everything is a lie a
+                      // screen reader has no way to see through.
+                      aria-pressed={on}
+                      onClick={() => toggleFilter(style.value)}
+                      style={
+                        on
+                          ? { color: style.ink, backgroundColor: style.wash }
+                          : undefined
+                      }
+                      className={
+                        "shrink-0 whitespace-nowrap rounded-full border px-2.5 py-1 font-sans text-[10px] uppercase tracking-[0.1em] " +
+                        "motion-safe:transition-[color,background-color,border-color,transform] motion-safe:duration-200 active:scale-[0.96] " +
+                        (on
+                          ? "border-transparent"
+                          : "border-rule text-ink-faint hover:border-ink-faint hover:text-ink-muted")
+                      }
+                    >
+                      {style.label} {counts.get(style.value)}
+                    </button>
+                  );
+                })}
+                {filter.size > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setFilter(new Set())}
+                    className="shrink-0 px-1.5 font-sans text-[11px] text-accent underline-offset-4 hover:underline"
+                  >
+                    All
+                  </button>
+                )}
+              </>
             )}
           </div>
         )}
