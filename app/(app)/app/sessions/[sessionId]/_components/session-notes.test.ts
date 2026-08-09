@@ -86,9 +86,9 @@ describe("anchoredIds", () => {
 
   it("anchors a floor note whose passage card was never drawn", () => {
     // The same rule from the other side, on data the grouping really makes: a
-    // critique written on the four-hundredth passage has no card, and does not
-    // need one. It stands in the floor's Critiques column, so the citation
-    // pointing at it still lands.
+    // critique written on the first passage past the card cap has no card, and
+    // does not need one. It stands in the floor's Critiques column, so the
+    // citation pointing at it still lands.
     const critique = note("c1", "critique");
     const passages = Array.from({ length: MAX_PASSAGE_CARDS + 1 }, (_, i) => ({
       notes: [note(`p${i}`, "hypothesis")],
