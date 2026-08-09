@@ -44,6 +44,32 @@ function recoveringTab() {
   return tab;
 }
 
+/**
+ * A tab that hands over its storage and then refuses one operation on it.
+ *
+ * A different failure from a thunk that throws, and the one the guards are
+ * actually shaped around: reaching `sessionStorage` can succeed and the write,
+ * the read or the delete can still throw on its own — a full quota, an
+ * embedded webview whose store is a stub, an extension that has replaced a
+ * method. Each of the three sits at a different point inside the helpers'
+ * `try`, so each is its own path to "fail closed" and none of them is covered
+ * by the tab that has no storage at all.
+ */
+function throwingOn(
+  tab: ReturnType<typeof storage>,
+  refused: "getItem" | "setItem" | "removeItem",
+) {
+  const blocked = (): never => {
+    throw new Error(`${refused} refused`);
+  };
+  return {
+    ...tab,
+    getItem: refused === "getItem" ? blocked : tab.getItem,
+    setItem: refused === "setItem" ? blocked : tab.setItem,
+    removeItem: refused === "removeItem" ? blocked : tab.removeItem,
+  };
+}
+
 describe("session recovery", () => {
   it("navigates to the recovery destination only after sign-out settles", async () => {
     const order: string[] = [];
@@ -75,6 +101,61 @@ describe("session recovery", () => {
     // the reader asked for this. Written before the navigation, because after
     // it there is no `this` left to write from.
     expect(consumeRecoveryIntent(() => tab)).toBe(true);
+  });
+
+  it("writes the marker after sign-out settles and before it navigates", async () => {
+    // Reading the marker back once `recoverSession` has resolved says only
+    // that it was written at some point — which is true of a write before the
+    // `await`, and true of one after the navigation. Both are wrong, and for
+    // different reasons.
+    //
+    // Early leaves a one-shot authorization sitting in the tab for the whole
+    // length of a sign-out that can hang, and that the reader can abandon:
+    // whatever arrival comes next spends it. Late is the simpler failure —
+    // `navigate` here is `window.location.assign`, and a write after it is a
+    // write against a document the browser is already tearing down, so whether
+    // the far side finds the marker turns into a timing question.
+    //
+    // So the write is watched where it happens, and the read is done from
+    // inside `navigate`, at the one instant that matters.
+    const order: string[] = [];
+    let releaseSignOut = () => {};
+    const signOut = () =>
+      new Promise<void>((resolve) => {
+        releaseSignOut = () => {
+          order.push("signed out");
+          resolve();
+        };
+      });
+    const tab = storage();
+    const watched = {
+      ...tab,
+      setItem: (key: string, value: string) => {
+        order.push("marked");
+        tab.setItem(key, value);
+      },
+    };
+    let spendableAtNavigation: boolean | null = null;
+    const navigate = () => {
+      order.push("navigated");
+      // Spent through the production reader, from the moment the far side's
+      // document would be requested: what this asserts is not that some key
+      // exists but that the arrival's own check would pass right here.
+      spendableAtNavigation = consumeRecoveryIntent(() => watched);
+    };
+
+    const recovered = recoverSession({
+      signOut,
+      storage: () => watched,
+      navigate,
+    });
+    await Promise.resolve();
+    expect(order).toEqual([]);
+
+    releaseSignOut();
+    await recovered;
+    expect(order).toEqual(["signed out", "marked", "navigated"]);
+    expect(spendableAtNavigation).toBe(true);
   });
 
   it("marks the tab even when the injected sign-out rejects", async () => {
@@ -115,6 +196,34 @@ describe("session recovery", () => {
 
     expect(navigate).toHaveBeenCalledWith(SIGNIN_RECOVERY_PATH);
     expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
+  });
+
+  it("navigates when the tab takes the marker and refuses to store it", async () => {
+    // The tab that has no storage at all is the easy shape of this failure.
+    // The other one hands the store over and throws on the write — a profile
+    // at quota, a webview whose `sessionStorage` is a stub. `recoverSession`
+    // does not wrap `markRecoveryIntent` in anything, so a throw that got out
+    // of the helper would escape the function, and the only caller is a React
+    // click handler inside the error boundary: the reader would be left on the
+    // error page with the button spent, no marker, and no navigation.
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const refused = throwingOn(storage(), "setItem");
+    const navigate = vi.fn();
+
+    await expect(
+      recoverSession({
+        signOut: async () => {},
+        storage: () => refused,
+        navigate,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(navigate).toHaveBeenCalledWith(SIGNIN_RECOVERY_PATH);
+    expect(logged).toHaveBeenCalled();
+    // Nothing was stored, so the far side finds nothing to spend and declines
+    // to sign out — which is the direction this is allowed to be wrong in.
+    expect(consumeRecoveryIntent(() => refused)).toBe(false);
     logged.mockRestore();
   });
 
@@ -232,6 +341,48 @@ describe("the recovery intent the marker is", () => {
     expect(logged).toHaveBeenCalledTimes(2);
     logged.mockRestore();
   });
+
+  it("reports failure rather than throwing when the write is refused", () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const refused = throwingOn(storage(), "setItem");
+
+    expect(markRecoveryIntent(() => refused)).toBe(false);
+    expect(logged).toHaveBeenCalledTimes(1);
+    expect(refused.size()).toBe(0);
+    logged.mockRestore();
+  });
+
+  it("is unspent rather than thrown when the read is refused", () => {
+    // A marker that cannot be read is not a marker that was there. The caller
+    // has nothing above it to catch this and no way to tell the two apart, so
+    // the only answer that cannot sign the wrong person out is `false`.
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const refused = throwingOn(recoveringTab(), "getItem");
+
+    expect(consumeRecoveryIntent(() => refused)).toBe(false);
+    expect(logged).toHaveBeenCalledTimes(1);
+    logged.mockRestore();
+  });
+
+  it("is unspent rather than thrown when the marker cannot be removed", () => {
+    // The one case where the marker is genuinely there, genuinely correct, and
+    // still reports unspent: the removal comes before the judgement on purpose,
+    // so a marker that cannot be taken out of the tab is never handed to the
+    // caller as permission. Reporting `true` here would authorize a sign-out
+    // on a marker still sitting in storage for the next arrival to spend
+    // again — a one-shot that had quietly stopped being one.
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const marked = recoveringTab();
+    const refused = throwingOn(marked, "removeItem");
+
+    expect(consumeRecoveryIntent(() => refused)).toBe(false);
+    expect(logged).toHaveBeenCalledTimes(1);
+    // Still in the tab, and still unspendable: every later read takes the same
+    // path out. It stays wrong in the one direction that declines to act.
+    expect(marked.size()).toBe(1);
+    expect(consumeRecoveryIntent(() => refused)).toBe(false);
+    logged.mockRestore();
+  });
 });
 
 describe("clearing the session the recovery page was rehydrated with", () => {
@@ -274,6 +425,32 @@ describe("clearing the session the recovery page was rehydrated with", () => {
     expect(signOut).not.toHaveBeenCalled();
     expect(logged).toHaveBeenCalled();
     logged.mockRestore();
+  });
+
+  it("keeps the form usable when the marker cannot be read or removed", async () => {
+    // Same failure as the tab with no storage, arriving one level deeper: the
+    // store is handed over and a single operation on it throws. Both are the
+    // mount effect of the page the reader was just sent to, so both have to
+    // resolve — and neither may sign anyone out on a marker it could not
+    // actually spend, even here, where the tab really was marked by a real
+    // recovery a moment ago.
+    for (const refusal of ["getItem", "removeItem"] as const) {
+      const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+      const signOut = vi.fn(async () => {});
+      const refused = throwingOn(recoveringTab(), refusal);
+
+      await expect(
+        clearRehydratedSession({
+          searchParams: requested(SIGNIN_RECOVERY_PATH).searchParams,
+          storage: () => refused,
+          signOut,
+        }),
+      ).resolves.toBeUndefined();
+
+      expect(signOut, refusal).not.toHaveBeenCalled();
+      expect(logged, refusal).toHaveBeenCalled();
+      logged.mockRestore();
+    }
   });
 
   it("does not settle before the recovery sign-out settles", async () => {
