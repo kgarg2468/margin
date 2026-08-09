@@ -119,7 +119,9 @@ flowchart TD
 
 ## Deployment
 
-Vercel uses the source-controlled build command in `vercel.json`. Configure `CONVEX_DEPLOY_KEY` only as a secret in Vercel's Production environment; never commit its value or expose it to the browser. The build command deploys Convex first, then runs `npm run build` with `NEXT_PUBLIC_CONVEX_URL` set to that deployment's URL, keeping the frontend artifact and backend deployment matched.
+Vercel uses the source-controlled build command in `vercel.json`. Configure `CONVEX_DEPLOY_KEY` only as a secret in Vercel's Production environment; its value must be a **Convex production deployment key**, never a development or preview key. While authenticated to Convex, create the key with `npx convex deployment token create vercel-production --deployment prod`, then copy its output directly into the Vercel secret without committing or exposing it to the browser.
+
+For a Production build, the command deploys Convex first, then runs `npm run build` with `NEXT_PUBLIC_CONVEX_URL` set to that deployment's URL, keeping the frontend artifact and backend deployment matched. Preview and other non-production Vercel builds deliberately run only `npm run build`: they do not receive the production deploy key and cannot mutate the production Convex deployment.
 
 The package-level `npm run build` remains non-deploying for local development, CI, and Playwright.
 
