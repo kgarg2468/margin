@@ -112,6 +112,30 @@ describe("session recovery", () => {
 });
 
 describe("clearing the session the recovery page was rehydrated with", () => {
+  it("does not settle before the recovery sign-out settles", async () => {
+    let releaseSignOut = () => {};
+    let cleanupSettled = false;
+    const signOut = () =>
+      new Promise<void>((resolve) => {
+        releaseSignOut = resolve;
+      });
+
+    const clearing = clearRehydratedSession({
+      searchParams: requested(SIGNIN_RECOVERY_PATH).searchParams,
+      signOut,
+    });
+    void clearing.then(() => {
+      cleanupSettled = true;
+    });
+
+    await Promise.resolve();
+    expect(cleanupSettled).toBe(false);
+
+    releaseSignOut();
+    await clearing;
+    expect(cleanupSettled).toBe(true);
+  });
+
   it("signs out once when the sign-in page was reached by recovery", async () => {
     // The half the navigation cannot do. `/signin?reauth=1` is a fresh
     // document, so `ConvexAuthNextjsServerProvider` reads the cookie a failed

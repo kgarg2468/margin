@@ -5,7 +5,10 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { PageSurface } from "@/app/(marketing)/_components/hero-surface";
-import { clearRehydratedSession } from "@/lib/auth/session-recovery";
+import {
+  clearRehydratedSession,
+  isRecoveryDestination,
+} from "@/lib/auth/session-recovery";
 import {
   cardClass,
   errorClass,
@@ -137,6 +140,9 @@ export default function SignInPage() {
   );
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [recoveryPending, setRecoveryPending] = useState(() =>
+    isRecoveryDestination(searchParams),
+  );
   // Set once a sign-in link is on its way: the card becomes the answer to
   // "did it send?" rather than a form waiting to be filled in again.
   const [linkSentTo, setLinkSentTo] = useState<string | null>(null);
@@ -154,14 +160,18 @@ export default function SignInPage() {
   // URL is what says this arrival is the one allowed to sign itself out —
   // `clearRehydratedSession` ignores every other way in. The ref is what makes
   // it once, not once per effect run: this is a request rather than a
-  // subscription, and Strict Mode would otherwise fire two of them.
+  // subscription, and Strict Mode would otherwise fire two of them. Recovery
+  // starts pending on the first render so no new sign-in can get ahead of this
+  // cleanup and then be erased by its late sign-out.
   const clearedRehydratedSession = useRef(false);
   useEffect(() => {
     if (clearedRehydratedSession.current) {
       return;
     }
     clearedRehydratedSession.current = true;
-    void clearRehydratedSession({ searchParams, signOut });
+    void clearRehydratedSession({ searchParams, signOut }).finally(() => {
+      setRecoveryPending(false);
+    });
   }, [searchParams, signOut]);
 
   function switchFlow(next: Flow) {
@@ -184,6 +194,9 @@ export default function SignInPage() {
   }
 
   async function handleGoogle() {
+    if (recoveryPending) {
+      return;
+    }
     setError(null);
     setPending(true);
     try {
@@ -202,6 +215,9 @@ export default function SignInPage() {
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (recoveryPending) {
+      return;
+    }
     setError(null);
     setPending(true);
 
@@ -241,6 +257,7 @@ export default function SignInPage() {
   }
 
   const wantsPassword = flow !== "link";
+  const actionPending = pending || recoveryPending;
 
   return (
     // The same desk the landing is ruled on, at its faintest: this is the
@@ -301,7 +318,7 @@ export default function SignInPage() {
                 <>
                   <button
                     type="button"
-                    disabled={pending}
+                    disabled={actionPending}
                     onClick={handleGoogle}
                     className={`${secondaryButtonClass} tap-target w-full gap-2.5`}
                   >
@@ -379,7 +396,7 @@ export default function SignInPage() {
 
                 <button
                   type="submit"
-                  disabled={pending}
+                  disabled={actionPending}
                   className={`${primaryButtonClass} tap-target`}
                 >
                   {pending
