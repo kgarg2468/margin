@@ -462,7 +462,14 @@ function Palette({ close }: { close: () => void }) {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center px-4 pt-[9vh] sm:pt-[13vh]">
+    // Above the sheets, below the toasts. z-50 is where every dialog and every
+    // popover in the app lives, and this shared one with them until a composer
+    // — portalled to the end of <body> and therefore painted later — sat over
+    // the palette's own backdrop and took presses meant for it. The palette is
+    // the thing on top by definition: it is summoned over whatever you were
+    // doing, and it is modal about it. Toasts stay above both, for the reason
+    // `toast.tsx` gives.
+    <div className="fixed inset-0 z-[55] flex items-start justify-center px-4 pt-[9vh] sm:pt-[13vh]">
       <div
         aria-hidden="true"
         onMouseDown={close}
