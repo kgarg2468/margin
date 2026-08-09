@@ -12,9 +12,11 @@
  * passage, subject to the cards staying in document order with a gap between
  * them; substituting out the space every earlier card occupies turns that
  * constraint into plain monotonicity, and the monotone least-squares fit is
- * pool-adjacent-violators. One pass, no iteration, no tuning constant, and O(n)
- * — which is the reason it can run on a paper carrying the full thousand notes
- * `convex/annotations.ts` allows, on every commit a scrolling page produces.
+ * pool-adjacent-violators. One pass, no iteration, no tuning constant: the fit
+ * itself is O(n), and the sort that puts the cards in document order first
+ * makes the whole thing O(n log n) — which is still why it can run on a paper
+ * carrying the full thousand notes `convex/annotations.ts` allows, on every
+ * commit a scrolling page produces.
  *
  * What it deliberately does not do is refuse to lift a card above its passage.
  * "Never above, only below" was the old pass's rule and it is the whole source

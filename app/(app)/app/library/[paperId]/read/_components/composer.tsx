@@ -169,6 +169,13 @@ export function Composer({
     }
   }
 
+  /**
+   * One Escape can arrive here twice: Base UI listens on `document` and its
+   * popup's own `onKeyDown` is delegated by React to the same node, so they are
+   * siblings and `stopPropagation` is not `stopImmediatePropagation`. Every
+   * branch below happens to be idempotent against a repeat, which is what makes
+   * that harmless — check the next one that gets added rather than assuming it.
+   */
   function escape() {
     switch (composerEscape({ menuOpen: menu.open, confirming, body })) {
       case "close-menu":

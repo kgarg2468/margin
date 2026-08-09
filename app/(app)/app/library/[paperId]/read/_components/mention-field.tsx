@@ -50,7 +50,12 @@ export function MentionField({
   placeholder,
   className,
   autoFocus = false,
-  /** Fired on Enter when the picker is closed, so a parent can keep its shortcut. */
+  /**
+   * Fired on ⌘/Ctrl+Enter, so a parent can keep its save shortcut — and only
+   * while the roster is closed. An open roster takes Enter for its own pick,
+   * modifiers and all, on the same principle the composer's Escape ordering
+   * runs on: the innermost open thing wins.
+   */
   onSubmit,
   dismissedAt,
   onDismissedAtChange,

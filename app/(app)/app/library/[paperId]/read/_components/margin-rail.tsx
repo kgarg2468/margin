@@ -196,9 +196,13 @@ export function MarginRail({
       });
     };
     measure();
-    // Anything that can move the spacer changes the size of something above or
-    // around it, which is what this catches. `aligned` is a dependency because
-    // the spacer does not exist at all in the narrow layout.
+    // The rail's own root, and only that: what this catches is the rail
+    // changing size, which is what everything that moves the spacer today
+    // does. A sibling *inserted* above the rail root inside the content box
+    // would move the spacer without resizing the root, and this would not see
+    // it. Nothing does that; it is a real hole rather than a covered case.
+    // `aligned` is a dependency because the spacer does not exist at all in
+    // the narrow layout.
     const observer = new ResizeObserver(measure);
     observer.observe(root);
     return () => observer.disconnect();
@@ -215,8 +219,9 @@ export function MarginRail({
   //
   // No dependency array on purpose — it has to see every commit, because that
   // is when a newly registered element first exists. It cannot chain: the
-  // updater returns `previous` unchanged once every card has been measured, and
-  // React bails out of re-rendering on an unchanged state.
+  // updater returns `previous` unchanged once every card has been measured,
+  // and React evaluates it eagerly at dispatch and schedules nothing when the
+  // result is the state it already has.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useLayoutEffect(() => {
     setHeights((previous) => {
@@ -411,7 +416,10 @@ export function MarginRail({
               Accepted, and not worth the fix: a path's `d` cannot be
               CSS-transitioned, so when a thread expands and the card eases to
               its new line over 300ms the line snaps there on the first frame.
-              Only opacity is animated here. */}
+              The opacity transition below does not soften that either — this
+              svg is mounted and unmounted with the link rather than faded, so
+              there is no second value for it to ease between. The connector
+              appears; it does not arrive. */}
           {connector !== null && linked !== undefined && (
             <svg
               aria-hidden

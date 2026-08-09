@@ -387,6 +387,13 @@ export function Reader({
    * several pages, and the reader has to find their place again. Kept as a
    * fraction of the current page rather than a scroll offset, because the
    * offset is exactly the thing that is about to be invalidated.
+   *
+   * Fractional, which means the error scales with the fraction — so the page it
+   * is keyed to has to be one the viewport is near. `goToPage` sets
+   * `currentPage` optimistically, a frame or two before the observer agrees,
+   * and a hold taken in that window is a fraction in the hundreds: restored, it
+   * lands at an end of the container rather than anywhere the reader was. Two
+   * frames wide and not reachable by hand, which is the only reason it stands.
    */
   const holding = useRef<{ page: number; fraction: number } | null>(null);
 
