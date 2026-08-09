@@ -118,10 +118,17 @@ export function SessionOutcomes({
       )}
 
       {nothingYet ? (
+        // Three different silences, and saying which one it is matters. A
+        // meeting still on the calendar has produced nothing *yet* and cannot
+        // be made to; one that was called off produced nothing and never will;
+        // one that was held and left no record is the only one where the
+        // absence is a gap somebody could fill.
         <p className="max-w-prose font-serif text-base leading-relaxed text-ink-muted">
-          Nothing recorded from this meeting yet. A decision, a question the lab
-          couldn&rsquo;t settle, or a task somebody took on — the open ones
-          travel to the next session about this paper.
+          {session.status === "scheduled"
+            ? "This meeting hasn’t happened yet, so there is nothing to carry out of it. What the room settles — and what it leaves open — gets written down here once the session starts."
+            : session.status === "cancelled"
+              ? "This meeting was called off, so there was no discussion for it to have produced anything."
+              : "Nothing recorded from this meeting yet. A decision, a question the lab couldn’t settle, or a task somebody took on — the open ones travel to the next session about this paper."}
         </p>
       ) : (
         <div className="grid items-start gap-x-8 gap-y-8 md:grid-cols-3">

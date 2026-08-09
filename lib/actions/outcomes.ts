@@ -105,6 +105,44 @@ export function isOpen(outcome: Outcome): boolean {
   return settles(outcome.kind) && outcome.settledAt === undefined;
 }
 
+/**
+ * Where a session is in its life, as this module reads it.
+ *
+ * Restated rather than imported: `lib/` is ctx-free and cannot reach the Convex
+ * schema, the same way `lib/digest/engine.ts` restates the annotation ontology.
+ * `convex/actions.ts` passes a real `Doc<"sessions">["status"]` in, so a status
+ * added to the schema and not to this union is a compile error at the call site
+ * rather than a silent `false`.
+ */
+export type SessionStatus =
+  | "scheduled"
+  | "live"
+  | "ended"
+  | "synthesized"
+  | "cancelled";
+
+/**
+ * Whether this meeting can be given outcomes at all.
+ *
+ * An outcome is something a discussion *produced*, which makes it a claim about
+ * an hour that happened. So the gate is the hour: `live` while the room is
+ * still talking, and `ended` or `synthesized` afterwards, when the useful
+ * recording is the one somebody makes on the walk back to the bench.
+ *
+ * `scheduled` is refused, and refusing it is the whole point. A decision
+ * recorded against a meeting nobody has held yet is either a guess or an agenda
+ * item — Margin has a place for the second (`presenterNotes`) — and it would
+ * outlive a cancellation, leaving the lab carrying forward the conclusions of a
+ * discussion that never took place. `cancelled` is refused for the plainer
+ * version of the same thing: there was no discussion.
+ *
+ * The panel reads this too, so the affordance and the refusal cannot disagree
+ * about which meetings are open for business.
+ */
+export function canRecord(status: SessionStatus): boolean {
+  return status === "live" || status === "ended" || status === "synthesized";
+}
+
 export type OutcomeGroup<O> = {
   kind: OutcomeKind;
   items: O[];

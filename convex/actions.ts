@@ -8,6 +8,7 @@ import { actionKind } from "./schema";
 import { canApprove } from "./sessions";
 import { isStillShared } from "./synthesis";
 import {
+  canRecord,
   carryForward,
   normalizeBody,
   settles,
@@ -271,9 +272,14 @@ export const record = mutation({
       ctx,
       args.sessionId,
     );
-    if (session.status === "cancelled") {
+    // An outcome is a claim about an hour that happened, so the hour has to
+    // have happened. `canRecord` is the shared predicate the panel reads too,
+    // which is what stops the affordance and the refusal from disagreeing.
+    if (!canRecord(session.status)) {
       throw new ConvexError(
-        "That meeting was called off, so there is no discussion for it to have produced.",
+        session.status === "scheduled"
+          ? "That meeting hasn't happened yet. An outcome is something a discussion produced — start the session, and what it settles can be recorded as it goes."
+          : "That meeting was called off, so there is no discussion for it to have produced.",
       );
     }
 
@@ -527,9 +533,33 @@ export const remove = mutation({
  * open at it; one still `scheduled` has not happened yet; and a session cannot
  * carry its own outcomes forward to itself.
  *
- * Both conditions are on the query rather than on its results, so the cap falls
- * on meetings that qualify. Filtering afterwards would spend the budget on
- * cancellations and quietly drop a held meeting off the end.
+ * ## Earlier means earlier
+ *
+ * And it is measured on `scheduledAt`, against this session's own. Without that
+ * comparison "prior" degrades to "any other held meeting about this paper",
+ * which reads correctly only while a lab opens its sessions in the order it
+ * held them: open February's session after March's has ended and March's
+ * unanswered questions appear under *Still open from earlier meetings* — the
+ * future leaking into the past, and the one failure that would make a lab stop
+ * believing the panel.
+ *
+ * The field is `scheduledAt` rather than `_creationTime` because the question
+ * is when the room met, not when somebody typed the row. `convex/briefs.ts`
+ * notes that the two differ only for a session backdated after the fact and
+ * declines to buy an index for the difference — and that reasoning is about
+ * *ordering*, which of the qualifying meetings a cap keeps, where being off by
+ * one backdated row costs a brief nothing. It does not carry to *qualifying*:
+ * here the comparison is what decides whether a meeting is in the past at all,
+ * and a lab that backdated a session it forgot to book, or moved one across
+ * another, would have the answer silently inverted. So the filter reads
+ * `scheduledAt` and the read stays in the creation order `by_paper` offers,
+ * which is still the right cap — the further back a question was left open, the
+ * less of it the room has.
+ *
+ * All three conditions are on the query rather than on its results, so the cap
+ * falls on meetings that qualify. Filtering afterwards would spend the budget
+ * on cancellations and on meetings still ahead of the lab, and quietly drop a
+ * held meeting off the end.
  */
 async function priorSessions(
   ctx: QueryCtx,
@@ -542,6 +572,7 @@ async function priorSessions(
     .filter((q) =>
       q.and(
         q.neq(q.field("_id"), session._id),
+        q.lt(q.field("scheduledAt"), session.scheduledAt),
         q.or(
           q.eq(q.field("status"), "ended"),
           q.eq(q.field("status"), "synthesized"),
@@ -658,7 +689,11 @@ export const listForSession = query({
     ),
     /** How many carried items the cap held back. */
     carriedDroppedCount: v.number(),
-    /** Whether this meeting can still be given outcomes at all. */
+    /**
+     * Whether this meeting has happened, and so can be given outcomes at all.
+     * Decided by the shared `canRecord`, so the panel's affordance and the
+     * mutation's refusal cannot drift apart.
+     */
     canRecord: v.boolean(),
   }),
   handler: async (ctx, args) => {
@@ -739,7 +774,7 @@ export const listForSession = query({
       outcomes,
       carried,
       carriedDroppedCount: forward.droppedCount,
-      canRecord: session.status !== "cancelled",
+      canRecord: canRecord(session.status),
     };
   },
 });

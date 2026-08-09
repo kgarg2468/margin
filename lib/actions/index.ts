@@ -1,4 +1,5 @@
 export {
+  canRecord,
   carryForward,
   groupOutcomes,
   isOpen,
@@ -16,5 +17,6 @@ export type {
   Outcome,
   OutcomeGroup,
   OutcomeKind,
+  SessionStatus,
   Tally,
 } from "./outcomes";

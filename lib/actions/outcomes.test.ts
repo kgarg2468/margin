@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  canRecord,
   carryForward,
   groupOutcomes,
   isOpen,
@@ -10,6 +11,7 @@ import {
   OUTCOME_KINDS,
   type Outcome,
   type OutcomeKind,
+  type SessionStatus,
 } from "./outcomes";
 
 let counter = 0;
@@ -39,6 +41,38 @@ describe("settles", () => {
     // A fourth kind added without a rule here would silently default to
     // "cannot be settled", which is the wrong way for this to fail.
     expect(OUTCOME_KINDS).toEqual(["decision", "question", "task"]);
+  });
+});
+
+describe("canRecord", () => {
+  it("admits the meetings that have actually happened", () => {
+    expect(canRecord("live")).toBe(true);
+    expect(canRecord("ended")).toBe(true);
+    expect(canRecord("synthesized")).toBe(true);
+  });
+
+  it("refuses a meeting nobody has held yet", () => {
+    // An outcome is something a discussion produced. Recorded against a
+    // session still on the calendar it would be a guess, and it would outlive
+    // the cancellation of a discussion that never took place.
+    expect(canRecord("scheduled")).toBe(false);
+  });
+
+  it("refuses a meeting that was called off", () => {
+    expect(canRecord("cancelled")).toBe(false);
+  });
+
+  it("has an answer for every status a session can be in", () => {
+    const every: SessionStatus[] = [
+      "scheduled",
+      "live",
+      "ended",
+      "synthesized",
+      "cancelled",
+    ];
+    // Anchors the union: a sixth status added to the schema and not here is a
+    // compile error at the call site rather than a silent refusal.
+    expect(every.filter(canRecord)).toEqual(["live", "ended", "synthesized"]);
   });
 });
 
