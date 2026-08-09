@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { MAX_EARLY_START_MS, awayProse, startWindow } from "./session-window";
+import {
+  MAX_EARLY_START_MS,
+  UNDO_WINDOW_MS,
+  awayProse,
+  startWindow,
+} from "./session-window";
 
 const HOUR = 3_600_000;
 
@@ -21,6 +26,17 @@ describe("startWindow", () => {
   it("has nothing left to wait for once the window is open", () => {
     const now = 1_000_000_000_000;
     expect(startWindow(now - HOUR, now).msUntilOpen).toBe(0);
+  });
+});
+
+describe("UNDO_WINDOW_MS", () => {
+  // Written out rather than computed, the way `convex/sessions.test.ts` pins
+  // it: this number is a promise made in three places — the mutations that
+  // enforce it, the row on the session page that offers it, and the copy that
+  // says "ten minutes" out loud. A test that recomputed it from the constant
+  // would agree with any value the constant ever took.
+  it("is ten minutes", () => {
+    expect(UNDO_WINDOW_MS).toBe(600_000);
   });
 });
 

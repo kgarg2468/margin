@@ -6,7 +6,11 @@ import { ConvexError, v } from "convex/values";
  * The rule itself lives in `lib/` so the button that offers the start and the
  * mutation that enforces it cannot drift apart.
  */
-import { awayProse, startWindow } from "../lib/session-window";
+import {
+  UNDO_WINDOW_MS,
+  awayProse,
+  startWindow,
+} from "../lib/session-window";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
@@ -65,19 +69,6 @@ const MAX_SESSIONS = 100;
  * future, and on the number of prep-digest jobs one lab can have queued.
  */
 const MAX_SCHEDULED_SESSIONS = 50;
-/**
- * How long a forward move stays undoable.
- *
- * An undo is a toast-length regret, not a time machine. Ten minutes is the
- * wrong row clicked in a list, the End button pressed while the room is still
- * arguing, the cancellation of the meeting that was actually next week's — all
- * of them noticed in the same breath. It is deliberately far too short to be a
- * general "put the lifecycle back" power: a lab that wants last month's session
- * live again wants a new session, and a lifecycle that can be walked backwards
- * at will is one nothing downstream can trust.
- */
-const UNDO_WINDOW_MS = 10 * 60 * 1000;
-
 /**
  * How many of a session's annotations `getSessionContext` will count. Well past
  * a real meeting (25 people writing 40 notes each), and the response says when
