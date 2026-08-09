@@ -180,6 +180,7 @@ function DoiTab({
             id="paper-doi"
             name="doi"
             required
+            autoFocus
             value={doi}
             onChange={(event) => setDoi(event.target.value)}
             spellCheck={false}

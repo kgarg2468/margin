@@ -168,6 +168,7 @@ export default function SignInPage() {
                 name="email"
                 type="email"
                 required
+                autoFocus
                 autoComplete="email"
                 placeholder="you@university.edu"
                 className={inputClass}

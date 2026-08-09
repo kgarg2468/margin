@@ -81,6 +81,7 @@ function CreateLabCard() {
             id="lab-name"
             name="name"
             required
+            autoFocus
             maxLength={120}
             placeholder="Chen Lab"
             className={inputClass}
