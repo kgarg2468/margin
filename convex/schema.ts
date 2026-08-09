@@ -83,6 +83,23 @@ export const synthesisSectionKey = v.union(
 );
 
 /**
+ * The four lenses a pre-session brief is cut into.
+ *
+ * Fixed for the same reason `synthesisSectionKey` is: the shape of the artifact
+ * is a product decision. Here it is also a promise about where each line came
+ * from — `collisions` is the shipped gold typed-pair matrix and nothing else,
+ * `carried-over` is unanswered questions from earlier sessions on this paper
+ * and nothing else. A section key a reader cannot predict the provenance of
+ * would defeat the point of assembling rather than generating.
+ */
+export const briefSectionKey = v.union(
+  v.literal("collisions"),
+  v.literal("open-questions"),
+  v.literal("carried-over"),
+  v.literal("floor"),
+);
+
+/**
  * Where a paper is on its way to being readable:
  *
  * - `needs-pdf` — metadata only. A DOI lookup found the record but no
@@ -290,6 +307,54 @@ export const eventDoc = v.union(
     sessionId: v.id("sessions"),
     /** The member who is presenting *now*. */
     presenterId: v.id("users"),
+  }),
+  /**
+   * A presenter's brief was assembled for a session.
+   *
+   * A collective fact, unlike a digest — which is why this variant exists and
+   * `digests` deliberately has none (see the note at the top of
+   * `convex/digests.ts`). A digest is one person's mail and recording its
+   * delivery would put an attention trail in the ledger; a brief is the
+   * meeting's agenda, read by the presenter and the PI, and "the lab had a
+   * brief for this session and it rested on 14 notes" is exactly the kind of
+   * fact the ledger holds.
+   *
+   * `actorId` is the presenter even when `trigger` is `scheduled`, because the
+   * brief is theirs and a job has no name — which is what `trigger` is for.
+   * Without it the ledger would quietly claim the presenter pressed a button at
+   * two in the morning.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("brief.generated"),
+    paperId: v.id("papers"),
+    sessionId: v.id("sessions"),
+    briefId: v.id("briefs"),
+    /** Which assembly this was for the session, counting from 1. */
+    generation: v.number(),
+    /** How many lines it came out with, across every section. */
+    itemCount: v.number(),
+    /** Whether a person asked for it or the T−2h boundary did. */
+    trigger: v.union(v.literal("scheduled"), v.literal("manual")),
+  }),
+  /**
+   * The presenter (or the PI) read the brief and marked it reviewed.
+   *
+   * Bound to a `generation` because a brief is a machine artifact end to end —
+   * unlike a synthesis, where the approved copy is prose a person wrote and
+   * survives the draft being rebuilt. Approving here means "I have read *this*
+   * assembly", so re-assembling starts a new generation with nobody's name on
+   * it, and the ledger keeps every generation that was ever signed off.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("brief.approved"),
+    paperId: v.id("papers"),
+    sessionId: v.id("sessions"),
+    briefId: v.id("briefs"),
+    generation: v.number(),
+    /** Notes still shared at the moment of approval — the size of what was checked. */
+    citationCount: v.number(),
   }),
   v.object({
     ...eventBase,
@@ -720,6 +785,97 @@ export default defineSchema({
     .index("by_user", ["userId"])
     .index("by_user_and_lab", ["userId", "labId"])
     .index("by_session", ["sessionId"]),
+
+  /**
+   * The presenter's pre-session brief: what the lab has already written about
+   * this paper, cut into the four questions a presenter is actually asking.
+   *
+   * ## Why this is not a `digests` row
+   *
+   * They look adjacent — both are assembled at the T−2h boundary from the same
+   * margin — and they are different objects. A digest is **one person's mail**:
+   * keyed `by_user`, capped at five lines, and `listMine` starts at the
+   * signed-in user's id, which is what makes "there is no argument that could
+   * return somebody else's inbox" true by construction. A brief is **the
+   * meeting's agenda**: one per session, sectioned, cited, and reviewable by
+   * two named people. Folding it in would have meant making `userId` optional
+   * on a table whose privacy guarantee is that the field is the index — and
+   * every digest row carrying an empty `sections` array to pay for it.
+   *
+   * ## One row per session, replaced
+   *
+   * Re-assembling replaces the row and bumps `generation`, the way `syntheses`
+   * does. What does *not* carry over is the approval: `approvedAt` means "a
+   * person read this assembly", so a new assembly starts unread. That is the
+   * opposite of the synthesis rule — there, the approved copy is prose a human
+   * wrote and a model does not get to overwrite it — and the difference is
+   * exactly that a brief has no human-authored half. Every generation that was
+   * ever signed off stays in the ledger.
+   *
+   * ## What is not in here
+   *
+   * No private annotations, ever — a brief is read by the PI as well as the
+   * presenter, and the presenter's own private notes are assembled in the
+   * browser from their own subscription instead (`lib/brief/prep.ts`). No
+   * per-member tallies either: that section is derived on the client from rows
+   * already on the page, so no stored shape and no query in this backend can
+   * answer "who has annotated".
+   */
+  briefs: defineTable({
+    sessionId: v.id("sessions"),
+    labId: v.id("labs"),
+    paperId: v.id("papers"),
+    /** Which assembly this is for the session, counting from 1. */
+    generation: v.number(),
+    generatedAt: v.number(),
+    /**
+     * Who this assembly is credited to: whoever asked for it, or the presenter
+     * when the T−2h boundary did. A scheduled job has no name of its own, and
+     * `trigger` is what keeps that from reading as a person pressing a button
+     * at two in the morning.
+     */
+    generatedBy: v.id("users"),
+    trigger: v.union(v.literal("scheduled"), v.literal("manual")),
+    /** When the presenter or PI marked this generation reviewed, if they have. */
+    approvedAt: v.optional(v.number()),
+    approvedBy: v.optional(v.id("users")),
+    sections: v.array(
+      v.object({
+        key: briefSectionKey,
+        heading: v.string(),
+        /** Candidates the per-section cap held back, so the panel can say so. */
+        droppedCount: v.number(),
+        items: v.array(
+          v.object({
+            text: v.string(),
+            /**
+             * The annotations this line was built from.
+             *
+             * Never empty. Every line in a brief is a rearrangement of notes
+             * the lab wrote, so a line that cited nothing would be the one
+             * thing this feature exists to refuse — and `briefs.getForSession`
+             * re-resolves each id on read and redacts a line whose notes have
+             * all been withdrawn, the same discipline `synthesis.getForSession`
+             * applies. A stored citation is a claim about a row, and a claim is
+             * worth re-reading.
+             */
+            annotationIds: v.array(v.id("annotations")),
+            /** The gold matrix cell, on collision lines only. */
+            pairType: v.optional(v.string()),
+            /**
+             * Which earlier session left this open, and when it was held — on
+             * carried-over lines only. An epoch number, not a formatted date:
+             * a date has a timezone and a reader, and the server has neither.
+             */
+            fromSessionId: v.optional(v.id("sessions")),
+            fromSessionAt: v.optional(v.number()),
+          }),
+        ),
+      }),
+    ),
+  })
+    .index("by_session", ["sessionId"])
+    .index("by_lab", ["labId"]),
 
   /**
    * The post-meeting synthesis: what the lab worked out, assembled from what
