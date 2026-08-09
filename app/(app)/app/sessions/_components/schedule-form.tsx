@@ -22,6 +22,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { readableError } from "../../_components/errors";
 import { byline } from "../../library/_components/paper-meta";
+import { AgendaTemplateField } from "./agenda-templates";
 
 /**
  * Putting a meeting on the calendar: a paper, a time, and whoever is standing
@@ -30,6 +31,13 @@ import { byline } from "../../library/_components/paper-meta";
  * Three fields and no wizard. Everything else a session can carry — a title,
  * presenter notes — is an edit on the session itself, because a form that asks
  * for them up front asks them at the moment nobody has decided yet.
+ *
+ * The agenda picker is the one exception, and it is an exception that agrees
+ * with the rule. It does not ask what this meeting's agenda is; it offers the
+ * shape the lab settled on months ago and runs every week, which is the one
+ * part of a session that *has* been decided before the paper was chosen. One
+ * control, no notes field: what a template puts in the session is presenter
+ * notes, and presenter notes are still edited on the session.
  *
  * A paper whose text layer hasn't landed is still schedulable, and says so.
  * Labs put the next four weeks on the calendar in one sitting, often before the
@@ -48,6 +56,7 @@ export function ScheduleForm({
 }) {
   const papers = useQuery(api.papers.listPapers, { labId });
   const members = useQuery(api.labs.listMembers, { labId });
+  const templates = useQuery(api.sessionTemplates.listTemplates, { labId });
   const createSession = useMutation(api.sessions.createSession);
   const router = useRouter();
 
@@ -57,12 +66,17 @@ export function ScheduleForm({
   );
   const [presenterId, setPresenterId] = useState<string>("");
   const [title, setTitle] = useState("");
+  const [templateId, setTemplateId] = useState<Id<"sessionTemplates"> | null>(
+    null,
+  );
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
   const you = members?.find((member) => member.isYou);
   const scheduledAt = fromLocalInputValue(when);
   const chosenPaper = paperId.length > 0 ? paperId : (papers?.[0]?._id ?? "");
+  const chosenTemplate =
+    templates?.find((template) => template._id === templateId) ?? null;
 
   if (papers !== undefined && papers.length === 0) {
     return (
@@ -101,6 +115,12 @@ export function ScheduleForm({
               ? { presenterId: presenterId as Id<"users"> }
               : {}),
             ...(title.trim().length > 0 ? { title: title.trim() } : {}),
+            // The resolved template, not the held id: one deleted while this
+            // form was open has already left the picker, and the session
+            // should be scheduled with what the form is showing.
+            ...(chosenTemplate !== null
+              ? { templateId: chosenTemplate._id }
+              : {}),
           });
           router.push(`/app/sessions/${sessionId}`);
         } catch (caught) {
@@ -186,11 +206,25 @@ export function ScheduleForm({
           value={title}
           autoComplete="off"
           maxLength={200}
-          placeholder="Optional — the paper's title is the default…"
+          // The placeholder is where the template's title becomes visible
+          // rather than a surprise: leave this empty and the session is called
+          // what the shape says, type here and yours wins.
+          placeholder={
+            chosenTemplate?.title !== undefined
+              ? `“${chosenTemplate.title}” — from the template…`
+              : "Optional — the paper's title is the default…"
+          }
           onChange={(event) => setTitle(event.target.value)}
           className={inputClass}
         />
       </div>
+
+      <AgendaTemplateField
+        labId={labId}
+        templates={templates}
+        value={templateId}
+        onChange={setTemplateId}
+      />
 
       {error !== null && (
         <p role="alert" aria-live="polite" className={errorClass}>

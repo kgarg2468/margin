@@ -487,7 +487,13 @@ export const createSession = mutation({
     if (args.templateId !== undefined) {
       template = await ctx.db.get(args.templateId);
       if (template === null || template.labId !== args.labId) {
-        throw new ConvexError("That agenda template isn't this lab's.");
+        // One message for both, the posture `NO_SUCH_SESSION` takes below: a
+        // template deleted while this form was open and a template belonging
+        // to somebody else's lab are the same answer, and the realistic case
+        // is the first one.
+        throw new ConvexError(
+          "That agenda template is gone — deleted, or never this lab's.",
+        );
       }
     }
 
