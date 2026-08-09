@@ -9,6 +9,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { SearchAffordance } from "./command-palette";
 import type { LabSummary } from "./lab-provider";
 import { useLabs } from "./lab-provider";
+import { NotificationRail } from "./notifications";
 
 /** The product, in two rooms: what the lab is reading, and when it meets. */
 const sections = [
@@ -64,6 +65,12 @@ export function Sidebar() {
           lab it searches and above the rooms it searches through. Only once
           there is a lab — there is nothing to look for before that. */}
       {currentLab !== null && <SearchAffordance />}
+
+      {/* Your pigeonhole, between the drawer and the rooms: the two things
+          addressed to you in particular — somebody named you, somebody
+          answered you — and nothing ambient. Everything ambient is the
+          digest's job, and it keeps to its boundaries. */}
+      {currentLab !== null && <NotificationRail labId={currentLab._id} />}
 
       <nav className="flex flex-col gap-4">
         <span className={eyebrowClass}>Sections</span>

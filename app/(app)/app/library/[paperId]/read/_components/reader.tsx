@@ -410,6 +410,64 @@ export function Reader({
     element?.scrollIntoView({ block: "center", behavior: "smooth" });
   }, []);
 
+  /**
+   * Following a notification.
+   *
+   * A notification is a pointer at one note, and landing somebody at the top
+   * of a forty-page paper and inviting them to find it is not delivery. The
+   * `?note=` parameter carries which one, and this waits for the paper to have
+   * actually rendered the page it is on before scrolling — the pages arrive
+   * asynchronously, so the first pass usually has nowhere to scroll *to*, and
+   * a version that gave up after one attempt silently did nothing about half
+   * the time.
+   *
+   * A reply focuses its parent's card, because that is where the margin draws
+   * the thread it belongs to.
+   *
+   * Read once from `window.location` rather than through `useSearchParams`,
+   * which would opt this route out of static rendering for a question only
+   * ever asked in a browser — the same reason `LabProvider` reads the invite
+   * code the way it does.
+   */
+  const [requestedNote, setRequestedNote] = useState<string | null>(null);
+  useEffect(() => {
+    setRequestedNote(
+      new URL(window.location.href).searchParams.get("note"),
+    );
+  }, []);
+
+  useEffect(() => {
+    if (requestedNote === null) {
+      return;
+    }
+    const target = rows.find((row) => row._id === requestedNote);
+    if (target === undefined) {
+      return;
+    }
+    const card =
+      target.parentId === undefined
+        ? target
+        : (rows.find((row) => row._id === target.parentId) ?? target);
+    if (pageElements.current.get(card.anchor.pageIndex) === undefined) {
+      // The page it lives on has not been laid out yet. Another render will
+      // come — resolutions and page geometry both land later — and this runs
+      // again then.
+      return;
+    }
+
+    focusPassage(card);
+    setRequestedNote(null);
+    // Spend the parameter, so a reload is a plain reading of the paper rather
+    // than a second jump to a note the reader has already dealt with.
+    const url = new URL(window.location.href);
+    url.searchParams.delete("note");
+    window.history.replaceState(
+      null,
+      "",
+      url.pathname + url.search + url.hash,
+    );
+  }, [requestedNote, rows, pageCount, pageHeight, resolutions, focusPassage]);
+
   const toggleFilter = (type: AnnotationType) =>
     setFilter((previous) => {
       const next = new Set(previous);

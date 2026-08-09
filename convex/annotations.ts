@@ -4,7 +4,9 @@ import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { mutation, query } from "./_generated/server";
 import { getMembership, requireMembership, requireUserId } from "./lib/authz";
 import { recordEvent } from "./lib/ledger";
+import { clearNotificationsFor, raiseNotification } from "./notifications";
 import { anchor, annotationType, annotationVisibility } from "./schema";
+import { disambiguate, MAX_MENTIONS_PER_NOTE } from "../lib/mentions";
 
 /**
  * Typed, anchored notes on a passage — the atom of the product.
@@ -29,6 +31,24 @@ import { anchor, annotationType, annotationVisibility } from "./schema";
  * 3. **No read tracking.** Opening a paper writes nothing. The only evidence
  *    Margin stores that anyone read anything is an annotation they chose to
  *    write.
+ *
+ * ## Mentions, and the rule that governs them
+ *
+ * A note can name a labmate, and naming one tells them. That is the product's
+ * only per-write interruption, and rule 2 above is what keeps it honest:
+ *
+ *   **A mention in a private note notifies nobody.**
+ *
+ * Not "notifies them quietly", not "notifies them without a link" — nobody. A
+ * private note is a note whose existence its author has not disclosed, and a
+ * message saying "Sara wrote something about you that you cannot read" would
+ * disclose it. The mention is *stored* on the private note, inert, and becomes
+ * live at the moment the note is shared with the lab (see `setVisibility`).
+ * Un-sharing takes the mail back; the ledger fact that it once happened stays,
+ * because the ledger is append-only and that is what append-only means.
+ *
+ * The ids come from a picker the author used, never from parsing prose. See
+ * `lib/mentions/` for why that distinction is doing real work.
  */
 
 /** Long enough for a paragraph of argument; short enough to stay one document. */
@@ -67,6 +87,15 @@ const annotationView = v.object({
   type: annotationType,
   body: v.string(),
   visibility: annotationVisibility,
+  /**
+   * The display names this note addresses, so a card can set them in the
+   * accent ink without a second round trip.
+   *
+   * Names rather than ids because that is all the margin does with them, and
+   * because the body already contains the same strings — this is a key for
+   * finding them in the prose, not new information about anybody.
+   */
+  mentionNames: v.optional(v.array(v.string())),
   parentId: v.optional(v.id("annotations")),
   createdAt: v.number(),
   editedAt: v.optional(v.number()),
@@ -177,6 +206,91 @@ async function repliesTo(
     .take(MAX_ANNOTATIONS_PER_PAPER);
 }
 
+/**
+ * Turn the ids a client says were picked into the ids this lab will honour.
+ *
+ * Every one is a claim, exactly like a `labId` is. The check that matters is
+ * membership: without it, a crafted request could name any user in the
+ * deployment and have Margin mail them the contents of a lab they have never
+ * been in. Non-members are dropped silently rather than refused — the author
+ * did nothing wrong if a labmate left between the picker rendering and the
+ * save landing, and failing their note would be a strange way to say so.
+ *
+ * The author's own id survives, because the body shows it and the highlighting
+ * should match; it simply never produces a notification (`raiseNotification`
+ * refuses to mail somebody about their own writing).
+ */
+async function resolveMentions(
+  ctx: MutationCtx,
+  picked: readonly Id<"users">[] | undefined,
+  labId: Id<"labs">,
+): Promise<Id<"users">[]> {
+  if (picked === undefined || picked.length === 0) {
+    return [];
+  }
+  const resolved: Id<"users">[] = [];
+  for (const userId of [...new Set(picked)].slice(0, MAX_MENTIONS_PER_NOTE)) {
+    if ((await getMembership(ctx, labId, userId)) !== null) {
+      resolved.push(userId);
+    }
+  }
+  return resolved;
+}
+
+/**
+ * Deliver a note's mentions — if, and only if, the lab can see it.
+ *
+ * The single place the visibility rule is applied, called from every path that
+ * could make a mention live: writing a lab-visible note, replying (replies are
+ * always lab-visible), and sharing a note that was private. Routing all three
+ * through one function is what stops the rule from being three rules that
+ * drift.
+ *
+ * The ledger fact is written only when a notification was genuinely new, which
+ * makes the ledger a record of deliveries rather than of intentions. While a
+ * note stays shared, re-running this is a no-op — so editing or re-sharing an
+ * already-visible note cannot mail anyone twice. Un-sharing does take the
+ * recipient's copy back (`clearNotificationsFor`), so a note made private and
+ * shared again genuinely notifies again, and says so in the ledger. That is
+ * the right way round: the alternative is a note somebody un-shared by mistake
+ * that can never reach the person it was written to.
+ */
+async function announceMentions(
+  ctx: MutationCtx,
+  annotation: Doc<"annotations">,
+): Promise<void> {
+  if (
+    annotation.visibility !== "lab" ||
+    annotation.deletedAt !== undefined ||
+    annotation.mentions === undefined
+  ) {
+    return;
+  }
+
+  for (const subjectUserId of annotation.mentions) {
+    const raised = await raiseNotification(ctx, {
+      recipientId: subjectUserId,
+      labId: annotation.labId,
+      kind: "mention",
+      annotationId: annotation._id,
+      paperId: annotation.paperId,
+      actorId: annotation.memberId,
+    });
+    if (!raised) {
+      continue;
+    }
+    await recordEvent(ctx, {
+      labId: annotation.labId,
+      type: "annotation.mentioned",
+      actorId: annotation.memberId,
+      paperId: annotation.paperId,
+      sessionId: annotation.sessionId,
+      annotationId: annotation._id,
+      subjectUserId,
+    });
+  }
+}
+
 /** The caller's own annotation, or a refusal. Authorship is the only edit right. */
 async function requireOwn(
   ctx: MutationCtx,
@@ -215,6 +329,13 @@ export const create = mutation({
     body: v.string(),
     anchor,
     visibility: annotationVisibility,
+    /**
+     * The labmates the author picked out of the composer's menu, and whose
+     * names are still in `body`. The client reconciles those two before
+     * sending (`collectMentionedIds`); the server checks they are members and
+     * believes nothing else about them.
+     */
+    mentions: v.optional(v.array(v.id("users"))),
   },
   returns: v.id("annotations"),
   handler: async (ctx, args) => {
@@ -224,6 +345,7 @@ export const create = mutation({
     }
     validateAnchor(args.anchor, paper.pageCount);
     const body = cleanBody(args.body);
+    const mentions = await resolveMentions(ctx, args.mentions, paper.labId);
 
     const annotationId = await ctx.db.insert("annotations", {
       labId: paper.labId,
@@ -234,6 +356,7 @@ export const create = mutation({
       type: args.type,
       body,
       visibility: args.visibility,
+      ...(mentions.length > 0 ? { mentions } : {}),
     });
 
     await recordEvent(ctx, {
@@ -246,6 +369,13 @@ export const create = mutation({
       annotationType: args.type,
       visibility: args.visibility,
     });
+
+    // Nothing happens here for a private note, by design: the mentions are on
+    // the row, and sharing it later is what makes them live.
+    const created = await ctx.db.get(annotationId);
+    if (created !== null) {
+      await announceMentions(ctx, created);
+    }
 
     return annotationId;
   },
@@ -271,6 +401,7 @@ export const reply = mutation({
     parentId: v.id("annotations"),
     body: v.string(),
     type: v.optional(annotationType),
+    mentions: v.optional(v.array(v.id("users"))),
   },
   returns: v.id("annotations"),
   handler: async (ctx, args) => {
@@ -297,6 +428,8 @@ export const reply = mutation({
       throw new ConvexError("A reply needs something in it.");
     }
 
+    const mentions = await resolveMentions(ctx, args.mentions, parent.labId);
+
     const annotationId = await ctx.db.insert("annotations", {
       labId: parent.labId,
       paperId: parent.paperId,
@@ -307,6 +440,7 @@ export const reply = mutation({
       body,
       visibility: "lab",
       parentId: parent._id,
+      ...(mentions.length > 0 ? { mentions } : {}),
     });
 
     await recordEvent(ctx, {
@@ -317,6 +451,24 @@ export const reply = mutation({
       sessionId: parent.sessionId,
       annotationId,
       parentId: parent._id,
+    });
+
+    // Mentions first, then the answer itself. Both are one interruption per
+    // person — `raiseNotification` writes one row per (note, recipient) — so
+    // whoever is named *and* answered gets the more specific of the two, which
+    // is the mention: it says this reply is addressed to them in particular,
+    // where "somebody replied" only says it landed under their note.
+    const written = await ctx.db.get(annotationId);
+    if (written !== null) {
+      await announceMentions(ctx, written);
+    }
+    await raiseNotification(ctx, {
+      recipientId: parent.memberId,
+      labId: parent.labId,
+      kind: "reply",
+      annotationId,
+      paperId: parent.paperId,
+      actorId: membership.userId,
     });
 
     return annotationId;
@@ -391,16 +543,31 @@ export const listForPaper = query({
       }
     }
 
-    // One read per distinct author rather than one per annotation: a session's
-    // worth of margins is dozens of notes by a handful of people.
-    const authors = new Map<Id<"users">, string>();
-    for (const annotation of annotations) {
-      if (!authors.has(annotation.memberId)) {
-        authors.set(
-          annotation.memberId,
-          displayName(await ctx.db.get(annotation.memberId)),
-        );
+    // One read per distinct person rather than one per annotation: a session's
+    // worth of margins is dozens of notes by a handful of people, and the
+    // people named in them are drawn from the same small roster.
+    const names = new Map<Id<"users">, string>();
+    const nameOf = async (userId: Id<"users">): Promise<string> => {
+      const known = names.get(userId);
+      if (known !== undefined) {
+        return known;
       }
+      const resolved = displayName(await ctx.db.get(userId));
+      names.set(userId, resolved);
+      return resolved;
+    };
+
+    const mentionNames = new Map<Id<"annotations">, string[]>();
+    for (const annotation of annotations) {
+      await nameOf(annotation.memberId);
+      if (annotation.mentions === undefined || annotation.mentions.length === 0) {
+        continue;
+      }
+      const resolved: string[] = [];
+      for (const userId of annotation.mentions) {
+        resolved.push(await nameOf(userId));
+      }
+      mentionNames.set(annotation._id, resolved);
     }
 
     const truncated =
@@ -414,12 +581,13 @@ export const listForPaper = query({
         paperId: annotation.paperId,
         sessionId: annotation.sessionId,
         memberId: annotation.memberId,
-        authorName: authors.get(annotation.memberId) ?? "A lab member",
+        authorName: names.get(annotation.memberId) ?? "A lab member",
         mine: annotation.memberId === userId,
         anchor: annotation.anchor,
         type: annotation.type,
         body: annotation.body,
         visibility: annotation.visibility,
+        mentionNames: mentionNames.get(annotation._id),
         parentId: annotation.parentId,
         createdAt: annotation._creationTime,
         editedAt: annotation.editedAt,
@@ -427,6 +595,80 @@ export const listForPaper = query({
         replyCount: replyCounts.get(annotation._id) ?? 0,
       })),
     };
+  },
+});
+
+/**
+ * Who this paper's margin can address: the lab, minus you.
+ *
+ * Keyed on the paper rather than the lab because that is what the composer
+ * has. It is also the safer argument — a `labId` from a reader would be a
+ * second claim to check, where the paper's own `labId` is a fact the server
+ * already holds.
+ *
+ * You are left out of your own picker. Mentioning yourself notifies nobody
+ * (`raiseNotification` refuses it), so offering the option would be offering
+ * a control that does nothing — and a to-do list, which is a different feature
+ * that Margin does not have yet.
+ *
+ * Names are made unique before they leave here. Two people called Sara Chen is
+ * an ordinary Tuesday in a large department, and a mention is stored as an id
+ * but read as text: if the menu offers the same string twice, the author
+ * cannot see which one they picked and the client cannot tell the two tokens
+ * apart when it reconciles them against the body.
+ *
+ * Emails are dropped from the response. `labs.listMembers` shows them because
+ * a roster is where you look somebody up; a mention menu only needs a name,
+ * and the disambiguating local part is already folded into it where it was
+ * actually needed.
+ */
+export const mentionCandidates = query({
+  args: { paperId: v.id("papers") },
+  returns: v.array(v.object({ userId: v.id("users"), name: v.string() })),
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    const paper = await ctx.db.get(args.paperId);
+    if (paper === null) {
+      return [];
+    }
+    if ((await getMembership(ctx, paper.labId, userId)) === null) {
+      return [];
+    }
+
+    const memberships = await ctx.db
+      .query("memberships")
+      .withIndex("by_lab", (q) => q.eq("labId", paper.labId))
+      .collect();
+
+    const people = [];
+    for (const membership of memberships) {
+      if (membership.userId === userId) {
+        continue;
+      }
+      const user = await ctx.db.get(membership.userId);
+      people.push({
+        userId: membership.userId,
+        name: displayName(user),
+        email: user?.email,
+        role: membership.role,
+        joinedAt: membership.joinedAt,
+      });
+    }
+
+    // Same order as the roster — PI first, then longest standing — so the menu
+    // is a list somebody can learn the shape of rather than one that reshuffles
+    // with every new member.
+    people.sort((a, b) => {
+      if (a.role !== b.role) {
+        return a.role === "pi" ? -1 : 1;
+      }
+      return a.joinedAt - b.joinedAt;
+    });
+
+    return disambiguate(people).map((person) => ({
+      userId: person.userId,
+      name: person.name,
+    }));
   },
 });
 
@@ -516,6 +758,9 @@ export const setVisibility = mutation({
       );
     }
 
+    /** The author's own replies that come back to the lab alongside the note. */
+    const restored: Id<"annotations">[] = [];
+
     if (args.visibility === "private") {
       const replies = await repliesTo(ctx, annotation._id);
       if (replies.some((r) => r.memberId !== userId)) {
@@ -527,7 +772,13 @@ export const setVisibility = mutation({
       // would be lab-visible replies to a note nobody else can see.
       for (const own of replies) {
         await ctx.db.patch(own._id, { visibility: "private" });
+        await clearNotificationsFor(ctx, own._id);
       }
+      // And the mail goes with them. A notification is a pointer, and a
+      // pointer into a note the recipient can no longer open says only that
+      // somebody once said something about them — which is worse than never
+      // having said it. The ledger keeps the fact; the inbox does not.
+      await clearNotificationsFor(ctx, annotation._id);
     } else {
       // And come back when it does. Those replies were written to the lab and
       // were only hidden because their parent was; leaving them private would
@@ -538,6 +789,7 @@ export const setVisibility = mutation({
       for (const own of await repliesTo(ctx, annotation._id)) {
         if (own.memberId === userId && own.visibility !== "lab") {
           await ctx.db.patch(own._id, { visibility: "lab" });
+          restored.push(own._id);
         }
       }
     }
@@ -552,6 +804,20 @@ export const setVisibility = mutation({
       annotationId: annotation._id,
       visibility: args.visibility,
     });
+
+    // The flip path, and the reason mentions are stored on private notes at
+    // all. A member writes a note naming a labmate, thinks about it overnight,
+    // and shares it in the morning — this is the morning. Nobody was told
+    // while it was private; everybody named is told now, once, whether the
+    // note was shared today or after three rounds of second thoughts.
+    if (args.visibility === "lab") {
+      for (const id of [annotation._id, ...restored]) {
+        const row = await ctx.db.get(id);
+        if (row !== null) {
+          await announceMentions(ctx, row);
+        }
+      }
+    }
     return null;
   },
 });
@@ -587,6 +853,12 @@ export const remove = mutation({
     } else {
       await ctx.db.patch(annotation._id, { body: "", deletedAt: Date.now() });
     }
+
+    // Withdrawing a note withdraws the mail it sent. Either ending leaves
+    // nothing for a recipient to open — a deleted row is gone and a tombstone
+    // has no body — so an item still sitting in somebody's panel would be a
+    // link to an empty room.
+    await clearNotificationsFor(ctx, annotation._id);
 
     await recordEvent(ctx, {
       labId: annotation.labId,
