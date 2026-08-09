@@ -11,6 +11,7 @@ import type { ScoutEvalReport } from "../lib/eval/scout-eval";
 import { MAX_SEARCH_LENGTH } from "./search";
 import {
   MAX_LABS_SCANNED,
+  MAX_ROWS_SCANNED,
   baselineTopSix,
   questions,
   retrieve,
@@ -266,14 +267,24 @@ describe("the baseline", () => {
   it("agrees with the drawer when withdrawn notes push the overfetch to work", async () => {
     const ctx = new FakeCtx();
     const seed = await seedSettledQuestion(ctx);
-    // More than the drawer's overfetch (6 x 4), with withdrawn rows salted
-    // through the first twenty-four so the six survivors are not the first
-    // six rows the index returned.
-    for (let i = 0; i < 30; i++) {
+    // The overfetch has to be load-bearing, or a drift from 4 to 3 would
+    // pass. The seeded open question is live and first; then eighteen
+    // withdrawn rows; then the live ones. The sixth survivor therefore sits
+    // at row 24 — the last row the drawer reads — so any shrink of either
+    // side's overfetch returns a shorter list and fails this test.
+    for (let i = 0; i < 18; i++) {
       await seedAnnotation(ctx, { ...seed, memberId: seed.member }, {
-        body: i % 3 === 0 ? "" : `Note ${i} about the 4°C incubation step.`,
-        ...(i % 3 === 0 ? { deletedAt: 99 } : {}),
+        body: "",
+        deletedAt: 99,
       });
+    }
+    const live: Id<"annotations">[] = [];
+    for (let i = 0; i < 8; i++) {
+      live.push(
+        await seedAnnotation(ctx, { ...seed, memberId: seed.member }, {
+          body: `Note ${i} about the 4°C incubation step.`,
+        }),
+      );
     }
     ctx.auth = { userId: seed.member };
     const text = "Does the 4°C incubation step explain the gap?";
@@ -286,7 +297,12 @@ describe("the baseline", () => {
 
     expect(mine.ranked).toEqual(drawer.annotations.map((row) => row._id));
     expect(mine.ranked).toHaveLength(6);
-    expect(mine.candidatesConsidered).toBeGreaterThan(6);
+    // The last survivor inside the 24-row window is in; the rows past the
+    // window are not. Both halves matter: the first fails if the overfetch
+    // shrinks, the second if it grows.
+    expect(mine.ranked).toContain(live[4]);
+    expect(mine.ranked).not.toContain(live[5]);
+    expect(mine.candidatesConsidered).toBe(6);
   });
 
   it("is the drawer's upper bound: a member's own private notes evict lab rows", async () => {
@@ -446,6 +462,50 @@ describe("the report", () => {
     expect(JSON.stringify(report)).not.toContain(reply);
   });
 
+  it("carries a cap hit out of the retrieval pass, and abstains on it", async () => {
+    const ctx = registered();
+    const seed = await seedSettledQuestion(ctx);
+    const reply = await seedReply(ctx, seed);
+
+    // The selection pass sees one clean label and no caps. Everything below
+    // happens *between* the two reads, so a truncation entry in the final
+    // report can only have come out of `retrieve`.
+    ctx.register(internal.scoutEval.retrieve, {
+      _handler: async (inner: unknown, args: unknown) => {
+        await ctx.db.patch(reply, { visibility: "private" });
+        for (let i = 0; i < MAX_ROWS_SCANNED + 1; i++) {
+          const id = await ctx.db.insert("annotations", {
+            labId: seed.labId,
+            paperId: seed.paperId,
+            memberId: seed.member,
+            anchor: {
+              quote: "incubation at 4°C",
+              prefix: "",
+              suffix: "",
+              start: 0,
+              end: 17,
+              pageIndex: 2,
+            },
+            type: "critique",
+            body: `Private answer ${i}.`,
+            visibility: "private",
+          });
+          await ctx.db.patch(id, { parentId: seed.questionId });
+        }
+        return await handlerOf(retrieve)(inner, args as never);
+      },
+    });
+
+    const report = await runReport(ctx);
+
+    expect(report.population.truncated.join(" ")).toContain("read cap");
+    expect(report.population.questionsUnreadable).toBe(1);
+    expect(report.population.questionsScored).toBe(0);
+    // Every one of the 500 rows the capped read did return was private.
+    expect(report.population.labelsDroppedNotLabVisible).toBe(MAX_ROWS_SCANNED);
+    expect(report.verdict).toMatch(/did not see the whole corpus/);
+  });
+
   it("keeps a private note out of the report even when the index leaks it", async () => {
     const ctx = registered();
     const seed = await seedSettledQuestion(ctx);
@@ -476,18 +536,25 @@ describe("retrieve", () => {
     ).toBeNull();
   });
 
-  it("refuses a question whose last surviving label has just gone", async () => {
+  it("reports the caps and the drops even when no label survived", async () => {
     const ctx = new FakeCtx();
     const seed = await seedSettledQuestion(ctx);
     const reply = await seedReply(ctx, seed);
-    expect(
-      await handlerOf(retrieve)(ctx, { actionId: seed.actionId } as never),
-    ).not.toBeNull();
-
     await ctx.db.patch(reply, { visibility: "private" });
-    expect(
-      await handlerOf(retrieve)(ctx, { actionId: seed.actionId } as never),
-    ).toBeNull();
+
+    const got = (await handlerOf(retrieve)(ctx, {
+      actionId: seed.actionId,
+    } as never)) as {
+      labels: unknown[];
+      labelsDropped: number;
+      truncated: string[];
+    } | null;
+
+    // Not scoreable, but not silent: `null` here would throw away the drop
+    // count and any read cap this re-derivation hit.
+    expect(got).not.toBeNull();
+    expect(got!.labels).toHaveLength(0);
+    expect(got!.labelsDropped).toBe(1);
   });
 
   it("drops the note the question came out of from both sides", async () => {

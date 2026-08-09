@@ -446,7 +446,24 @@ export const retrieve = internalQuery({
 
     const fresh = await labelsFor(ctx, action);
     if (fresh.labels.length === 0) {
-      return null;
+      // Not scoreable — but *not* nothing. This re-derivation may have hit a
+      // read cap, and it certainly dropped whatever labels have gone private
+      // since the selection pass. Returning `null` here would throw both
+      // facts away, and a truncation that never reaches the report is a
+      // verdict that fails to abstain on a corpus nobody fully read: exactly
+      // the hole `population.truncated` exists to close. So the caps and the
+      // drop count come back with an empty label set, and `run` is what
+      // decides the question cannot be scored.
+      return {
+        question: action.body,
+        labId: action.labId,
+        candidates: [],
+        baselineRanked: [],
+        baselineCandidatesConsidered: 0,
+        labels: [],
+        labelsDropped: fresh.dropped,
+        truncated: fresh.truncated,
+      };
     }
 
     // Both sides drop the note the question came out of, and drop it the same
@@ -674,6 +691,14 @@ export const run = internalAction({
         retrieved.labelsDropped - one.labelsDropped,
       );
       truncated.push(...retrieved.truncated);
+
+      // Its labels went while we were looking at it. Counted as moved rather
+      // than as unlabelled, and only *after* its caps and its drops have been
+      // taken off it above.
+      if (retrieved.labels.length === 0) {
+        unreadable += 1;
+        continue;
+      }
 
       const ranked = await scoutRanking(
         retrieved.labId,
