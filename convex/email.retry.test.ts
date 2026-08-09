@@ -125,8 +125,8 @@ describe("sendEmail", () => {
     return { calls, stub };
   }
 
-  function headerOf(init: RequestInit, name: string): string | undefined {
-    return (init.headers as Record<string, string>)[name];
+  function headerOf(init: RequestInit | undefined, name: string): string | undefined {
+    return (init?.headers as Record<string, string> | undefined)?.[name];
   }
 
   it("sends one Idempotency-Key and repeats it on every attempt", async () => {
