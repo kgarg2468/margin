@@ -177,8 +177,25 @@ export function AnnotationCard({
       // A card, not a slab: rounded, hairline-bordered, resting on the page
       // with a whisper of shadow — the Fig. 1 grammar. The type's ink keeps
       // the left rule; activation lifts the card rather than boxing it.
+      // The one place `tap-target` is asked for less than it gives, and it is
+      // asked here rather than in the utility because the utility is right
+      // everywhere else. Its 44x44 `::after` is *centred*, so what it costs is
+      // 14px of live hit area above and below a 16px control — and this card
+      // is a column of 13-to-16px controls at a ~20px pitch: the marks row,
+      // then Reply/Edit/Status under it. Measured, the collision was total.
+      // "Edit" is later in DOM order, so its box took the overlap, and
+      // `elementFromPoint` returned Edit at Mark's own centre; only a 6px
+      // strip at the top of "Mark" still hit Mark, and a real click anywhere
+      // else on it was intercepted. A shipped control was unreachable by
+      // pointer.
+      //
+      // So down the column the reach is capped at 8px past each edge — under
+      // half the gap to the next row, which is what keeps a hit box out of its
+      // neighbour's centre — and across, where the card has the width, the
+      // full 44px stands.
       className={
         "rounded-md border border-rule border-l-2 bg-surface py-2.5 pl-3 pr-2.5 " +
+        "[&_.tap-target]:after:h-[calc(100%+1rem)] [&_.tap-target]:after:min-h-0 " +
         "motion-safe:transition-[box-shadow,translate] motion-safe:duration-[var(--dur-hover)] " +
         (active
           ? "shadow-[0_0_0_1px_var(--rule),var(--shadow-lift)] motion-safe:-translate-y-px"
@@ -450,8 +467,11 @@ export function AnnotationCard({
         </div>
       ) : (
         // gap-x-5: `Reply` and `Edit` are 32px and 21px wide, so their 44px
-        // hit boxes would otherwise reach well into each other.
-        <div className="mt-1.5 flex flex-wrap items-baseline gap-x-5">
+        // hit boxes would otherwise reach well into each other. `mt-2.5` is
+        // the same argument on the other axis — the marks row sits directly
+        // above this one, and 6px between two 14px controls left nothing for
+        // even the capped boxes to clear.
+        <div className="mt-2.5 flex flex-wrap items-baseline gap-x-5">
           {annotation.visibility === "lab" && !annotation.deleted && (
             <button
               type="button"
