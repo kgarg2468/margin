@@ -66,11 +66,21 @@ type Item = Section["items"][number];
  *
  * ## Attribution is checked here, not trusted
  *
- * The server re-resolves every citation on read and redacts a line whose notes
- * have all been withdrawn. This applies the same two thresholds again against
- * what *this* client can currently see, exactly as `SessionSynthesis` does —
+ * The server re-resolves every citation on read and redacts a line unless every
+ * note behind it is still shared. This applies that threshold again against
+ * what *this* client can currently see, in the spirit of `SessionSynthesis` —
  * because a brief that keeps quoting a note somebody took back would be a way
  * around `visibility: "private"`, and one check is one place to be wrong.
+ *
+ * One threshold, not the synthesis's two. A synthesis can keep a partly
+ * withdrawn item and drop its attribution, because its text is a paraphrase and
+ * its names are a union that points at nobody in particular once removed. A
+ * brief line is the notes themselves, formatted: a collision names both members
+ * and quotes each. There is no version of it with one member removed that is
+ * still a true sentence, so a half-withdrawn line is held back whole — the same
+ * call `redactWithdrawn` makes in `convex/briefs.ts`, and it has to be the same
+ * one, or the client would draw a live citation link and an ontology label
+ * around text the server had already replaced.
  */
 
 /** The ink each lens is written in. Ontology colour where the section has one. */
@@ -457,8 +467,11 @@ function BriefLine({
   visibleAnnotationIds: ReadonlySet<Id<"annotations">>;
 }) {
   const cited = item.annotationIds.filter((id) => visibleAnnotationIds.has(id));
-  const withdrawn = item.annotationIds.length > 0 && cited.length === 0;
-  const partial = cited.length < item.annotationIds.length;
+  // All or nothing, which is the rule the server applies on the way out. A
+  // collision line is built from both the notes it cites and names both
+  // members, so one of the two going is not a line with a gap in it — it is a
+  // line that is still about somebody who took their note back.
+  const withdrawn = cited.length < item.annotationIds.length;
   const label = item.pairType === undefined ? undefined : GOLD_PAIRS[item.pairType];
 
   return (
@@ -502,11 +515,6 @@ function BriefLine({
                 Note {position + 1}
               </a>
             ))}
-            {partial && (
-              <span className="italic">
-                Some of the notes behind this are no longer shared.
-              </span>
-            )}
           </p>
         </>
       )}
