@@ -1176,7 +1176,23 @@ export function Reader({
         >
           <div
             ref={columnRef}
-            className="flex min-w-0 flex-1 flex-col items-center gap-5"
+            // `safe center`, not `center`. Now that the scale can exceed fit
+            // width — the very first press of + from the resting state does
+            // it — the page is routinely wider than this column. Plain
+            // centring splits that overflow evenly, and an LTR scroll
+            // container only ever scrolls toward its end edge, so everything
+            // it put on the left was clipped and unreachable: a reader could
+            // zoom in on a figure and have no way to pan back to the start of
+            // its caption. `safe` keeps the page centred for as long as it
+            // fits and falls back to start-aligned the moment it does not,
+            // which puts the whole overflow on the side that scrolls.
+            //
+            // Alignment, not position: this column still has no `position` of
+            // its own, so `gutterX` and the rail's connector geometry are
+            // untouched. They read `wrapper.offsetLeft` against the content
+            // box and re-measure on every re-lay, so they follow the page
+            // across the switch rather than needing to know about it.
+            className="flex min-w-0 flex-1 flex-col items-center-safe gap-5"
           >
             {doc === null || baseSize === null ? (
               <p className="mt-24 font-sans text-sm text-ink-faint">
