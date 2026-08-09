@@ -7,7 +7,7 @@ import { annotationsToCsv, annotationsToJson } from "@/lib/export/csv";
 import { downloadText, exportFilename } from "@/lib/export/download";
 import { pdfAuthHeaders, pdfEndpoint } from "@/lib/pdf/delivery";
 import { loadPdfjs, normalizePdfText } from "@/lib/pdf/extract";
-import { eyebrowClass, skeletonClass } from "@/lib/ui";
+import { boxAnchor, eyebrowClass, skeletonClass } from "@/lib/ui";
 import { useAuthToken } from "@convex-dev/auth/react";
 import { useQuery } from "convex-helpers/react/cache/hooks";
 import Link from "next/link";
@@ -106,13 +106,10 @@ export function Reader({
   const [activeId, setActiveId] = useState<AnnotationId | null>(null);
   const [filter, setFilter] = useState<Set<AnnotationType>>(new Set());
   const [draft, setDraft] = useState<Draft | null>(null);
-  // The read half is deliberately unnamed for now: the composer is still
-  // placed from the coordinates frozen at selection time, and anchoring it to
-  // this re-measured box is the next step. The measuring is the page's to do
-  // either way, and the box has to land somewhere the composer can reach — so
-  // it is collected here, and the `draftBox` binding appears when something
-  // reads it.
-  const [, setDraftBox] = useState<DraftBox | null>(null);
+  // Where the page says the draft's passage actually sits, re-measured on every
+  // re-lay. The composer is anchored to it (see `composerAnchor` below), which
+  // is what lets the sheet follow a zoom rather than being stranded by it.
+  const [draftBox, setDraftBox] = useState<DraftBox | null>(null);
   const [resolutions, setResolutions] = useState<Map<number, PageResolution>>(
     new Map(),
   );
@@ -135,6 +132,42 @@ export function Reader({
       setDraftBox(null);
     }
   }, [draft]);
+
+  /**
+   * The passage the composer points at.
+   *
+   * The page reports where it drew the draft mark (see `DraftBox`), which is
+   * re-measured whenever the page re-lays its text — so this survives a zoom,
+   * where the coordinates frozen at selection time did not. Before the first
+   * report lands, the selection's own y/x stand in as a zero-width point.
+   *
+   * The scroll container goes along as the anchor's context element: without it
+   * the positioner tracks the window and not the box the reader is scrolling,
+   * and the sheet drifts off its passage on the first flick of the wheel.
+   */
+  const composerAnchor = useMemo(() => {
+    if (draft === null) {
+      return undefined;
+    }
+    const box = draftBox ?? {
+      top: draft.top,
+      left: draft.left,
+      width: 0,
+      height: 0,
+    };
+    return boxAnchor(
+      box,
+      () => {
+        const content = contentRef.current;
+        if (content === null) {
+          return null;
+        }
+        const at = content.getBoundingClientRect();
+        return { left: at.left, top: at.top };
+      },
+      scrollRef.current,
+    );
+  }, [draft, draftBox]);
 
   // Every activation in the reader goes through this rather than through
   // `setActiveId`, so that the gutter — which fires nobody's `mouseenter` —
@@ -913,7 +946,6 @@ export function Reader({
       <div
         ref={scrollRef}
         className="flex-1 overflow-y-auto overscroll-contain"
-        onMouseDown={() => setDraft(null)}
       >
         {/* A breath of page colour under the header, so cards slide beneath
             it instead of shearing off against the border. */}
@@ -973,11 +1005,12 @@ export function Reader({
             onFocusPassage={focusPassage}
           />
 
-          {draft !== null && (
+          {draft !== null && composerAnchor !== undefined && (
             <Composer
               paperId={paperId}
               sessionId={sessionId}
               draft={draft}
+              anchor={composerAnchor}
               onClose={() => setDraft(null)}
             />
           )}

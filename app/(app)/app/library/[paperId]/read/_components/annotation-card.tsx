@@ -148,6 +148,19 @@ export function AnnotationCard({
   const showReplies = expanded || replies.length <= 3;
   const visibleReplies = showReplies ? replies : replies.slice(0, 1);
 
+  const sendReply = () =>
+    void run(async () => {
+      await reply({
+        parentId: annotation._id,
+        body: replyBody,
+        ...(replyMentions.length > 0 ? { mentions: replyMentions } : {}),
+      });
+      setReplyBody("");
+      setReplyPicked([]);
+      setReplying(false);
+      setExpanded(true);
+    }, "That reply didn't send.");
+
   return (
     <article
       ref={(element) => registerElement?.(annotation._id, element)}
@@ -409,6 +422,11 @@ export function AnnotationCard({
               )
             }
             rows={2}
+            onSubmit={() => {
+              if (!busy && replyBody.trim().length > 0) {
+                sendReply();
+              }
+            }}
             placeholder="Answer this — type @ to bring somebody in"
             className="w-full resize-y rounded-sm border border-rule bg-page px-2 py-1.5 font-serif text-sm leading-relaxed text-ink placeholder:text-ink-faint"
           />
@@ -416,21 +434,7 @@ export function AnnotationCard({
             <button
               type="button"
               disabled={busy || replyBody.trim().length === 0}
-              onClick={() =>
-                void run(async () => {
-                  await reply({
-                    parentId: annotation._id,
-                    body: replyBody,
-                    ...(replyMentions.length > 0
-                      ? { mentions: replyMentions }
-                      : {}),
-                  });
-                  setReplyBody("");
-                  setReplyPicked([]);
-                  setReplying(false);
-                  setExpanded(true);
-                }, "That reply didn't send.")
-              }
+              onClick={sendReply}
               className="tap-target font-sans text-xs text-accent underline-offset-4 hover:underline disabled:opacity-50"
             >
               Reply

@@ -1,12 +1,16 @@
 "use client";
 
+import { Popover } from "@/app/(app)/app/_components/popover";
+import type { PopoverDismissal } from "@/app/(app)/app/_components/popover";
 import { readableError } from "@/app/(app)/app/_components/errors";
 import { api } from "@/convex/_generated/api";
 import type { Doc, Id } from "@/convex/_generated/dataModel";
 import { collectMentionedIds } from "@/lib/mentions";
 import { errorClass } from "@/lib/ui";
 import { useMutation } from "convex/react";
-import { useEffect, useRef, useState } from "react";
+import type { ComponentProps } from "react";
+import { useCallback, useState } from "react";
+import { composerEscape } from "./composer-escape";
 import type { PickedMention } from "./mention-field";
 import { MentionField } from "./mention-field";
 import type { AnnotationType } from "./ontology";
@@ -29,16 +33,27 @@ type Visibility = Doc<"annotations">["visibility"];
  * rather than applied quietly: lab when you arrived here from a session (prep
  * is inherently collaborative), private otherwise. Either way it is one tap to
  * flip before saving.
+ *
+ * It sits in the shared `Popover` rather than in a hand-placed absolute box, so
+ * a selection at the bottom of the window opens the sheet above it instead of
+ * below the fold, and a selection at the right edge slides the sheet back into
+ * the window instead of over the margin. What it gives up is nothing: the
+ * anchor is the passage's own rectangle, re-measured by the page whenever the
+ * page re-lays its text, so the sheet follows a zoom instead of being stranded
+ * by it.
  */
 export function Composer({
   paperId,
   sessionId,
   draft,
+  anchor,
   onClose,
 }: {
   paperId: Id<"papers">;
   sessionId?: Id<"sessions">;
   draft: Draft;
+  /** The passage, as something a positioner can point at. */
+  anchor: ComponentProps<typeof Popover>["anchor"];
   onClose: () => void;
 }) {
   const create = useMutation(api.annotations.create);
@@ -49,7 +64,26 @@ export function Composer({
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  /** The roster's state, held here because Escape has to be ordered. */
+  const [menu, setMenu] = useState<{ open: boolean; at: number | null }>({
+    open: false,
+    at: null,
+  });
+  const [dismissedAt, setDismissedAt] = useState<number | null>(null);
+  const [confirming, setConfirming] = useState(false);
+
+  /**
+   * Stable, and it keeps the old state object when nothing actually moved.
+   * The field reports its menu from an effect that depends on this callback, so
+   * a fresh closure every render would re-fire the report, which would set
+   * state, which would render again: a loop with no bottom to it.
+   */
+  const onMenuOpenChange = useCallback((open: boolean, at: number | null) => {
+    setMenu((previous) =>
+      previous.open === open && previous.at === at ? previous : { open, at },
+    );
+  }, []);
 
   /**
    * Everyone picked out of the `@` menu while this note was being written —
@@ -59,17 +93,10 @@ export function Composer({
   const [picked, setPicked] = useState<PickedMention[]>([]);
   const mentions = collectMentionedIds(body, picked);
 
-  useEffect(() => {
-    function onKey(event: globalThis.KeyboardEvent) {
-      if (event.key === "Escape") {
-        onClose();
-      }
-    }
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
   async function save() {
+    if (saving) {
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
@@ -90,14 +117,55 @@ export function Composer({
     }
   }
 
+  function escape() {
+    switch (composerEscape({ menuOpen: menu.open, confirming, body })) {
+      case "close-menu":
+        setDismissedAt(menu.at);
+        return;
+      case "cancel-confirm":
+        setConfirming(false);
+        return;
+      case "ask-before-discarding":
+        setConfirming(true);
+        return;
+      case "close":
+        onClose();
+    }
+  }
+
+  function dismissal(open: boolean, details: PopoverDismissal) {
+    if (open) {
+      return;
+    }
+    if (details.reason === "escape-key") {
+      // Base UI would close the sheet here. It does not get to decide what
+      // Escape means while there is a roster open or a half-written note in
+      // the box — see `composer-escape.ts`.
+      details.cancel();
+      escape();
+      return;
+    }
+    if (details.reason === "outside-press" && body.trim().length > 0) {
+      details.cancel();
+      setConfirming(true);
+      return;
+    }
+    onClose();
+  }
+
   return (
-    <div
-      ref={rootRef}
-      style={{ top: draft.top, left: draft.left }}
-      className="pop-in absolute z-30 w-80 max-w-[calc(100vw-3rem)] rounded-md border border-rule bg-surface p-4 shadow-[var(--shadow-sheet)]"
-      // A click inside must not count as a click outside.
-      onMouseDown={(event) => event.stopPropagation()}
-      onMouseUp={(event) => event.stopPropagation()}
+    <Popover
+      open
+      anchor={anchor}
+      aria-label="New note"
+      side="bottom"
+      align="start"
+      sideOffset={10}
+      // Base UI would take focus to the sheet; the field below asks for it
+      // first, and a reader who selected a passage wants the cursor in the box.
+      initialFocus={false}
+      onOpenChange={dismissal}
+      className="w-80 max-w-[calc(100vw-3rem)]"
     >
       <p className="mb-3 border-l-2 border-rule pl-2.5 font-serif text-sm leading-snug text-ink-muted">
         <span className="line-clamp-3 italic">{draft.anchor.quote}</span>
@@ -118,6 +186,10 @@ export function Composer({
                 : [...previous, candidate],
             )
           }
+          dismissedAt={dismissedAt}
+          onDismissedAtChange={setDismissedAt}
+          onMenuOpenChange={onMenuOpenChange}
+          onSubmit={() => void save()}
           rows={3}
           placeholder="Say something, or just save the highlight. Type @ to name a labmate."
           className="w-full resize-y rounded-sm border border-rule bg-page px-2.5 py-2 font-serif text-sm leading-relaxed text-ink placeholder:text-ink-faint hover:border-ink-faint"
@@ -143,23 +215,50 @@ export function Composer({
           </p>
         )}
 
-        <div className="flex items-center gap-4">
-          <button
-            type="button"
-            disabled={saving}
-            onClick={save}
-            className="inline-flex items-center justify-center rounded-sm bg-accent px-3 py-1.5 font-sans text-sm text-accent-contrast transition-colors hover:bg-accent-strong disabled:opacity-50"
-          >
-            {saving ? "Saving…" : body.trim().length > 0 ? "Save note" : "Highlight"}
-          </button>
-          <button
-            type="button"
-            onClick={onClose}
-            className="font-sans text-sm text-ink-faint underline-offset-4 hover:underline"
-          >
-            Cancel
-          </button>
-        </div>
+        {confirming ? (
+          // In the sheet rather than in a dialog on top of it: a second modal
+          // over a modal brings a second Escape owner, which is the class of
+          // bug this whole task is about.
+          <div className="flex flex-col gap-2 border-l-2 border-accent-strong pl-3">
+            <p className="font-sans text-sm text-ink">
+              Throw this note away?
+            </p>
+            <div className="flex items-center gap-4">
+              <button
+                type="button"
+                onClick={onClose}
+                className="pressable inline-flex items-center justify-center rounded-sm border border-rule bg-surface px-3 py-1.5 font-sans text-sm text-ink hover:border-ink-faint"
+              >
+                Discard
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirming(false)}
+                className="font-sans text-sm text-accent underline-offset-4 hover:underline"
+              >
+                Keep writing
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-center gap-4">
+            <button
+              type="button"
+              disabled={saving}
+              onClick={() => void save()}
+              className="pressable inline-flex items-center justify-center rounded-sm bg-accent px-3 py-1.5 font-sans text-sm text-accent-contrast hover:bg-accent-strong disabled:opacity-50"
+            >
+              {saving ? "Saving…" : body.trim().length > 0 ? "Save note" : "Highlight"}
+            </button>
+            <button
+              type="button"
+              onClick={escape}
+              className="font-sans text-sm text-ink-faint underline-offset-4 hover:underline"
+            >
+              Cancel
+            </button>
+          </div>
+        )}
 
         {error !== null && (
           <p role="alert" className={errorClass}>
@@ -167,6 +266,6 @@ export function Composer({
           </p>
         )}
       </div>
-    </div>
+    </Popover>
   );
 }

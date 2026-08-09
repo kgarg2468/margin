@@ -9,7 +9,14 @@ import {
   rankCandidates,
 } from "@/lib/mentions";
 import { useQuery } from "convex-helpers/react/cache/hooks";
-import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 
 /** Somebody the author has actually chosen, kept until the note is saved. */
 export type PickedMention = { id: Id<"users">; name: string };
@@ -45,6 +52,9 @@ export function MentionField({
   autoFocus = false,
   /** Fired on Enter when the picker is closed, so a parent can keep its shortcut. */
   onSubmit,
+  dismissedAt,
+  onDismissedAtChange,
+  onMenuOpenChange,
 }: {
   paperId: Id<"papers">;
   value: string;
@@ -55,6 +65,18 @@ export function MentionField({
   className?: string;
   autoFocus?: boolean;
   onSubmit?: () => void;
+  /**
+   * The `@` offset whose menu the parent has dismissed.
+   *
+   * Optional, and the field keeps its own copy when nobody passes it — a reply
+   * box on a card has no ordering problem to solve. The composer does: it owns
+   * Escape, and it can only close the menu first if it is the thing holding the
+   * menu's dismissal.
+   */
+  dismissedAt?: number | null;
+  onDismissedAtChange?: (at: number | null) => void;
+  /** Told whenever the roster opens or closes, and for which `@`. */
+  onMenuOpenChange?: (open: boolean, at: number | null) => void;
 }) {
   const candidates = useQuery(api.annotations.mentionCandidates, { paperId });
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -67,7 +89,18 @@ export function MentionField({
    * the next keystroke re-opens the menu the author just closed — and closing
    * it again would be the only way to type a literal "@" anywhere.
    */
-  const [dismissed, setDismissed] = useState<number | null>(null);
+  const [ownDismissed, setOwnDismissed] = useState<number | null>(null);
+  const controlled = dismissedAt !== undefined;
+  const dismissed = controlled ? dismissedAt : ownDismissed;
+  const setDismissed = useCallback(
+    (at: number | null) => {
+      if (!controlled) {
+        setOwnDismissed(at);
+      }
+      onDismissedAtChange?.(at);
+    },
+    [controlled, onDismissedAtChange],
+  );
   /** Set after a pick so the caret can be restored once React has re-rendered. */
   const pendingCaret = useRef<number | null>(null);
   const listId = useId();
@@ -84,6 +117,11 @@ export function MentionField({
           range.query,
         );
   const open = suggestions.length > 0;
+
+  const mentionAt = open ? (range?.start ?? null) : null;
+  useEffect(() => {
+    onMenuOpenChange?.(open, mentionAt);
+  }, [open, mentionAt, onMenuOpenChange]);
 
   // Clamp rather than reset: the roster re-filters on every keystroke, and a
   // highlight that jumped back to the top each time would make ↓↓Enter select
@@ -168,10 +206,19 @@ export function MentionField({
               return;
             }
             if (event.key === "Escape") {
-              // Stops the composer's own Escape handler from throwing away a
-              // half-written note because the author dismissed a menu.
+              if (controlled) {
+                // The parent owns the order. It was told this menu is open and
+                // will close it first; handling it here as well would close the
+                // menu and leave the parent acting on an Escape for a menu that
+                // is already gone.
+                //
+                // The `stopPropagation` that used to be here never worked:
+                // React 19's App Router attaches its delegated listener to
+                // `document` itself, so it and the composer's own listener were
+                // siblings on one node and stopping propagation stopped nothing.
+                return;
+              }
               event.preventDefault();
-              event.stopPropagation();
               setDismissed(range?.start ?? null);
               return;
             }
