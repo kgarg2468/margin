@@ -101,6 +101,7 @@ export function SessionSpine({ notes }: { notes: SessionNotes }) {
               // present type 10px before the counts divide what's left, so
               // proportion still dominates once the numbers are real.
               flexGrow: count,
+              // Matches the h-2.5 track: the smallest band is a square.
               flexBasis: "10px",
               flexShrink: 0,
               backgroundColor: spineInk(type),
@@ -109,7 +110,7 @@ export function SessionSpine({ notes }: { notes: SessionNotes }) {
         ))}
       </div>
       <ul
-        aria-label={`${notes.total} notes in this session`}
+        aria-label={`${notes.total} ${notes.total === 1 ? "note" : "notes"} in this session`}
         className="flex flex-wrap gap-x-4 gap-y-1"
       >
         {notes.counts.map(({ type, count }) => (
