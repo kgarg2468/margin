@@ -133,6 +133,26 @@ export function Reader({
     new Map(),
   );
 
+  /**
+   * A new passage, offered by the page on every mouseup.
+   *
+   * Refused while a note is already open. The page reports a selection with no
+   * regard for the composer — it cannot see it — and the two halves of one
+   * ordinary drag used to arrive in opposite orders: the pointerdown reached
+   * Base UI as an outside press and put "Throw this note away?" on screen, and
+   * the mouseup that ended the same drag then swapped the draft underneath it.
+   * The composer is keyed on the passage, so that was a remount: the question
+   * gone unanswered and the note with it.
+   *
+   * The discard confirm is the only way a written note dies. An empty one is
+   * already gone by the time this runs — the outside press closed it on
+   * pointerdown, an event batch earlier — so selecting a second passage after
+   * a highlight still works exactly as it did.
+   */
+  const handleDraft = useCallback((next: Draft) => {
+    setDraft((previous) => (previous === null ? next : previous));
+  }, []);
+
   const handleDraftBox = useCallback(
     (
       pageIndex: number,
@@ -1239,7 +1259,7 @@ export function Reader({
                   onDraftBox={handleDraftBox}
                   onActivate={activate}
                   onResolved={handleResolved}
-                  onDraft={setDraft}
+                  onDraft={handleDraft}
                   registerElement={registerPage}
                 />
               ))
@@ -1261,11 +1281,12 @@ export function Reader({
           {draft !== null && composerAnchor !== undefined && (
             <Composer
               // A different passage is a different note, and this is what says
-              // so. The page reports a draft on every mouseup with no regard
-              // for one already open (see `pdf-page.tsx`), so without a key the
-              // reader drag-selecting a second passage would swap `draft.anchor`
-              // underneath a live composer — same instance, same half-written
-              // body, now filed against a passage its author never chose.
+              // so. A note with anything written in it is refused a new passage
+              // outright (see `handleDraft`); this is for the other way round —
+              // an empty composer, closed by the press that began the next
+              // selection and reopened by the mouseup that ended it. Without a
+              // key that is one instance carrying the first passage's state
+              // into the second one.
               key={`${draft.anchor.pageIndex}:${draft.anchor.start}:${draft.anchor.end}`}
               paperId={paperId}
               sessionId={sessionId}
