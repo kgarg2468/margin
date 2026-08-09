@@ -1007,6 +1007,13 @@ export function Reader({
 
           {draft !== null && composerAnchor !== undefined && (
             <Composer
+              // A different passage is a different note, and this is what says
+              // so. The page reports a draft on every mouseup with no regard
+              // for one already open (see `pdf-page.tsx`), so without a key the
+              // reader drag-selecting a second passage would swap `draft.anchor`
+              // underneath a live composer — same instance, same half-written
+              // body, now filed against a passage its author never chose.
+              key={`${draft.anchor.pageIndex}:${draft.anchor.start}:${draft.anchor.end}`}
               paperId={paperId}
               sessionId={sessionId}
               draft={draft}
