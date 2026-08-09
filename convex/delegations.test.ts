@@ -215,6 +215,56 @@ describe("caps", () => {
     );
   });
 
+  it("does not let a run that never started keep a slot either", async () => {
+    // `runForBrief` is a scheduled action, and Convex runs those at most
+    // once. A failure before `claim` leaves a row at `queued` that nothing
+    // will ever pick up — and a lab whose scout quietly stops working, with
+    // eight rows sitting queued and no error anywhere, has no way to even
+    // describe what went wrong.
+    const { ctx, seed } = await seeded();
+    const stranded: Id<"delegations">[] = [];
+    for (let i = 0; i < MAX_ACTIVE_PER_LAB; i += 1) {
+      stranded.push(
+        await queue(ctx, seed, {
+          annotationId: undefined,
+          actionId: seed.actionId,
+          requestedAt: Date.now() - DELEGATION_LEASE_MS - 1,
+        }),
+      );
+    }
+
+    ctx.auth = { userId: seed.pi };
+    const fresh = await handlerOf(request)(ctx, {
+      subject: { kind: "annotation", annotationId: seed.questionId },
+    } as never);
+
+    expect(fresh).toBeDefined();
+    for (const delegationId of stranded) {
+      const row = await ctx.db.get(delegationId);
+      expect(row?.status).toBe("failed");
+      // Told apart from a scout that started and did not come back, because
+      // the two are different faults and read differently to whoever asks
+      // why the question went unanswered.
+      expect(row?.failure).toBe("never-started");
+      expect(row?.failureReason).toMatch(/never picked up/);
+    }
+    expect(
+      ctx.db.all("events").filter((e) => e.type === "delegation.failed"),
+    ).toHaveLength(MAX_ACTIVE_PER_LAB);
+  });
+
+  it("leaves a queued run that is merely young alone", async () => {
+    const { ctx, seed } = await seeded();
+    const fresh = await queue(ctx, seed, {
+      annotationId: undefined,
+      actionId: seed.actionId,
+    });
+    expect(
+      await handlerOf(expireStale)(ctx, { labId: seed.labId } as never),
+    ).toBe(0);
+    expect((await ctx.db.get(fresh))?.status).toBe("queued");
+  });
+
   it("still refuses when the slots are held by runs that are alive", async () => {
     const { ctx, seed } = await seeded();
     for (let i = 0; i < MAX_ACTIVE_PER_LAB; i += 1) {
@@ -439,6 +489,30 @@ describe("a run, start to finish", () => {
     const row = rowAt(ctx.db.all("delegations"));
     expect(row.status).toBe("cancelled");
     expect(row.cancellation).toBe("subject-withdrawn");
+  });
+
+  it("still knows where a run belongs after its subject is deleted", async () => {
+    const { ctx, seed } = await seeded();
+    ctx.auth = { userId: seed.pi };
+    const delegationId = (await handlerOf(request)(ctx, {
+      subject: { kind: "annotation", annotationId: seed.questionId },
+    } as never)) as Id<"delegations">;
+
+    // `annotations.remove` hard-deletes. Reading placement off the subject
+    // would land nothing on the timeline at exactly the moment placement
+    // matters — the runs that fall off would be the runs that ended badly.
+    await ctx.db.delete(seed.questionId as string);
+    expect(await ctx.db.get(seed.questionId)).toBeNull();
+    await ctx.db.patch(delegationId as string, {
+      requestedAt: Date.now() - DELEGATION_LEASE_MS - 1,
+    });
+    await handlerOf(expireStale)(ctx, { labId: seed.labId } as never);
+
+    const failed = ctx.db
+      .all("events")
+      .find((e) => e.type === "delegation.failed");
+    expect(failed?.paperId).toBe(seed.paperId);
+    expect(failed?.sessionId).toBe(seed.sessionId);
   });
 
   it("puts a failed run on the same timelines as a successful one", async () => {

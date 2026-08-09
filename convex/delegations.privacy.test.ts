@@ -678,6 +678,30 @@ describe("the citation gate", () => {
     expect(result.droppedForCitation).toBe(1);
   });
 
+  it("drops an item whose labels are only partly real", () => {
+    // Fail closed. Keeping the half that checks out would hand a scientist a
+    // sentence they cannot use: they would have to work out which half was
+    // grounded, which is the work the scout existed to do. And a label
+    // nobody issued is evidence about how the whole sentence was produced,
+    // not a typo in one clause of it.
+    const { byLabel } = material(2);
+    const result = sanitizeFindingItems(
+      { items: [{ text: "Grounded and not.", citations: ["A1", "A99"] }] },
+      byLabel,
+    );
+    expect(result.items).toEqual([]);
+    expect(result.droppedForCitation).toBe(1);
+  });
+
+  it("drops an item that invents a label in its prose alone", () => {
+    const { byLabel } = material(2);
+    const result = sanitizeFindingItems(
+      { items: [{ text: "As [A1] and [A42] both show.", citations: ["A1"] }] },
+      byLabel,
+    );
+    expect(result.items).toEqual([]);
+  });
+
   it("drops an item that cites nothing at all", () => {
     const { byLabel } = material(2);
     const result = sanitizeFindingItems(
