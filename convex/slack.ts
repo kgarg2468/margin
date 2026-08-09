@@ -887,9 +887,17 @@ export const boundaryPayload = internalQuery({
       return null;
     }
 
+    // "Someone", not the "A lab member" this module uses for a presenter or an
+    // approver. These names are fed to the digest engine, whose contract names
+    // this fallback and whose lines are written around it — "Someone marked the
+    // same passage" reads as English where "A lab member marked" does not — and
+    // it is the same line `convex/digests.ts` builds for the same lab's mail.
+    // Resolved here rather than through `displayName` so the fallback that runs
+    // is the documented one.
     const names = new Map<Id<"users">, string>();
     for (const authorId of new Set(live.map((a) => a.memberId))) {
-      names.set(authorId, displayName(await ctx.db.get(authorId)));
+      const user = await ctx.db.get(authorId);
+      names.set(authorId, user?.name ?? user?.email ?? "Someone");
     }
 
     const pool: DigestAnnotation<
@@ -900,12 +908,8 @@ export const boundaryPayload = internalQuery({
       id: a._id,
       paperId: a.paperId,
       memberId: a.memberId,
-      // "Someone", not the "A lab member" this module uses for a presenter or
-      // an approver: this field is fed to the digest engine, whose own contract
-      // names it, and whose lines are written around it — "Someone marked the
-      // same passage" reads as English where "A lab member marked" does not.
-      // The same line should not read one way in a lab's mail and another in
-      // their channel.
+      // `names` was built from these very ids, so the fallback is the type
+      // system's, not a behaviour — the reachable one is up there.
       memberName: names.get(a.memberId) ?? "Someone",
       type: a.type,
       pageIndex: a.anchor.pageIndex,
