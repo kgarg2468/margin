@@ -3,7 +3,13 @@ import { api } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
 import { action, mutation, query } from "./_generated/server";
-import { emailIsConfigured, renderEmail, sendEmail } from "./auth";
+import {
+  emailIsConfigured,
+  pause,
+  renderEmail,
+  sendEmail,
+  siteUrl,
+} from "./auth";
 import { getMembership, requirePi, requireUserId } from "./lib/authz";
 import { recordEvent } from "./lib/ledger";
 
@@ -22,6 +28,24 @@ const DEFAULT_MAX_USES = 25;
 const MAX_MAX_USES = 200;
 /** One batch of emailed invitations. Same ceiling as a lab, for the same reason. */
 const MAX_EMAIL_RECIPIENTS = 25;
+
+/**
+ * How many invitations go to Resend at once, and how long the batch waits
+ * between mouthfuls.
+ *
+ * Resend rate-limits a team at ten requests a second. A PI inviting their
+ * whole group used to hand all twenty-five to `Promise.allSettled` in one
+ * breath, which is twenty-five simultaneous POSTs: the first handful are
+ * accepted and the rest come back `429`. Those then surface in `failed` as if
+ * the addresses were bad, so the PI is shown a list of their own labmates and
+ * told Margin could not reach them — and re-sending does the same thing again.
+ *
+ * Five at a time, a beat apart, keeps a full lab under the limit and finishes
+ * in about three seconds. `sendEmail` still retries a `429` on its own; this is
+ * the half that stops provoking one.
+ */
+const SEND_BURST = 5;
+const SEND_BURST_PAUSE_MS = 700;
 
 function randomCode(): string {
   const bytes = new Uint8Array(CODE_LENGTH);
@@ -228,6 +252,56 @@ export function parseRecipients(input: readonly string[]): string[] {
 }
 
 /**
+ * The invitation, as text and as HTML.
+ *
+ * Composed once for the whole batch rather than once per address, because it
+ * is the same message: one code covers the batch, so there is nothing in here
+ * that varies by recipient. Nothing personalised also means nothing that could
+ * accidentally tell one invitee who else was invited.
+ *
+ * Pure and exported so the copy is readable in a test. This is the first thing
+ * anybody outside a lab ever sees of Margin, and a sentence that explains what
+ * the product is has to survive being edited by people who are looking at
+ * something else.
+ */
+export function composeInviteEmail(invitation: {
+  inviter: string;
+  labName: string;
+  code: string;
+  expires: string;
+  url: string;
+}): { subject: string; text: string; html: string } {
+  const what =
+    "Margin is where a lab reads papers together: everyone annotates in the same margin, and the journal club runs off what the group flagged.";
+  const fallback = `Or join with the code ${invitation.code}, which expires on ${invitation.expires}.`;
+
+  return {
+    subject: `${invitation.inviter} invited you to ${invitation.labName} on Margin`,
+    text: [
+      `${invitation.inviter} invited you to ${invitation.labName} on Margin.`,
+      "",
+      what,
+      "",
+      "Open the invitation:",
+      invitation.url,
+      "",
+      fallback,
+      "",
+      "Margin",
+    ].join("\n"),
+    html: renderEmail({
+      heading: `${invitation.inviter} invited you to ${invitation.labName}`,
+      paragraphs: [
+        what,
+        "The link opens Margin and takes you straight into the lab.",
+      ],
+      action: { label: "Join the lab", url: invitation.url },
+      footnotes: [fallback],
+    }),
+  };
+}
+
+/**
  * Mint a code and mail it to people, instead of reading it out in a meeting.
  *
  * The code is the credential either way — this is a delivery channel, not a
@@ -297,6 +371,17 @@ export const inviteByEmail = action({
       );
     }
 
+    // Checked here for the same reason: an invitation is a link, and a
+    // deployment that does not know its own origin can only send a link to
+    // nowhere. Refused up front rather than delivered broken — the code itself
+    // still works, and the message says so.
+    const site = siteUrl();
+    if (site === null) {
+      throw new ConvexError(
+        "This deployment doesn't know its own address (SITE_URL), so an invitation link would go nowhere. Share the code instead.",
+      );
+    }
+
     const recipients = parseRecipients(args.emails);
     if (recipients.length === 0) {
       throw new ConvexError("Enter at least one email address.");
@@ -349,41 +434,30 @@ export const inviteByEmail = action({
     // links to, so the invitation and the sign-in it triggers agree about
     // where Margin lives. `/app` carries the code through the middleware:
     // signed out it becomes `/signin?invite=…` and comes back after auth.
-    const siteUrl = (process.env.SITE_URL ?? "").replace(/\/$/, "");
-    const url = `${siteUrl}/app?invite=${encodeURIComponent(invite.code)}`;
+    const url = `${site}/app?invite=${encodeURIComponent(invite.code)}`;
     const expires = new Date(invite.expiresAt).toISOString().slice(0, 10);
+    const message = composeInviteEmail({
+      inviter,
+      labName: invite.labName,
+      code: invite.code,
+      expires,
+      url,
+    });
 
-    const results = await Promise.allSettled(
-      recipients.map((to) =>
-        sendEmail({
-          to,
-          subject: `${inviter} invited you to ${invite.labName} on Margin`,
-          text: [
-            `${inviter} invited you to ${invite.labName} on Margin.`,
-            "",
-            "Margin is where a lab reads papers together: everyone annotates in the same margin, and the journal club runs off what the group flagged.",
-            "",
-            "Open the invitation:",
-            url,
-            "",
-            `Or join with the code ${invite.code}. It expires on ${expires}.`,
-            "",
-            "Margin",
-          ].join("\n"),
-          html: renderEmail({
-            heading: `${inviter} invited you to ${invite.labName}`,
-            paragraphs: [
-              "Margin is where a lab reads papers together: everyone annotates in the same margin, and the journal club runs off what the group flagged.",
-              "The link opens Margin and takes you straight into the lab.",
-            ],
-            action: { label: "Join the lab", url },
-            footnotes: [
-              `Or join with the code ${invite.code}, which expires on ${expires}.`,
-            ],
-          }),
-        }),
-      ),
-    );
+    // Paced rather than fired all at once — see `SEND_BURST`.
+    const results: PromiseSettledResult<void>[] = [];
+    for (let start = 0; start < recipients.length; start += SEND_BURST) {
+      if (start > 0) {
+        await pause(SEND_BURST_PAUSE_MS);
+      }
+      results.push(
+        ...(await Promise.allSettled(
+          recipients
+            .slice(start, start + SEND_BURST)
+            .map((to) => sendEmail({ to, ...message })),
+        )),
+      );
+    }
 
     // Paired back up by position — `Promise.allSettled` preserves the order of
     // what it was given, so index `i` is `recipients[i]`.

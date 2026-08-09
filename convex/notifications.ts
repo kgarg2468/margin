@@ -8,7 +8,7 @@ import {
   mutation,
   query,
 } from "./_generated/server";
-import { emailIsConfigured, renderEmail, sendEmail } from "./auth";
+import { emailIsConfigured, renderEmail, sendEmail, siteUrl } from "./auth";
 import { getMembership, requireUserId } from "./lib/authz";
 import { notificationKind } from "./schema";
 
@@ -69,6 +69,56 @@ const MAX_PER_ANNOTATION = 64;
 /** Enough of a note to recognise it; not so much that the panel becomes the reader. */
 const SNIPPET_LENGTH = 140;
 
+/**
+ * The most of a subject line an inbox list will show.
+ *
+ * Past this a subject is truncated by the client, at a different place in
+ * every client, and none of them truncate well.
+ */
+const MAX_SUBJECT_LENGTH = 120;
+
+/**
+ * How much of a paper's title one subject line will carry.
+ *
+ * `papers.ts` caps a title at 500 characters, which is generous and correct
+ * for a library row and ruinous for an inbox: "Ada Lovelace mentioned you on
+ * “…”" around a 500-character title is a subject line five hundred and forty
+ * characters long. The truncation lives here rather than at the call site so
+ * it is a property of the message rather than of whichever fixture happened
+ * to be short.
+ */
+const TITLE_IN_SUBJECT = 80;
+
+/**
+ * And how much of a person's name.
+ *
+ * A display name comes from a Google profile or from whatever somebody typed
+ * into the sign-up form, and nothing anywhere bounds it. It is the other
+ * variable component of a subject line, so leaving it unbounded meant the
+ * bound below was really a bound on the *title* alone — which held for the
+ * fixtures and not for a lab with one theatrically-named member in it.
+ *
+ * Forty is past every real name and short enough that it always leaves room
+ * for a recognisable amount of title.
+ */
+const ACTOR_IN_SUBJECT = 40;
+
+/**
+ * At most `limit` characters, with an ellipsis if anything was dropped.
+ *
+ * The ellipsis is counted, not added on top — a "shortened" string longer than
+ * the limit it was shortened to is how a bound stops being one.
+ */
+function shorten(value: string, limit: number): string {
+  if (value.length <= limit) {
+    return value;
+  }
+  if (limit < 1) {
+    return "";
+  }
+  return `${value.slice(0, limit - 1).trimEnd()}…`;
+}
+
 /* -------------------------------------------------------------------------
  * Writing (called from convex/annotations.ts)
  * ---------------------------------------------------------------------- */
@@ -81,7 +131,31 @@ export type NotificationRequest = {
   annotationId: Id<"annotations">;
   paperId: Id<"papers">;
   actorId: Id<"users">;
+  /**
+   * How long to hold this one message before its send is attempted.
+   *
+   * A fan-out's caller knows something this function cannot: how many other
+   * sends it is about to schedule in the same breath. See `EMAIL_STAGGER_MS`.
+   */
+  emailDelayMs?: number;
 };
+
+/**
+ * The gap between one note's outgoing messages.
+ *
+ * A mutation that mentions ten people schedules ten actions, and `runAfter(0)`
+ * means the scheduler starts all of them at once. Each is a POST to Resend,
+ * which rate-limits at ten requests a second per team — so a note naming ten
+ * people plus a reply to its author is eleven requests in one instant, and the
+ * eleventh is a `429` every time. `sendEmail` now waits that out and re-asks,
+ * but a retry is the apology, not the fix: the fix is not to provoke it.
+ *
+ * 150 ms puts a full fan-out at under seven requests a second and finishes the
+ * whole thing in a second and a half — which is nothing at all against mail
+ * that is read minutes later, and is the same bargain `SEND_BURST_PAUSE_MS`
+ * strikes for invitations.
+ */
+export const EMAIL_STAGGER_MS = 150;
 
 /**
  * Tell one person about one note, at most once.
@@ -97,9 +171,13 @@ export type NotificationRequest = {
  *
  * The email is *scheduled*, not sent. A mutation cannot fetch, and inlining a
  * network call into the transaction that writes the annotation would make
- * saving a note as slow and as failable as Resend is. `runAfter(0)` hands it
- * to the scheduler, which runs it after this transaction commits — so mail is
+ * saving a note as slow and as failable as Resend is. `runAfter` hands it to
+ * the scheduler, which runs it after this transaction commits — so mail is
  * never sent for a note that then failed to save.
+ *
+ * `emailDelayMs` is how a fan-out paces itself: the caller staggers what it
+ * schedules so a note naming ten people does not become ten simultaneous POSTs
+ * to a ten-per-second rate limit.
  */
 export async function raiseNotification(
   ctx: MutationCtx,
@@ -158,9 +236,11 @@ export async function raiseNotification(
   // job that would only throw is a failed function in the log every time
   // anybody is mentioned.
   if (emailIsConfigured()) {
-    await ctx.scheduler.runAfter(0, internal.notifications.deliverEmail, {
-      notificationId,
-    });
+    await ctx.scheduler.runAfter(
+      Math.max(request.emailDelayMs ?? 0, 0),
+      internal.notifications.deliverEmail,
+      { notificationId },
+    );
   }
   return true;
 }
@@ -518,6 +598,81 @@ export const emailPayload = internalQuery({
 });
 
 /**
+ * The message itself, as text and as HTML, from nothing but its facts.
+ *
+ * Pure and exported so the copy can be read back in a test — the wording of
+ * what lands in a labmate's inbox is product surface, and it is the one
+ * surface nobody on the team sees again after they write it. Both parts say
+ * the same sentence in the same order: a mail client that shows the plain part
+ * is not being shown a worse email, just an unstyled one.
+ *
+ * Two kinds and two openings. "Mentioned you" and "replied to your note" are
+ * different pieces of news — the first says this was addressed to you in
+ * particular, the second that something landed under something of yours — and
+ * collapsing them into one line would lose the only thing the subject is for.
+ */
+export function composeNotificationEmail(message: {
+  kind: Doc<"notifications">["kind"];
+  actorName: string;
+  paperTitle: string;
+  snippet: string;
+  url: string;
+}): { subject: string; text: string; html: string } {
+  // Both variable parts are bounded, and the title's budget is computed from
+  // the sentence it is going into rather than guessed.
+  //
+  // Guessing is what went wrong the first time. A flat 80-character title cap
+  // keeps a *mention* subject inside the limit and puts a *reply* subject at
+  // exactly 120 — "replied to your note on" is seven characters longer than
+  // "mentioned you on", which is precisely the margin. So the frame is
+  // measured with an empty title and the title takes whatever is left, which
+  // means the bound holds for both kinds now and for a third one written
+  // later by somebody who never read this comment.
+  //
+  // `cleanTitle` has already collapsed every run of whitespace, so there is no
+  // CR or LF in here to worry a mail header about.
+  const actor = shorten(message.actorName, ACTOR_IN_SUBJECT);
+  const subjectWith = (paper: string) =>
+    message.kind === "mention"
+      ? `${actor} mentioned you on “${paper}”`
+      : `${actor} replied to your note on “${paper}”`;
+  const title = shorten(
+    message.paperTitle,
+    Math.min(TITLE_IN_SUBJECT, MAX_SUBJECT_LENGTH - 1 - subjectWith("").length),
+  );
+
+  const subject = subjectWith(title);
+  const opening =
+    message.kind === "mention"
+      ? `${actor} mentioned you in the margin of “${title}”.`
+      : `${actor} answered your note in the margin of “${title}”.`;
+  const because =
+    "You're getting this because you're in this lab and this note was addressed to you.";
+
+  return {
+    subject,
+    text: [
+      opening,
+      "",
+      message.snippet,
+      "",
+      "Open the margin:",
+      message.url,
+      "",
+      because,
+      "",
+      "Margin",
+    ].join("\n"),
+    html: renderEmail({
+      heading: opening,
+      paragraphs: [message.snippet],
+      action: { label: "Open the margin", url: message.url },
+      footnotes: [because],
+    }),
+  };
+}
+
+/**
  * One notification, as one plain email.
  *
  * On-brand through `renderEmail`, which means: a sheet of paper with a rule
@@ -531,10 +686,11 @@ export const emailPayload = internalQuery({
  * person once ever, and a lab that generates enough of these to want batching
  * has a different problem than an email problem.
  *
- * Failures are logged, not thrown. A scheduled action that throws is retried
- * and re-logged, and there is nothing a second attempt at a rejected address
- * would do differently; the in-app notification is already delivered and is
- * the channel of record.
+ * Failures are logged, not thrown. `sendEmail` has already waited out and
+ * re-asked anything worth re-asking — a rate limit, a bad minute at Resend —
+ * so what reaches here is a rejected address or a misconfigured key, and there
+ * is nothing a second attempt at either would do differently. The in-app
+ * notification is already delivered and is the channel of record.
  */
 export const deliverEmail = internalAction({
   args: { notificationId: v.id("notifications") },
@@ -548,6 +704,18 @@ export const deliverEmail = internalAction({
       return null;
     }
 
+    // A deployment that can send mail but does not know its own origin would
+    // send a real message with `href="/app/library/…"` in it — a relative URL,
+    // which resolves to nothing at all in a mail client. Better to stay in the
+    // app, where the notification already is, and say why in the log.
+    const site = siteUrl();
+    if (site === null) {
+      console.error(
+        "SITE_URL is not set on this deployment, so notification mail would carry a link to nowhere. Nothing was sent; the in-app notification stands.",
+      );
+      return null;
+    }
+
     const payload = await ctx.runQuery(internal.notifications.emailPayload, {
       notificationId: args.notificationId,
     });
@@ -555,41 +723,16 @@ export const deliverEmail = internalAction({
       return null;
     }
 
-    const siteUrl = (process.env.SITE_URL ?? "").replace(/\/$/, "");
-    const url = `${siteUrl}/app/library/${payload.paperId}/read`;
-
-    const subject =
-      payload.kind === "mention"
-        ? `${payload.actorName} mentioned you on “${payload.paperTitle}”`
-        : `${payload.actorName} replied to your note on “${payload.paperTitle}”`;
-    const opening =
-      payload.kind === "mention"
-        ? `${payload.actorName} mentioned you in the margin of “${payload.paperTitle}”.`
-        : `${payload.actorName} answered your note in the margin of “${payload.paperTitle}”.`;
+    const message = composeNotificationEmail({
+      kind: payload.kind,
+      actorName: payload.actorName,
+      paperTitle: payload.paperTitle,
+      snippet: payload.snippet,
+      url: `${site}/app/library/${payload.paperId}/read`,
+    });
 
     try {
-      await sendEmail({
-        to: payload.to,
-        subject,
-        text: [
-          opening,
-          "",
-          payload.snippet,
-          "",
-          "Open the margin:",
-          url,
-          "",
-          "Margin",
-        ].join("\n"),
-        html: renderEmail({
-          heading: opening,
-          paragraphs: [payload.snippet],
-          action: { label: "Open the margin", url },
-          footnotes: [
-            "You're getting this because you're in this lab and this note was addressed to you.",
-          ],
-        }),
-      });
+      await sendEmail({ to: payload.to, ...message });
     } catch (caught) {
       // The in-app notification is already written and is the delivery of
       // record; mail is the courtesy copy. Losing it is not worth a retry
