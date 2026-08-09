@@ -10,6 +10,7 @@
 
 import type * as annotations from "../annotations.js";
 import type * as auth from "../auth.js";
+import type * as briefs from "../briefs.js";
 import type * as digests from "../digests.js";
 import type * as http from "../http.js";
 import type * as invites from "../invites.js";
@@ -34,6 +35,7 @@ import type {
 declare const fullApi: ApiFromModules<{
   annotations: typeof annotations;
   auth: typeof auth;
+  briefs: typeof briefs;
   digests: typeof digests;
   http: typeof http;
   invites: typeof invites;

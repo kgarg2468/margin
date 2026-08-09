@@ -1,4 +1,5 @@
 import { ConvexError, v } from "convex/values";
+import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import {
   internalMutation,
@@ -420,6 +421,30 @@ export const buildSessionPrep = internalMutation({
       }
     } else if (session.status !== "live") {
       return null;
+    }
+
+    // The presenter's brief rides the same boundary rather than carrying a
+    // scheduled job of its own. `convex/sessions.ts` already keeps exactly one
+    // handle per session and already re-aims it when a meeting moves and calls
+    // it off when a meeting is cancelled; a second handle would be a second
+    // field and a second way for a lab that rescheduled to get an artifact for
+    // the time it moved away from. The guard above has just established that
+    // this boundary is still wanted, and the brief inherits that — then checks
+    // it again for itself, because `runAfter(0)` is a separate transaction.
+    //
+    // Prep only. A brief is read *before* the meeting; by the session-start
+    // boundary the presenter is already standing up, and re-assembling then
+    // would replace the agenda they walked in with.
+    //
+    // Queued rather than built inline so that an assembly which fails, or a
+    // paper with nothing in its margin, cannot cost the lab the digests below.
+    // Everything after this point is digest policy and the brief does not
+    // inherit any of it.
+    if (args.boundary === "session-prep") {
+      await ctx.scheduler.runAfter(0, internal.briefs.buildForSession, {
+        sessionId: args.sessionId,
+        expectedScheduledAt: args.expectedScheduledAt,
+      });
     }
 
     const paper = await ctx.db.get(session.paperId);
