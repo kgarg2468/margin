@@ -66,13 +66,28 @@ export function fuzzyScore(query: string, target: string): number | null {
  * adding a synonym can only ever help a query that mentions it; it cannot
  * quietly float a command up the list for every other query too.
  *
- * The sort is `Array.prototype.sort`, which is stable, so equal scores — every
- * score, when the query is empty — keep the order the caller declared.
+ * Equal scores are broken by the shorter label, because the same number of
+ * points spread over fewer characters is the closer match: `gtl` is three
+ * word-start hits on both "Go to lab home" and "Go to Library" and scores 9 on
+ * each, but it is the whole of "Go to Library"'s initials and only part of the
+ * other's. Without this, an initialism that two commands share resolved by
+ * declaration order, which is invisible to the person typing.
+ *
+ * The tiebreak is skipped when the query is empty, and that guard is the load-
+ * bearing half of it. `fuzzyScore` returns 0 for every command in that case —
+ * "no opinion", not "all equally good" — so sorting those by length would
+ * reorder the list the palette shows the moment it opens, and the shortest
+ * label in the app is "Sign out". Nobody's default first command is signing
+ * out. With no query the authored order stands.
+ *
+ * `Array.prototype.sort` is stable, so anything still tied after both rules
+ * keeps the order the caller declared.
  */
 export function rankCommands<T extends { label: string; keywords?: string[] }>(
   query: string,
   items: T[],
 ): T[] {
+  const tiebreak = query.length > 0;
   return items
     .map((item) => {
       const scores = [item.label, ...(item.keywords ?? [])]
@@ -81,7 +96,10 @@ export function rankCommands<T extends { label: string; keywords?: string[] }>(
       return { item, score: scores.length ? Math.max(...scores) : null };
     })
     .filter((x): x is { item: T; score: number } => x.score !== null)
-    .sort((a, b) => b.score - a.score)
+    .sort((a, b) => {
+      if (a.score !== b.score) return b.score - a.score;
+      return tiebreak ? a.item.label.length - b.item.label.length : 0;
+    })
     .map((x) => x.item);
 }
 

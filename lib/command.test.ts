@@ -33,6 +33,29 @@ describe("rankCommands", () => {
     const items = [{ label: "Go to Library", keywords: ["papers"] }];
     expect(rankCommands("papers", items)).toHaveLength(1);
   });
+  it("breaks score ties by shorter label", () => {
+    const items = [
+      { label: "Go to lab home" },
+      { label: "Go to Library" },
+      { label: "Go to Sessions" },
+    ];
+    // `?.` rather than `[0].label`: `noUncheckedIndexedAccess` is on, and an
+    // empty result still fails this assertion — it just fails it as `undefined`
+    // instead of as a TypeError.
+    expect(rankCommands("gtl", items)[0]?.label).toBe("Go to Library");
+  });
+  it("leaves the authored order alone when there is no query", () => {
+    const items = [
+      { label: "Go to lab home" },
+      { label: "Go to Library" },
+      { label: "Sign out" },
+    ];
+    expect(rankCommands("", items).map((i) => i.label)).toEqual([
+      "Go to lab home",
+      "Go to Library",
+      "Sign out",
+    ]);
+  });
 });
 
 describe("shortcutLabel", () => {
