@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { pageKeyTarget, tabStopPage } from "./page-navigation";
+import {
+  offerIsTabbable,
+  pageKeyTarget,
+  tabStopPage,
+} from "./page-navigation";
 
 const PAPER = { pageCount: 37 };
 
@@ -55,5 +59,19 @@ describe("where the one stop sits", () => {
 
   it("gives an unloaded paper no stop at all rather than page zero", () => {
     expect(tabStopPage({ current: 0, pageCount: 0 })).toBeNull();
+  });
+});
+
+describe("the offer to annotate a selection", () => {
+  it("is a stop while its selection is the one on screen", () => {
+    expect(offerIsTabbable({ onPageBeingRead: true })).toBe(0);
+  });
+
+  it("leaves the tab order once the reader has paged away from it", () => {
+    // Measured: left tabbable, it sat off-screen at viewport top −739, Tab
+    // reached it, focusing it scrolled the paper back a page, and the paper's
+    // own roving stop — its ancestor, and so ahead of it in the order — was
+    // skipped. One stale affordance ate the one stop the paper has.
+    expect(offerIsTabbable({ onPageBeingRead: false })).toBe(-1);
   });
 });

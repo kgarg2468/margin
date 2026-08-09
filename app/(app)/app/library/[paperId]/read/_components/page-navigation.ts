@@ -51,6 +51,28 @@ export function tabStopPage({
   return Math.min(current, pageCount - 1);
 }
 
+/**
+ * Whether the "Annotate selection" offer is somewhere Tab can reach.
+ *
+ * The offer is mounted by the page the selection is on and stays mounted while
+ * the selection lives — which is right, because the selection is still there to
+ * be annotated, and wrong the moment the reader has paged away from it. Left at
+ * `tabIndex 0` it did three things at once, all measured: it added a stop to a
+ * paper that is meant to have exactly one; focusing it scrolled the paper back
+ * a page, because a browser scrolls what it focuses; and since its own page
+ * wrapper is its ancestor, the paper's roving stop was then behind it in the
+ * tab order and got skipped. So the offer did not merely add a stop — it ate
+ * the paper's.
+ *
+ * The rule is the one the roving stop already states: a page that is not the
+ * page being read has nothing tabbable on it. The offer stays mounted and
+ * stays clickable — the selection is live and a pointer can still reach it if
+ * the reader scrolls back — it just stops being on the way to anywhere.
+ */
+export function offerIsTabbable({ onPageBeingRead }: { onPageBeingRead: boolean }): 0 | -1 {
+  return onPageBeingRead ? 0 : -1;
+}
+
 export function pageKeyTarget(
   key: string,
   { current, pageCount }: { current: number; pageCount: number },

@@ -22,7 +22,11 @@ import { suppressNextClick } from "./click-suppressor";
 import { unionOfRects } from "./draft-box";
 import { ruleOpacity, washOpacity } from "./mark-alpha";
 import { typeStyle } from "./ontology";
-import { PAGE_KEYS_HINT_ID, pageKeyTarget } from "./page-navigation";
+import {
+  PAGE_KEYS_HINT_ID,
+  offerIsTabbable,
+  pageKeyTarget,
+} from "./page-navigation";
 import styles from "./reader.module.css";
 import type {
   AnchorState,
@@ -870,6 +874,11 @@ export function PdfPage({
         <button
           type="button"
           data-annotate=""
+          // Only while the selection it offers is still the one on screen. A
+          // page the reader has left keeps its offer — the selection is live
+          // and a pointer can still take it up — but it is not on the way to
+          // anywhere. See `offerIsTabbable`.
+          tabIndex={offerIsTabbable({ onPageBeingRead: tabStop })}
           // Losing the selection to the button's own focus would defeat it.
           onMouseDown={(event) => event.preventDefault()}
           onClick={(event) => {
