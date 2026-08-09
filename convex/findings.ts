@@ -10,6 +10,7 @@ import {
   redactWithdrawnItems,
   resolveSubjectForRead,
   stillSharedAmong,
+  subjectOf,
   subjectRef,
 } from "./delegations";
 import { delegationAgentKind } from "./schema";
@@ -163,6 +164,12 @@ export const newestForSubject = query({
  *
  * The history read: a delegation row is permanent, so what it returned stays
  * reachable even once a newer run has superseded it.
+ *
+ * Permanent is not the same as unconditional. The subject gate runs here too,
+ * because a delegation id is a bearer token by accident — anyone who saw the
+ * run start is holding one, and without this check a question its author later
+ * took private would stay readable to exactly them. The same fence
+ * `newestForSubject` and `delegations.listForSubject` stand behind.
  */
 export const forDelegation = query({
   args: { delegationId: v.id("delegations") },
@@ -174,6 +181,13 @@ export const forDelegation = query({
       return null;
     }
     if ((await getMembership(ctx, delegation.labId, userId)) === null) {
+      return null;
+    }
+    const ref = subjectOf(delegation);
+    if (ref === null) {
+      return null;
+    }
+    if (!(await resolveSubjectForRead(ctx, ref, delegation.labId))) {
       return null;
     }
     const finding = await ctx.db
