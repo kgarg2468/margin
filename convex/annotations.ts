@@ -800,66 +800,35 @@ export const listForPaper = query({
     // Counts and `mine` therefore come from reads whose size is fixed by the
     // paper's notes rather than by the lab's size, and the only read that can
     // run out is the one whose loss is a shorter list of names.
-    // Both exact reads take the same shape, and it rests on one property of a
-    // bounded read: **a read that comes back short has returned everything.**
     //
-    // So the paper-wide index is asked first, sized to every note this query
-    // could return. If it comes back under that ceiling there is nothing else
-    // in the table to have missed, and one read has produced the exact answer.
-    // Only when it comes back *full* is anything unaccounted for — and only
-    // then is it worth a read per note, which is the one shape whose
-    // completeness does not depend on how much else sits on the paper.
+    // All three are plain capped reads, and what makes that enough is one
+    // property a bounded read has for free: **a read that comes back short has
+    // returned everything.** Under the ceiling there is nothing left in the
+    // table to have missed, so the counts are exact by construction — which is
+    // the case every real margin is in, because a tally row exists per (note,
+    // kind) and a member's own marks per (note, kind) for one member, so both
+    // sets are bounded by the paper's content rather than by the lab's size.
     //
-    // That fallback matters because the paper-wide indexes are not restricted
-    // to notes the caller can see: another member's private note can carry
-    // marks (its author's own), and enough of those would crowd the returned
-    // notes' rows past the ceiling. Counts for notes this query does not
-    // return are irrelevant, but they are not free — they occupy the read.
-    const tallyRows = await (async () => {
-      const page = await ctx.db
-        .query("reactionTallies")
-        .withIndex("by_paper", (q) => q.eq("paperId", paper._id))
-        .take(MAX_REACTION_ROWS_PER_PAPER);
-      if (page.length < MAX_REACTION_ROWS_PER_PAPER) {
-        return page;
-      }
-      const exact: Doc<"reactionTallies">[] = [];
-      for (const annotation of annotations) {
-        // At most one row per kind, so this take is the whole set, not a page.
-        exact.push(
-          ...(await ctx.db
-            .query("reactionTallies")
-            .withIndex("by_annotation_and_kind", (q) =>
-              q.eq("annotationId", annotation._id),
-            )
-            .take(REACTION_KIND_COUNT)),
-        );
-      }
-      return exact;
-    })();
-    const ownMarks = await (async () => {
-      const page = await ctx.db
-        .query("reactions")
-        .withIndex("by_paper_and_member", (q) =>
-          q.eq("paperId", paper._id).eq("memberId", userId),
-        )
-        .take(MAX_REACTION_ROWS_PER_PAPER);
-      if (page.length < MAX_REACTION_ROWS_PER_PAPER) {
-        return page;
-      }
-      const exact: Doc<"reactions">[] = [];
-      for (const annotation of annotations) {
-        exact.push(
-          ...(await ctx.db
-            .query("reactions")
-            .withIndex("by_annotation_and_member_and_kind", (q) =>
-              q.eq("annotationId", annotation._id).eq("memberId", userId),
-            )
-            .take(REACTION_KIND_COUNT)),
-        );
-      }
-      return exact;
-    })();
+    // A read that comes back *full* is not chased. An earlier version fell
+    // back to a read per returned note, which bought exactness in a regime
+    // nobody is in by issuing thousands of indexed queries in one transaction
+    // — past Convex's scan budget, so the margin would throw rather than
+    // render, which is a worse answer than an imperfect one. Reaching these
+    // ceilings means the paper holds more marked notes than the query returns
+    // at all, and the note list is already truncated and already says so. The
+    // honest behaviour there is to serve what the reads produced and disclose
+    // it through the flag the rail is already rendering, not to spend the
+    // whole transaction pretending the ceiling is not there.
+    const tallyRows = await ctx.db
+      .query("reactionTallies")
+      .withIndex("by_paper", (q) => q.eq("paperId", paper._id))
+      .take(MAX_REACTION_ROWS_PER_PAPER);
+    const ownMarks = await ctx.db
+      .query("reactions")
+      .withIndex("by_paper_and_member", (q) =>
+        q.eq("paperId", paper._id).eq("memberId", userId),
+      )
+      .take(MAX_REACTION_ROWS_PER_PAPER);
     const roster = await ctx.db
       .query("reactions")
       .withIndex("by_paper", (q) => q.eq("paperId", paper._id))
@@ -944,15 +913,26 @@ export const listForPaper = query({
       }));
     }
 
-    // Only the notes. The marks carry no term here any more: counts and `mine`
-    // are exact for every note this returns, whichever path produced them, so
-    // there is nothing about them left to disclose. The roster read never had
-    // a claim on this either — running it short costs names, not completeness,
-    // and saying "there is more" over a whole margin would be the query lying
+    // The notes, and the two reads that have to be exact to be worth drawing.
+    //
+    // A tally or own-mark read that came back full is a margin whose counts
+    // may understate and whose chips may draw unpressed, and that is the one
+    // thing a count must not do quietly. It cannot be fixed here — see above —
+    // so it is disclosed here instead, through the flag that already means
+    // "what you are looking at is not all of it". In practice the note reads
+    // will have tripped this first: both sets are bounded by the paper's
+    // content, so reaching their ceiling takes more marked notes than this
+    // query returns at all.
+    //
+    // The roster read is deliberately absent. Running it short costs which
+    // names a tooltip lists, never a count and never `mine`, and claiming
+    // "there is more" over an otherwise whole margin would be the query lying
     // in the other direction.
     const truncated =
       shared.length >= MAX_ANNOTATIONS_PER_PAPER ||
-      own.length >= MAX_ANNOTATIONS_PER_PAPER;
+      own.length >= MAX_ANNOTATIONS_PER_PAPER ||
+      tallyRows.length >= MAX_REACTION_ROWS_PER_PAPER ||
+      ownMarks.length >= MAX_REACTION_ROWS_PER_PAPER;
 
     return {
       truncated,
