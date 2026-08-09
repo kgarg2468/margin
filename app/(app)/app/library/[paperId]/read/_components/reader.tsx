@@ -162,10 +162,58 @@ export function Reader({
     [],
   );
 
+  /**
+   * The page to put the ring back on when the composer goes.
+   *
+   * A ref rather than state because it is not a thing to render — and because
+   * it has to be readable from the commit that removes the sheet, which is the
+   * same commit that sets it.
+   */
+  const returningTo = useRef<number | null>(null);
+
+  /**
+   * Closing the note, from any of the three ways out.
+   *
+   * Save, Discard and an Escape on an empty box all used to leave focus on
+   * `<body>`, which meant the next Tab restarted from the top of the page —
+   * undoing the paper's one roving stop on exactly the path it was built for.
+   * A reader who selected a passage from the keyboard was returned to the
+   * navigation bar for their trouble.
+   *
+   * So focus goes back where the note came from: the page the passage is on,
+   * which is the stop that reader left from. The stop itself moves there too,
+   * or the paper would have its ring in one place and its tab order pointing
+   * at another.
+   */
+  const closeDraft = useCallback((pageIndex: number) => {
+    returningTo.current = pageIndex;
+    setCurrentPage(pageIndex);
+    setDraft(null);
+  }, []);
+
   useEffect(() => {
-    if (draft === null) {
-      setDraftBox(null);
+    if (draft !== null) {
+      return;
     }
+    setDraftBox(null);
+    const page = returningTo.current;
+    if (page === null) {
+      return;
+    }
+    returningTo.current = null;
+    const element = pageElements.current.get(page);
+    if (element === undefined) {
+      return;
+    }
+    // A frame late, and it has to be: the sheet's own teardown moves focus
+    // after this commit paints, and a `focus()` called before that is the one
+    // that loses. `preventScroll` because the passage is already on screen —
+    // the reader has been looking at it — and a scroll here would only take
+    // them somewhere they did not ask to go.
+    const frame = requestAnimationFrame(() =>
+      element.focus({ preventScroll: true }),
+    );
+    return () => cancelAnimationFrame(frame);
   }, [draft]);
 
   // Every activation in the reader goes through this rather than through
@@ -1352,7 +1400,7 @@ export function Reader({
               sessionId={sessionId}
               draft={draft}
               anchor={composerAnchor}
-              onClose={() => setDraft(null)}
+              onClose={() => closeDraft(draft.anchor.pageIndex)}
             />
           )}
         </div>
