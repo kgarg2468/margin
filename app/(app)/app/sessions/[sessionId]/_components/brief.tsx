@@ -2,6 +2,7 @@
 
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import { citationNumbering } from "@/lib/citations/numbering";
 import { GOLD_PAIRS } from "@/lib/digest/engine";
 import { ownPrivateNotes, tallyContributors } from "@/lib/brief/prep";
 import { cleanQuote } from "@/lib/quotes";
@@ -22,7 +23,8 @@ import { readableError } from "../../../_components/errors";
 import { typeStyle } from "../../../library/[paperId]/read/_components/ontology";
 import type { AnnotationView } from "../../../library/[paperId]/read/_components/types";
 import type { SessionDetail } from "./manage";
-import { annotationAnchorId } from "./session-board";
+import { CitationRef } from "./session-board";
+import { anchoredIds, groupSessionNotes } from "./session-notes";
 
 type Brief = NonNullable<FunctionReturnType<typeof api.briefs.getForSession>>;
 type Section = Brief["sections"][number];
@@ -83,6 +85,20 @@ type Item = Section["items"][number];
  * call `redactWithdrawn` makes in `convex/briefs.ts`, and it has to be the same
  * one, or the client would draw a live citation link and an ontology label
  * around text the server had already replaced.
+ *
+ * ## The numbers, and which of them are links
+ *
+ * A citation is numbered once for the whole running order, by first appearance
+ * (`lib/citations/numbering.ts`), so a note quoted in the collisions and again
+ * under open questions carries the same number in both places — which is the
+ * only thing "Note 4" is good for. Held-back lines take no number, so the
+ * sequence a presenter reads has no holes in it.
+ *
+ * Only some of those numbers are links, and that is the honest answer rather
+ * than a limitation: the brief reaches across the paper's whole margin, back
+ * into earlier meetings, and the board on this page draws only what was
+ * written in *this* session. A citation the board has an anchor for scrolls to
+ * it; the rest are numbers. A number that scrolls nowhere must not promise to.
  */
 
 /** The ink each lens is written in. Ontology colour where the section has one. */
@@ -127,6 +143,14 @@ export function PresenterBrief({
   );
   const contributors = useMemo(() => tallyContributors(rows), [rows]);
   const ownNotes = useMemo(() => ownPrivateNotes(rows), [rows]);
+  // Which notes the board further down the page has really drawn an anchor
+  // for. A brief draws on the paper's whole margin — carried-over lines cite
+  // notes from meetings months ago — so most of what it cites is nowhere on
+  // this screen, and those citations are numbers rather than links.
+  const anchored = useMemo(
+    () => anchoredIds(groupSessionNotes(rows, session._id)),
+    [rows, session._id],
+  );
 
   // Nobody else's business. The server answers `null` for anyone who is not
   // the presenter or the PI; this is the same rule, applied before the panel
@@ -160,6 +184,22 @@ export function PresenterBrief({
     (section) => section.items.length > 0,
   );
   let position = 0;
+
+  // One note, one number, for the whole agenda — folded over the running order
+  // in the order it is read. A line whose citations are not all still shared
+  // is held back whole (see `BriefLine`), so it prints no citation and takes
+  // no number: the sequence a presenter sees runs 1, 2, 3 with no holes in it.
+  const numbering = citationNumbering(
+    stored.flatMap((section) =>
+      section.items.map((item) => ({
+        annotationIds: item.annotationIds.every((id) =>
+          visibleAnnotationIds.has(id),
+        )
+          ? item.annotationIds
+          : [],
+      })),
+    ),
+  );
 
   return (
     <section className="flex flex-col gap-8">
@@ -226,6 +266,8 @@ export function PresenterBrief({
                 position={position}
                 section={section}
                 visibleAnnotationIds={visibleAnnotationIds}
+                numbering={numbering}
+                anchored={anchored}
               />
             );
           })}
@@ -440,10 +482,16 @@ function BriefSection({
   position,
   section,
   visibleAnnotationIds,
+  numbering,
+  anchored,
 }: {
   position: number;
   section: Section;
   visibleAnnotationIds: ReadonlySet<Id<"annotations">>;
+  /** One registry for the whole agenda — see `citationNumbering`. */
+  numbering: ReadonlyMap<Id<"annotations">, number>;
+  /** The notes the board on this page really has an anchor for. */
+  anchored: ReadonlySet<string>;
 }) {
   const ink = SECTION_INK[section.key];
   return (
@@ -465,6 +513,8 @@ function BriefSection({
             item={item}
             ink={ink}
             visibleAnnotationIds={visibleAnnotationIds}
+            numbering={numbering}
+            anchored={anchored}
           />
         ))}
       </ul>
@@ -476,10 +526,14 @@ function BriefLine({
   item,
   ink,
   visibleAnnotationIds,
+  numbering,
+  anchored,
 }: {
   item: Item;
   ink: string;
   visibleAnnotationIds: ReadonlySet<Id<"annotations">>;
+  numbering: ReadonlyMap<Id<"annotations">, number>;
+  anchored: ReadonlySet<string>;
 }) {
   const cited = item.annotationIds.filter((id) => visibleAnnotationIds.has(id));
   // All or nothing, which is the rule the server applies on the way out. A
@@ -521,15 +575,20 @@ function BriefLine({
                   : `Still open since ${formatDate(item.fromSessionAt)}`}
               </Link>
             )}
-            {cited.map((id, position) => (
-              <a
-                key={id}
-                href={`#${annotationAnchorId(id)}`}
-                className="text-accent underline-offset-4 hover:underline"
-              >
-                Note {position + 1}
-              </a>
-            ))}
+            {cited.map((id) => {
+              // The registry was folded over these same lines, so a miss is
+              // impossible — and if it ever became possible, a citation with
+              // no number is not a citation.
+              const number = numbering.get(id);
+              return number === undefined ? null : (
+                <CitationRef
+                  key={id}
+                  id={id}
+                  number={number}
+                  anchored={anchored.has(id)}
+                />
+              );
+            })}
           </p>
         </>
       )}

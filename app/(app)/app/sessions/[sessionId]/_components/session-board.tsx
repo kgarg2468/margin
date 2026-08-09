@@ -8,7 +8,7 @@ import type { AnnotationType } from "../../../library/[paperId]/read/_components
 import { typeStyle } from "../../../library/[paperId]/read/_components/ontology";
 import type { AnnotationView } from "../../../library/[paperId]/read/_components/types";
 import type { PassageGroup, SessionNotes } from "./session-notes";
-import { ofType } from "./session-notes";
+import { AT_THE_PASSAGE, MAX_PASSAGE_CARDS, ofType } from "./session-notes";
 
 /**
  * The collective view of a journal club, in three pieces: a spine, a map, and
@@ -51,17 +51,6 @@ const FLOOR: readonly { type: AnnotationType; heading: string; empty: string }[]
       empty: "Nobody has tied this to their own work yet.",
     },
   ];
-
-/** Types with no column of their own: they belong beside their passage. */
-const AT_THE_PASSAGE: readonly AnnotationType[] = [
-  "hypothesis",
-  "method-note",
-  "definition",
-  "note",
-];
-
-/** A projector should not try to paint four hundred passage cards. */
-const MAX_PASSAGE_CARDS = 40;
 
 /**
  * The session's spine: one segmented rule, a band of ink per annotation type,
@@ -296,7 +285,15 @@ function PassageCard({ passage }: { passage: PassageGroup }) {
       {beside.length > 0 && (
         <ul className="flex flex-col gap-1.5 border-t border-rule pt-2">
           {beside.map((note) => (
-            <li key={note._id}>
+            // The anchor a citation to this note jumps to. Four of the seven
+            // types are only ever drawn here, so without it every synthesis
+            // line resting on a hypothesis or a method note pointed at an id
+            // that was not on the page.
+            <li
+              key={note._id}
+              id={annotationAnchorId(note._id)}
+              className="scroll-mt-24"
+            >
               {note.body.length > 0 ? (
                 <p className="whitespace-pre-wrap font-serif text-sm leading-relaxed text-ink">
                   {note.body}
@@ -445,7 +442,11 @@ function FloorNote({
       {replies.length > 0 && (
         <ul className="mt-2 flex flex-col gap-1.5 border-l border-rule pl-2.5">
           {replies.map((reply) => (
-            <li key={reply._id}>
+            <li
+              key={reply._id}
+              id={annotationAnchorId(reply._id)}
+              className="scroll-mt-24"
+            >
               <p className="whitespace-pre-wrap font-serif text-sm leading-snug text-ink">
                 {reply.body}
               </p>
@@ -463,4 +464,42 @@ function FloorNote({
 /** Where a synthesis item's citation jumps to. */
 export function annotationAnchorId(id: Id<"annotations">): string {
   return `note-${id}`;
+}
+
+/**
+ * One citation, in the write-up and in the brief.
+ *
+ * The number comes from `citationNumbering` — one registry per document, so
+ * "Note 3" is the same note wherever it appears and two lines resting on the
+ * same note say so. The link comes from `anchoredIds`, and only when the board
+ * below has really drawn that note: a citation to a note written in an earlier
+ * session, or past the passage cap, is still worth numbering and still worth
+ * attributing, but it has nowhere on this page to go.
+ *
+ * So it drops the accent with the href rather than keeping the colour and
+ * losing the underline. Accent *is* the link affordance in this app — a
+ * number in it that swallows the click would be the same broken promise in
+ * quieter clothes — and unlinked it simply takes the ink of the metadata line
+ * it sits on.
+ */
+export function CitationRef({
+  id,
+  number,
+  anchored,
+}: {
+  id: Id<"annotations">;
+  number: number;
+  anchored: boolean;
+}) {
+  if (!anchored) {
+    return <span className="tabular-nums">Note {number}</span>;
+  }
+  return (
+    <a
+      href={`#${annotationAnchorId(id)}`}
+      className="text-accent tabular-nums underline-offset-4 hover:underline"
+    >
+      Note {number}
+    </a>
+  );
 }
