@@ -214,9 +214,9 @@ export function ManageSession({ session }: { session: SessionDetail }) {
   // every second, and it costs nothing, because the button was never what
   // decided the answer — a press that races the lapse gets the server's
   // refusal, which says in words that the ten minutes are gone.
+  const startGate = startWindow(session.scheduledAt, now);
   const waitingForWindow =
-    session.status === "scheduled" &&
-    !startWindow(session.scheduledAt, now).canStart;
+    session.status === "scheduled" && !startGate.canStart;
   const ticking = waitingForWindow || undoable !== null;
 
   useEffect(() => {
@@ -283,56 +283,55 @@ export function ManageSession({ session }: { session: SessionDetail }) {
     <section className="flex flex-col gap-4">
       <h2 className={eyebrowClass}>Running it</h2>
 
-      <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
-        {(() => {
-          const window = startWindow(session.scheduledAt, now);
-          return (
-            <div className="flex flex-col gap-1.5">
-              <button
-                type="button"
-                disabled={pending || !window.canStart}
-                className={primaryButtonClass}
-                onClick={() =>
-                  void run(
-                    () => startSession({ sessionId: session._id }),
-                    "That session didn't start.",
-                  )
-                }
-              >
-                {pending ? "Starting…" : "Start session"}
-              </button>
-              {!window.canStart && (
-                <p className="font-sans text-xs text-ink-faint">
-                  Still {awayProse(session.scheduledAt - now)} — you can start
-                  it up to a day early, or reschedule it if the meeting moved.
-                </p>
-              )}
-            </div>
-          );
-        })()}
+      <div className="flex flex-col gap-1.5">
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+          <button
+            type="button"
+            disabled={pending || !startGate.canStart}
+            className={primaryButtonClass}
+            onClick={() =>
+              void run(
+                () => startSession({ sessionId: session._id }),
+                "That session didn't start.",
+              )
+            }
+          >
+            {pending ? "Starting…" : "Start session"}
+          </button>
 
-        <button
-          type="button"
-          aria-expanded={moving}
-          onClick={() => setMoving((open) => !open)}
-          className="font-sans text-sm text-accent underline-offset-4 hover:underline"
-        >
-          {moving ? "Never mind" : "Move it"}
-        </button>
+          <button
+            type="button"
+            aria-expanded={moving}
+            onClick={() => setMoving((open) => !open)}
+            className="font-sans text-sm text-accent underline-offset-4 hover:underline"
+          >
+            {moving ? "Never mind" : "Move it"}
+          </button>
 
-        <ConfirmAction
-          label="Cancel session"
-          confirmLabel="Call it off"
-          cancelLabel="Keep it"
-          tone="faint"
-          size="sm"
-          run={() =>
-            run(async () => {
-              await cancelSession({ sessionId: session._id });
-              announceMove("cancelled", session._id);
-            }, "That session didn't cancel.")
-          }
-        />
+          <ConfirmAction
+            label="Cancel session"
+            confirmLabel="Call it off"
+            cancelLabel="Keep it"
+            tone="faint"
+            size="sm"
+            run={() =>
+              run(async () => {
+                await cancelSession({ sessionId: session._id });
+                announceMove("cancelled", session._id);
+              }, "That session didn't cancel.")
+            }
+          />
+        </div>
+        {/* Under the whole row, not tucked inside Start's box: the hint names
+            both start and reschedule, and a column wrapped around one button
+            stretched it to the paragraph's width and pushed its siblings off
+            its line. */}
+        {!startGate.canStart && (
+          <p className="font-sans text-xs text-ink-faint">
+            Still {awayProse(session.scheduledAt - now)} — you can start it up
+            to a day early, or reschedule it if the meeting moved.
+          </p>
+        )}
       </div>
 
       {moving && (
