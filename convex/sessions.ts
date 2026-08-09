@@ -885,12 +885,26 @@ export const reopenSession = mutation({
  * lost the boundary it was scheduled with, and nobody finds out until the
  * morning of the meeting when the digest doesn't arrive.
  *
- * A restored session whose hour has already passed gets no job, which is the
- * rule `createSession` enforces from the other side: `cleanScheduledAt` will
- * not put a meeting in the past on the calendar at all, so nothing here should
- * arm a "coming up in two hours" digest about yesterday. The same clock-skew
- * grace applies, so "this afternoon" does not become the past because a laptop
- * is three minutes fast.
+ * What gets re-armed is the boundary, not the meeting. A job is queued only
+ * when T−2h is *itself* still ahead — not merely when the meeting is — because
+ * inside the two-hour window the boundary has already fired, and arming it
+ * again would post the lab's prep to Slack a second time. `digests` dedupes
+ * exactly by its delivered-set and an approved brief is protected, but the
+ * Slack channel post has no posted-once guard of its own, so the duplicate
+ * would be real and visible to everyone in the room.
+ *
+ * The accepted cost: a cancel and a restore that straddle the exact T−2h
+ * moment — inside the same ten-minute undo window — lose their prep digest.
+ * That is strictly narrower than the double post it replaces, and it fails
+ * toward silence, which is the direction every delivery rider in this codebase
+ * chooses when it has to choose. Whoever is that late still gets the
+ * session-start refresh, which is the boundary that lies ahead.
+ *
+ * A restored session whose hour has already passed therefore gets no job
+ * either, which is the rule `createSession` enforces from the other side:
+ * `cleanScheduledAt` will not put a meeting in the past on the calendar at
+ * all, so nothing here should arm a "coming up in two hours" digest about
+ * yesterday.
  *
  * And it is held to the same calendar ceiling as scheduling one, because it
  * puts the same row back in the same list — see the check below for the way
@@ -932,11 +946,15 @@ export const restoreSession = mutation({
       );
     }
 
-    const stillAhead = session.scheduledAt >= Date.now() - CLOCK_SKEW_GRACE_MS;
+    // The boundary, not the meeting — see the note above. `schedulePrepDigest`
+    // answers a boundary in the past by running the job a minute from now,
+    // which is precisely the second Slack post this is avoiding, so the
+    // question has to be asked here rather than left to it.
+    const boundaryAhead = session.scheduledAt - PREP_LEAD_MS > Date.now();
     await ctx.db.patch(session._id, {
       status: "scheduled",
       cancelledAt: undefined,
-      prepDigestJobId: stillAhead
+      prepDigestJobId: boundaryAhead
         ? await schedulePrepDigest(ctx, session._id, session.scheduledAt)
         : undefined,
     });

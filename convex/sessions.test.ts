@@ -345,6 +345,28 @@ describe("restoreSession", () => {
     expect((await sessionRow(ctx, sessionId)).prepDigestJobId).toBeDefined();
   });
 
+  it("arms nothing once T−2h has passed, even with the meeting still ahead", async () => {
+    // The boundary is what gets re-armed, not the meeting. An hour out, T−2h
+    // is behind the lab and the prep digest has already gone — `digests`
+    // dedupes its own delivered-set, but the Slack channel post has no
+    // posted-once guard, so re-arming here would put the lab's prep in the
+    // channel twice. Losing the prep for a cancel/restore pair that straddles
+    // T−2h is the accepted cost: it fails toward silence, and the
+    // session-start refresh is still ahead.
+    const { ctx, seed } = await world();
+    const sessionId = await seedSession(ctx, seed, {
+      status: "cancelled",
+      scheduledAt: Date.now() + HOUR,
+      cancelledAt: Date.now() - MINUTE,
+    });
+
+    await restore(ctx, sessionId);
+
+    const session = await sessionRow(ctx, sessionId);
+    expect(session.status).toBe("scheduled");
+    expect(session.prepDigestJobId).toBeUndefined();
+  });
+
   it("arms nothing for a meeting whose time has already passed", async () => {
     // Same call `createSession` refuses outright: there is no prep left to do
     // for a session whose hour is behind the lab, and a job armed now would
