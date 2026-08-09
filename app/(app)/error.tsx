@@ -1,7 +1,9 @@
 "use client";
 
+import { recoverSession } from "@/lib/auth/session-recovery";
 import { primaryButtonClass, secondaryButtonClass } from "@/lib/ui";
-import { useEffect } from "react";
+import { useAuthActions } from "@convex-dev/auth/react";
+import { useEffect, useState } from "react";
 
 /**
  * The boundary for the authenticated shell itself.
@@ -22,6 +24,12 @@ export default function AuthedError({
   error: Error & { digest?: string };
   reset: () => void;
 }) {
+  // This boundary renders inside `ConvexAuthNextjsProvider`, so the sign-out
+  // the rail offers is available here too — and here it matters more, because
+  // this is the page a reader reaches when the session is the thing that broke.
+  const { signOut } = useAuthActions();
+  const [recovering, setRecovering] = useState(false);
+
   // Next's own pattern. Without it the boundary is silent in production: the
   // reader sees the copy, we see nothing, and the one failure most likely to
   // land here is the one hardest to reproduce on a laptop.
@@ -47,8 +55,8 @@ export default function AuthedError({
           Try again
         </button>
         {/*
-          A plain anchor, not `<Link>`, and for exactly the reason the rail's
-          sign-out is one: this has to be a document navigation.
+          Sign out first, then a document navigation — not `<Link>`, and for
+          exactly the reason the rail's sign-out is one.
 
           `reset()` re-renders the same tree against the same client, and on an
           expired session the query store still holds the recorded failure —
@@ -57,10 +65,38 @@ export default function AuthedError({
           the JS context away with the poisoned store in it, so the next attempt
           starts from nothing. `<Link>` would keep both and offer a way out that
           isn't one.
+
+          The plain `<a>` this used to be was half the fix: it destroyed the
+          store but left the stale tokens in place, so `/signin` opened already
+          "authenticated" against a session the backend had stopped trusting
+          and the reader was pushed straight back into the same failure.
+          `signOut()` clears those tokens, and `recoverSession` holds the two
+          in order — and sends them to a `/signin` carrying the flag that tells
+          the middleware not to bounce them off an auth cookie a failed
+          sign-out request left behind.
+
+          That flag is public, though, and the page it lands on will finish
+          the job by signing out again. So the press also leaves a marker in
+          this tab's `sessionStorage` on the way out, and the far side wants
+          both. Origin-scoped storage is the point: a link from anywhere else
+          can put a reader on that URL, but only this button can leave the
+          note that makes it mean anything.
         */}
-        <a href="/signin" className={secondaryButtonClass}>
-          Sign in again
-        </a>
+        <button
+          type="button"
+          disabled={recovering}
+          onClick={() => {
+            setRecovering(true);
+            void recoverSession({
+              signOut,
+              storage: () => window.sessionStorage,
+              navigate: (destination) => window.location.assign(destination),
+            });
+          }}
+          className={secondaryButtonClass}
+        >
+          {recovering ? "Signing out…" : "Sign in again"}
+        </button>
       </div>
     </div>
   );

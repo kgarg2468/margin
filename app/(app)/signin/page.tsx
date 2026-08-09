@@ -3,8 +3,12 @@
 import { useAuthActions } from "@convex-dev/auth/react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { PageSurface } from "@/app/(marketing)/_components/hero-surface";
+import {
+  clearRehydratedSession,
+  isRecoveryDestination,
+} from "@/lib/auth/session-recovery";
 import {
   cardClass,
   errorClass,
@@ -125,7 +129,7 @@ function OrRule() {
 }
 
 export default function SignInPage() {
-  const { signIn } = useAuthActions();
+  const { signIn, signOut } = useAuthActions();
   const router = useRouter();
   const searchParams = useSearchParams();
   // The landing CTAs promise an account, so they arrive at `?flow=signup` and
@@ -136,6 +140,9 @@ export default function SignInPage() {
   );
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [recoveryPending, setRecoveryPending] = useState(() =>
+    isRecoveryDestination(searchParams),
+  );
   // Set once a sign-in link is on its way: the card becomes the answer to
   // "did it send?" rather than a form waiting to be filled in again.
   const [linkSentTo, setLinkSentTo] = useState<string | null>(null);
@@ -145,6 +152,36 @@ export default function SignInPage() {
   // the app shell — this page only has to not lose it.
   const invite = inviteFromParam(searchParams.get("invite"));
   const destination = invite === null ? "/app" : `/app?invite=${invite}`;
+
+  // Arriving from the error boundary, this page is handed the very session it
+  // was navigated here to escape: a failed `auth:signOut` never got its
+  // clearing `Set-Cookie` written, so the server provider read the surviving
+  // cookie and the client rehydrated the dead token from it. Signing that back
+  // out takes two agreeing signals: the flag in the URL, and the one-shot
+  // marker the boundary left in this tab's `sessionStorage` a navigation ago.
+  // The flag by itself would be an invitation — it rides on a public URL any
+  // outside page can link to, and `/signin?reauth=1` is admitted by the
+  // middleware on purpose — so a reader with a live session sent here by
+  // somebody else spends no marker and keeps their session. The ref is what
+  // makes it once, not once per effect run: this is a request rather than a
+  // subscription, and Strict Mode would otherwise fire two of them. Recovery
+  // starts pending on the first render so no new sign-in can get ahead of this
+  // cleanup and then be erased by its late sign-out — and it settles either
+  // way, so a visit with no marker leaves the form usable rather than stuck.
+  const clearedRehydratedSession = useRef(false);
+  useEffect(() => {
+    if (clearedRehydratedSession.current) {
+      return;
+    }
+    clearedRehydratedSession.current = true;
+    void clearRehydratedSession({
+      searchParams,
+      storage: () => window.sessionStorage,
+      signOut,
+    }).finally(() => {
+      setRecoveryPending(false);
+    });
+  }, [searchParams, signOut]);
 
   function switchFlow(next: Flow) {
     setFlow(next);
@@ -166,6 +203,9 @@ export default function SignInPage() {
   }
 
   async function handleGoogle() {
+    if (recoveryPending) {
+      return;
+    }
     setError(null);
     setPending(true);
     try {
@@ -184,6 +224,9 @@ export default function SignInPage() {
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (recoveryPending) {
+      return;
+    }
     setError(null);
     setPending(true);
 
@@ -223,6 +266,7 @@ export default function SignInPage() {
   }
 
   const wantsPassword = flow !== "link";
+  const actionPending = pending || recoveryPending;
 
   return (
     // The same desk the landing is ruled on, at its faintest: this is the
@@ -283,7 +327,7 @@ export default function SignInPage() {
                 <>
                   <button
                     type="button"
-                    disabled={pending}
+                    disabled={actionPending}
                     onClick={handleGoogle}
                     className={`${secondaryButtonClass} tap-target w-full gap-2.5`}
                   >
@@ -361,7 +405,7 @@ export default function SignInPage() {
 
                 <button
                   type="submit"
-                  disabled={pending}
+                  disabled={actionPending}
                   className={`${primaryButtonClass} tap-target`}
                 >
                   {pending
