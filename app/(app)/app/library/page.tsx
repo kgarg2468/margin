@@ -1,6 +1,8 @@
 "use client";
 
 import { api } from "@/convex/_generated/api";
+import { papersToBibtex } from "@/lib/export/bibtex";
+import { downloadText, exportFilename } from "@/lib/export/download";
 import { eyebrowClass, secondaryButtonClass } from "@/lib/ui";
 import { useQuery } from "convex/react";
 import Link from "next/link";
@@ -58,6 +60,21 @@ function Library({ lab }: { lab: LabSummary }) {
             ? ` · ${papers.length} ${papers.length === 1 ? "paper" : "papers"}`
             : ""}
         </p>
+        {papers !== undefined && papers.length > 0 && (
+          <button
+            type="button"
+            onClick={() =>
+              downloadText(
+                papersToBibtex(papers),
+                exportFilename(`${lab.name} library`, "bib"),
+                "application/x-bibtex;charset=utf-8",
+              )
+            }
+            className="tap-target self-start font-sans text-xs text-ink-faint underline-offset-4 hover:text-accent hover:underline"
+          >
+            Download BibTeX
+          </button>
+        )}
       </header>
 
       {/* An empty library has nothing to hide the form behind.

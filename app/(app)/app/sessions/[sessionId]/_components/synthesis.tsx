@@ -2,6 +2,8 @@
 
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import { downloadText, exportFilename } from "@/lib/export/download";
+import { sessionWriteUpToMarkdown } from "@/lib/export/markdown";
 import { relativeWhen } from "@/lib/sessions-ui";
 import {
   errorClass,
@@ -102,6 +104,10 @@ export function SessionSynthesis({
   const approved = session.synthesis;
   const approvedAt = session.synthesisApprovedAt;
   const isApproved = approved !== undefined && approvedAt !== undefined;
+  const title = session.title ?? session.paperTitle ?? "Session write-up";
+  // The download prefers the approved copy — the version a person signed —
+  // and falls back to the generated draft, redactions and all.
+  const canDownload = approved !== undefined || has;
 
   return (
     <section className="flex flex-col gap-10">
@@ -129,11 +135,33 @@ export function SessionSynthesis({
           >
             {isApproved ? "The draft it was made from" : "Write-up"}
           </h2>
-          {has && (
-            <span className="font-sans text-xs text-ink-faint">
-              {synthesis.model} · {relativeWhen(synthesis.generatedAt)}
-            </span>
-          )}
+          <div className="flex flex-wrap items-baseline gap-x-4 gap-y-2">
+            {has && (
+              <span className="font-sans text-xs text-ink-faint">
+                {synthesis.model} · {relativeWhen(synthesis.generatedAt)}
+              </span>
+            )}
+            {canDownload && (
+              <button
+                type="button"
+                onClick={() =>
+                  downloadText(
+                    sessionWriteUpToMarkdown({
+                      title,
+                      approvedSynthesis: approved,
+                      generatedSections: synthesis?.sections,
+                      visibleAnnotationIds,
+                    }),
+                    exportFilename(title, "md"),
+                    "text/markdown;charset=utf-8",
+                  )
+                }
+                className="font-sans text-xs text-ink-faint underline-offset-4 hover:text-accent hover:underline"
+              >
+                Download .md
+              </button>
+            )}
+          </div>
         </div>
 
         {synthesis === undefined ? (

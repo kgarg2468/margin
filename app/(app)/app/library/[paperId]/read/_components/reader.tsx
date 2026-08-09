@@ -2,6 +2,8 @@
 
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import { annotationsToCsv, annotationsToJson } from "@/lib/export/csv";
+import { downloadText, exportFilename } from "@/lib/export/download";
 import { pdfAuthHeaders, pdfEndpoint } from "@/lib/pdf/delivery";
 import { loadPdfjs } from "@/lib/pdf/extract";
 import { eyebrowClass, skeletonClass } from "@/lib/ui";
@@ -479,6 +481,49 @@ export function Reader({
           <h1 className="min-w-0 flex-1 truncate font-serif text-lg leading-tight text-ink-strong">
             {paper.title}
           </h1>
+          {/* These rows are the annotation query's caller-safe union, not a
+              second reconstruction of privacy in the browser: shared notes
+              plus this member's own private ones, exactly as the margin got
+              them. Keeping the two formats as quiet text controls also keeps
+              the reader's header about the paper rather than the machinery. */}
+          {annotations !== undefined && (
+            <div
+              aria-label="Download annotations"
+              className="flex shrink-0 items-center gap-1.5"
+            >
+              <span className="hidden font-sans text-[10px] uppercase tracking-[0.12em] text-ink-faint xl:inline">
+                Export
+              </span>
+              <button
+                type="button"
+                aria-label="Download annotations as CSV"
+                onClick={() =>
+                  downloadText(
+                    annotationsToCsv(rows),
+                    exportFilename(`${paper.title} annotations`, "csv"),
+                    "text/csv;charset=utf-8",
+                  )
+                }
+                className="rounded-sm border border-rule px-1.5 py-0.5 font-sans text-[10px] uppercase tracking-[0.1em] text-ink-faint transition-colors hover:border-ink-faint hover:text-accent"
+              >
+                CSV
+              </button>
+              <button
+                type="button"
+                aria-label="Download annotations as JSON"
+                onClick={() =>
+                  downloadText(
+                    annotationsToJson(rows),
+                    exportFilename(`${paper.title} annotations`, "json"),
+                    "application/json;charset=utf-8",
+                  )
+                }
+                className="rounded-sm border border-rule px-1.5 py-0.5 font-sans text-[10px] uppercase tracking-[0.1em] text-ink-faint transition-colors hover:border-ink-faint hover:text-accent"
+              >
+                JSON
+              </button>
+            </div>
+          )}
           {/* The chip is the way back to the meeting this reading is for, not
               just a badge: somebody who followed "Read the paper" out of a
               session needs one click to return to it. */}
