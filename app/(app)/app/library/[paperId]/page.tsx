@@ -12,6 +12,7 @@ import { SessionStatusChip } from "../../sessions/_components/session-row";
 import { FiledAs } from "../_components/marks";
 import { StatusChip, byline } from "../_components/paper-meta";
 import { PdfPanel } from "../_components/pdf-panel";
+import { PaperMemory } from "./_components/temporal";
 
 /**
  * The locale is pinned rather than left to the browser. `undefined` means "ask
@@ -132,6 +133,11 @@ export default function PaperPage({
       <Reading paperId={paper._id} ready={paper.hasPdf && paper.hasText} />
 
       <Sessions paperId={paper._id} labId={paper.labId} />
+
+      {/* Below the calendar, because it is about the meetings that already
+          happened and the calendar above is about the one coming. Draws nothing
+          at all until the lab has a history on this paper worth reading back. */}
+      <PaperMemory paperId={paper._id} />
     </div>
   );
 }
