@@ -87,6 +87,41 @@ async function requireCollectionAccess(
 }
 
 /**
+ * A collection's name is unique within its lab, compared case-blind.
+ *
+ * Two shelves called "Methods week" is a conversation nobody can have: the
+ * sidebar draws them identically, the filter's select offers the same word
+ * twice, and a member picking one of them is guessing. Case-blind for the same
+ * reason tags are normalized — a name is how members refer to a shelf out loud,
+ * and "Methods week" said twice is one shelf.
+ *
+ * One function rather than the comparison written out at each call site,
+ * because creating and renaming enforcing subtly different ideas of "duplicate"
+ * is exactly how a rule like this rots: a rename that skipped the check could
+ * produce the pair that a create is refused for.
+ *
+ * It takes the lab's collections rather than reading them, since both callers
+ * are already holding that list for their own reasons and a helper that fetched
+ * again would be a second scan per write. `exclude` is the collection being
+ * renamed — a shelf is allowed to keep its own name, and fixing the
+ * capitalization of one is a rename rather than a collision.
+ */
+function requireNameFree(
+  collections: readonly Doc<"collections">[],
+  name: string,
+  exclude?: Id<"collections">,
+): void {
+  const taken = collections.some(
+    (collection) =>
+      collection._id !== exclude &&
+      collection.name.toLowerCase() === name.toLowerCase(),
+  );
+  if (taken) {
+    throw new ConvexError(`This lab already has a collection called “${name}”.`);
+  }
+}
+
+/**
  * Renaming and deleting are narrower than making and filling.
  *
  * Any member may create a collection and put papers in it, because that is
@@ -157,16 +192,7 @@ export const createCollection = mutation({
         `This lab already has ${MAX_COLLECTIONS_PER_LAB} collections. Delete one before making another.`,
       );
     }
-    // Names are how members refer to these out loud, so two shelves called
-    // "Methods week" is a conversation nobody can have. Compared case-blind
-    // for the same reason tags are.
-    if (
-      existing.some(
-        (collection) => collection.name.toLowerCase() === name.toLowerCase(),
-      )
-    ) {
-      throw new ConvexError(`This lab already has a collection called “${name}”.`);
-    }
+    requireNameFree(existing, name);
 
     const collectionId = await ctx.db.insert("collections", {
       labId: args.labId,
@@ -204,9 +230,24 @@ export const renameCollection = mutation({
     const name = cleanName(args.name);
     if (name === collection.name) {
       // Not an error, but not a fact either: a ledger row saying a collection
-      // was renamed to what it was already called is noise in the record.
+      // was renamed to what it was already called is noise in the record. The
+      // comparison is exact rather than case-blind on purpose — changing
+      // "methods week" to "Methods week" is a real rename, and the check below
+      // is the one that lets it through.
       return null;
     }
+
+    // The same rule a new collection is held to. Without it a rename was the
+    // way round it: two shelves the sidebar and the filter draw identically,
+    // reachable by renaming one onto the other's name.
+    requireNameFree(
+      await ctx.db
+        .query("collections")
+        .withIndex("by_lab", (q) => q.eq("labId", collection.labId))
+        .collect(),
+      name,
+      collection._id,
+    );
 
     await ctx.db.patch(collection._id, { name });
     await recordEvent(ctx, {
