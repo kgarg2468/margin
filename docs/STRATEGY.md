@@ -159,32 +159,36 @@ Every agent action: shows sources, requires approval for side effects, respects 
 
 ## 9. Roadmap
 
+> **Execution order now lives in `docs/TIMELINE.md`** — that file is the dispatch queue and wins on sequencing. This section remains as phase rationale and shipped-state record.
+
 Sprint-sized, sequenced by dependency. Given the team's shipping speed, phases are scoped in weeks, not months — but the *order* matters more than the dates.
 
+> **Status update 2026-08-09:** PRs #41–#62 landed the bulk of Phases 0–2 in one day. Checkboxes below reflect `origin/main` at `87c9ca4`. What functionality remains open is marked; the current UX-fidelity track (reader rail, sessions, ingest, shell — the four polish PRs) is the §6 interaction-primitives work layered on top of these landed features.
+
 ### Phase 0 — Trust & the no-brainer baseline
-- [ ] Google OAuth + magic-link invites
-- [ ] Membership-gated PDF delivery (issue #9)
-- [ ] ⌘K global search: papers, annotations, people, sessions, syntheses (full-text via Convex search indexes — this is also the retrieval baseline all memory features get evaluated against)
-- [ ] Synthesis edit/approve flow (wire existing `synthesis`/`synthesisApprovedAt` fields + editor)
-- [ ] Export everything: session write-ups (MD/DOCX), annotations (CSV/JSON), citations (BibTeX)
-- [ ] Zotero/BibTeX/RIS import
-- [ ] @Mentions + notifications (in-app + email); reply/mention emails
+- [x] Magic-link invites (#45) — **Google OAuth still open**
+- [x] Membership-gated PDF delivery, per-fetch checks (#42, closes issue #9)
+- [x] ⌘K global search drawer (#44), integrated into the interaction layer (#61)
+- [x] Synthesis sign-off flow (#43)
+- [x] Export everything (#48)
+- [x] BibTeX/RIS bulk import (#47) — covers Zotero via export; **native Zotero sync still open**
+- [x] @Mentions + notifications (#52) — **verify email delivery path**
 
 ### Phase 1 — The ritual, end to end
-- [ ] Presenter Agent v1: pre-session cited brief (approval-gated), delivered by email/Slack on schedule
-- [ ] Discussion-to-action: annotations → decisions/questions/tasks with owners
-- [ ] Slack + calendar (.ics) integration for sessions and digests
-- [ ] Collections/tags/saved filters; session-agenda templates; keyboard shortcuts pass
-- [ ] "Since you were away" producer (schema/UI already exist)
-- [ ] Lightweight reactions on annotations
+- [x] Presenter brief/agenda (#53)
+- [x] Discussion-to-action: carry the meeting's outcomes out of the room (#55)
+- [x] Calendar (.ics) for sessions (#50) — **Slack delivery still open**
+- [x] Collections/tags/saved views + keyboard access (#54) — **session-agenda templates still open**
+- [x] "Since you were away" producer (#49)
+- [x] Reactions (#51)
 
 ### Phase 2 — The memory layer (quiet, underneath the ritual)
-- [ ] Event-source annotation edits: prior body/type into ledger events → user-facing version history
-- [ ] Lift the cross-paper collision boundary (`engine.ts:160`) — briefs begin referencing prior sessions
-- [ ] Epistemic-status transitions (human-authored): accept / dispute / resolve / supersede, with effective dates
-- [ ] Temporal derived index for: unresolved-across-sessions, position-changes, what-changed-since
-- [ ] Cross-page anchor recovery (unlocks preprint-heavy fields → widens ICP)
-- [ ] Objective eval harness: memory features vs the BM25/full-text baseline (GroupMemBench-style tasks on real lab data)
+- [x] Event-source annotation edits — "an edit is an addition, not a destruction" (#57), with user-facing history
+- [x] Cross-paper collision pairing (#56 — the `engine.ts:160` boundary, lifted)
+- [x] Epistemic-status transitions (#60)
+- [x] Temporal memory surfaces (#59)
+- [x] Cross-page anchor recovery (#58)
+- [ ] Objective eval harness: memory features vs the BM25/full-text baseline (GroupMemBench-style tasks on real lab data) — **open, and now the most important unbuilt item in this phase**
 
 ### Phase 3 — Compounding & expansion
 - [ ] AI-*suggested* epistemic edges (contradiction candidates, related methods) — always suggestions until accepted
