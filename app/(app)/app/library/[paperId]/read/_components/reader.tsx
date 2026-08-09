@@ -2,10 +2,11 @@
 
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import { recoverAnchor } from "@/lib/anchoring";
 import { annotationsToCsv, annotationsToJson } from "@/lib/export/csv";
 import { downloadText, exportFilename } from "@/lib/export/download";
 import { pdfAuthHeaders, pdfEndpoint } from "@/lib/pdf/delivery";
-import { loadPdfjs } from "@/lib/pdf/extract";
+import { loadPdfjs, normalizePdfText } from "@/lib/pdf/extract";
 import { eyebrowClass, skeletonClass } from "@/lib/ui";
 import { useAuthToken } from "@convex-dev/auth/react";
 import { useQuery } from "convex/react";
@@ -338,6 +339,167 @@ export function Reader({
     [rows, filter],
   );
 
+  // --- passages that moved to another page --------------------------------
+  //
+  // An anchor names the page it was written on, and `resolveAnchor` looks for
+  // it there and nowhere else. That is right for a version of record and wrong
+  // for everything else: a preprint replaced by the published copy, a PDF
+  // re-uploaded from another mirror, a template that runs two lines longer per
+  // page. The passage is still in the paper — often still on screen — and the
+  // note is reported orphaned because it is looking one page too far back.
+  //
+  // So a miss on the pinned page is the trigger to try the pages beside it.
+  // Nothing here runs speculatively: the pinned page has to have rendered,
+  // resolved, and failed first, and then at most four neighbouring pages are
+  // read. `lib/anchoring/recover.ts` holds the rule; this holds the pdf.js.
+  //
+  // What is *not* done is writing the new page index back to the annotation.
+  // The stored anchor still says where the note was written, which is the true
+  // thing about it; where it turns up today is a fact about this file, and this
+  // file can be replaced again next week.
+  const pageTexts = useRef(new Map<number, string>());
+  const attempted = useRef(new Set<AnnotationId>());
+  /** Where an orphan turned up, or `null` for one that stayed lost. */
+  const [foundOn, setFoundOn] = useState<Map<AnnotationId, number | null>>(
+    new Map(),
+  );
+
+  /**
+   * The document every cache and every answer below is about.
+   *
+   * A recovery is a claim about one file's pagination, and it takes as long as
+   * pdf.js takes to read four pages — long enough for the PDF underneath to be
+   * replaced while it runs. Everything that lands late is checked against this
+   * before it is believed.
+   */
+  const currentDoc = useRef<PDFDocumentProxy | null>(null);
+
+  // A different document is a different pagination, so none of it carries over.
+  // Declared above the recovery effect so it runs first on the commit that
+  // swaps the file: work still in flight is holding the old proxy, and by the
+  // time it comes back this ref already disagrees with it.
+  useEffect(() => {
+    currentDoc.current = doc;
+    pageTexts.current.clear();
+    attempted.current.clear();
+    setFoundOn(new Map());
+  }, [doc]);
+
+  useEffect(() => {
+    if (doc === null || pageCount === 0) {
+      return;
+    }
+    const orphans = visible.filter(
+      (annotation) =>
+        !annotation.deleted &&
+        !attempted.current.has(annotation._id) &&
+        (resolutions
+          .get(annotation.anchor.pageIndex)
+          ?.orphaned.includes(annotation._id) ??
+          false),
+    );
+    if (orphans.length === 0) {
+      return;
+    }
+    // Claimed up front rather than one at a time, because this effect re-runs
+    // every time any page resolves — which, during a scroll, is constantly —
+    // and two passes racing on the same note would read the same pages twice.
+    for (const annotation of orphans) {
+      attempted.current.add(annotation._id);
+    }
+
+    const loadPageText = async (pageIndex: number): Promise<string | null> => {
+      if (currentDoc.current !== doc) {
+        // The file this was asked about is gone. Reporting every page
+        // unreadable winds the search down at the next ring rather than
+        // reading four more pages off a document being torn down.
+        return null;
+      }
+      const held = pageTexts.current.get(pageIndex);
+      if (held !== undefined) {
+        return held;
+      }
+      try {
+        const page = await doc.getPage(pageIndex + 1);
+        const content = await page.getTextContent();
+        let text = "";
+        for (const item of content.items) {
+          if ("str" in item) {
+            text += item.str;
+            text += " ";
+          }
+        }
+        // The same two steps `lib/pdf/extract.ts` took at ingest, in the same
+        // order. They have to be: a quote is searched for in this string, and
+        // it came out of that one.
+        //
+        // The page proxy is deliberately not cleaned up. A neighbour of a page
+        // on screen is usually a page the reader is itself rendering, pdf.js
+        // hands back the same proxy for both, and cleaning it here would pull
+        // the operator list out from under a live canvas.
+        const extracted = normalizePdfText(text);
+        // Checked again, because the swap can land during the read above. This
+        // cache is keyed by page index alone, so one late write would leave the
+        // *new* document holding a page of the old one's text — every later
+        // recovery in this paper searching a string that is not in the file.
+        if (currentDoc.current === doc) {
+          pageTexts.current.set(pageIndex, extracted);
+        }
+        return extracted;
+      } catch {
+        // One unreadable page is not a reason to abandon the other three.
+        return null;
+      }
+    };
+
+    // No cancellation flag on this one. Every other async effect in the reader
+    // has one, but here the work is already claimed: dropping a recovery in
+    // flight because a page below happened to finish rendering would strand
+    // that note as orphaned for the rest of the session.
+    //
+    // Which is why the guard is on the *document* rather than on this effect
+    // running again. A re-run is the same question about the same file and its
+    // answer is still good; a new file is a different question, and an answer
+    // carrying the old pagination would put the note on the wrong page of the
+    // paper now on screen and tell the reader, in so many words, that it found
+    // it there. Nothing is stranded by dropping it: the effect above cleared
+    // `attempted` on the same commit, so the new document asks again.
+    void (async () => {
+      for (const annotation of orphans) {
+        const found = await recoverAnchor(annotation.anchor, loadPageText, {
+          pageCount,
+        });
+        if (currentDoc.current !== doc) {
+          return;
+        }
+        setFoundOn((previous) => {
+          const next = new Map(previous);
+          next.set(annotation._id, found?.pageIndex ?? null);
+          return next;
+        });
+      }
+    })();
+  }, [doc, pageCount, visible, resolutions]);
+
+  /** The page a note's passage is actually on, which is usually its own. */
+  const pageOf = useCallback(
+    (annotation: AnnotationView): number =>
+      foundOn.get(annotation._id) ?? annotation.anchor.pageIndex,
+    [foundOn],
+  );
+
+  // The pages these notes were recovered onto must not believe their recorded
+  // offsets: those address a different page's text. See `PdfPage`.
+  const recovered = useMemo(() => {
+    const ids = new Set<AnnotationId>();
+    for (const [id, page] of foundOn) {
+      if (page !== null) {
+        ids.add(id);
+      }
+    }
+    return ids;
+  }, [foundOn]);
+
   // A withdrawn note keeps its card, because the thread hanging off it is
   // other people's writing — but it does not keep its highlight. Its body is
   // gone; it no longer says anything about the passage, and leaving the
@@ -348,21 +510,25 @@ export function Reader({
       if (row.deleted) {
         continue;
       }
-      const list = map.get(row.anchor.pageIndex);
+      // A note whose passage was found one page over is handed to *that* page
+      // to draw. It is the page holding the sentence, and it is the only one
+      // with a rectangle to put the mark on.
+      const page = pageOf(row);
+      const list = map.get(page);
       if (list === undefined) {
-        map.set(row.anchor.pageIndex, [row]);
+        map.set(page, [row]);
       } else {
         list.push(row);
       }
     }
     return map;
-  }, [visible]);
+  }, [visible, pageOf]);
 
   const { cards, unanchored } = useMemo(() => {
     const anchored: RailCard[] = [];
     const lost: RailCard[] = [];
     for (const annotation of visible) {
-      const page = annotation.anchor.pageIndex;
+      const page = pageOf(annotation);
       const resolution = resolutions.get(page);
       const element = pageElements.current.get(page);
       const entry = {
@@ -370,6 +536,11 @@ export function Reader({
         replies: repliesByParent.get(annotation._id) ?? [],
         top: 0,
         state: resolution?.states.get(annotation._id),
+        // Only when it is somewhere other than where it was written: the rail
+        // says so beside the card, and has nothing to say in the ordinary case.
+        ...(page === annotation.anchor.pageIndex
+          ? {}
+          : { foundOnPage: page }),
       };
 
       if (resolution !== undefined && resolution.orphaned.includes(annotation._id)) {
@@ -402,13 +573,16 @@ export function Reader({
       }
     }
     return { cards: anchored, unanchored: lost };
-  }, [visible, repliesByParent, resolutions, pageCount, pageHeight]);
+  }, [visible, repliesByParent, resolutions, pageCount, pageHeight, pageOf]);
 
-  const focusPassage = useCallback((annotation: AnnotationView) => {
-    setActiveId(annotation._id);
-    const element = pageElements.current.get(annotation.anchor.pageIndex);
-    element?.scrollIntoView({ block: "center", behavior: "smooth" });
-  }, []);
+  const focusPassage = useCallback(
+    (annotation: AnnotationView) => {
+      setActiveId(annotation._id);
+      const element = pageElements.current.get(pageOf(annotation));
+      element?.scrollIntoView({ block: "center", behavior: "smooth" });
+    },
+    [pageOf],
+  );
 
   /**
    * Following a notification.
@@ -448,7 +622,7 @@ export function Reader({
       target.parentId === undefined
         ? target
         : (rows.find((row) => row._id === target.parentId) ?? target);
-    if (pageElements.current.get(card.anchor.pageIndex) === undefined) {
+    if (pageElements.current.get(pageOf(card)) === undefined) {
       // The page it lives on has not been laid out yet. Another render will
       // come — resolutions and page geometry both land later — and this runs
       // again then.
@@ -466,7 +640,15 @@ export function Reader({
       "",
       url.pathname + url.search + url.hash,
     );
-  }, [requestedNote, rows, pageCount, pageHeight, resolutions, focusPassage]);
+  }, [
+    requestedNote,
+    rows,
+    pageCount,
+    pageHeight,
+    resolutions,
+    focusPassage,
+    pageOf,
+  ]);
 
   const toggleFilter = (type: AnnotationType) =>
     setFilter((previous) => {
@@ -701,6 +883,7 @@ export function Reader({
                   height={pageHeight}
                   active={window_.has(index)}
                   annotations={byPage.get(index) ?? EMPTY}
+                  recovered={recovered}
                   activeId={activeId}
                   composing={draft?.anchor.pageIndex === index}
                   onActivate={setActiveId}

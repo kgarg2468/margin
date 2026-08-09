@@ -6,6 +6,7 @@
  * re-anchoring for when the file underneath changes.
  *
  * - `anchor.ts` — make an anchor from a selection; find it again later.
+ * - `recover.ts` — when the page it was pinned to misses, try the pages beside it.
  * - `normalize.ts` — the two normalizations, and the offset maps between them.
  * - `fuzzy.ts` — bounded approximate search, the last resort.
  * - `segments.ts` — text-item offsets ⇄ page-text offsets (DOM-free, tested).
@@ -27,6 +28,17 @@ export {
   resolveAnchor,
   significantLength,
 } from "./anchor";
+
+export type {
+  PageTextLoader,
+  RecoverOptions,
+  RecoveredAnchor,
+} from "./recover";
+export {
+  RECOVERY_MIN_CONFIDENCE,
+  RECOVERY_RADIUS,
+  recoverAnchor,
+} from "./recover";
 
 export type { FuzzyCandidate, FuzzyMatch, FuzzyOptions } from "./fuzzy";
 export { DEFAULT_MIN_SCORE, fuzzyFind } from "./fuzzy";

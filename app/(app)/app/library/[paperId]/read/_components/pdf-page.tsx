@@ -134,6 +134,15 @@ export type PdfPageProps = {
   /** Inside the render window. Pages outside it keep their box and lose their pixels. */
   active: boolean;
   annotations: AnnotationView[];
+  /**
+   * Of those, the ones that are only here because the reader found their
+   * passage on this page after the page they were pinned to missed.
+   *
+   * Their recorded offsets are offsets into that other page's text, so the
+   * position fast path has to be skipped for them — believing it is how a note
+   * lands on whatever sentence happens to sit at character 4 200 of this one.
+   */
+  recovered: ReadonlySet<AnnotationId>;
   activeId: AnnotationId | null;
   /** A composer is already open on this page, so it does not need offering. */
   composing: boolean;
@@ -151,6 +160,7 @@ export function PdfPage({
   height,
   active,
   annotations,
+  recovered,
   activeId,
   composing,
   onActivate,
@@ -332,7 +342,7 @@ export function PdfPage({
         annotation.anchor,
         pageText,
         fingerprint,
-        trustPosition,
+        trustPosition && !recovered.has(annotation._id),
       );
       const range =
         resolved === null
@@ -393,7 +403,7 @@ export function PdfPage({
 
     setMarks(placed);
     onResolved(pageIndex, { positions, states, orphaned });
-  }, [layer, extractedLength, annotations, pageIndex, onResolved]);
+  }, [layer, extractedLength, annotations, recovered, pageIndex, onResolved]);
 
   // --- selection ---------------------------------------------------------
   /**
