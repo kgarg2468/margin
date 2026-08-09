@@ -1,9 +1,8 @@
 "use client";
 
-import { inputClass } from "@/lib/ui";
+import { inputClass, openedFromKeyboard } from "@/lib/ui";
 import { Select as Base } from "@base-ui/react/select";
 import { useState } from "react";
-import { openedFromKeyboard } from "./popover";
 
 /**
  * A select that belongs to the notebook.

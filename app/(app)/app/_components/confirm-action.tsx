@@ -2,12 +2,12 @@
 
 import {
   cardClass,
+  openedFromKeyboard,
   primaryButtonClass,
   secondaryButtonClass,
 } from "@/lib/ui";
 import { AlertDialog } from "@base-ui/react/alert-dialog";
 import { useRef, useState } from "react";
-import { openedFromKeyboard } from "./popover";
 
 /**
  * Destructive actions are quiet text, not red buttons — but they ask before

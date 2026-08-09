@@ -86,3 +86,38 @@ export const chipButtonClass = `${chipClass} ${pressable} hover:border-ink-faint
 
 export const eyebrowClass =
   "font-sans text-xs font-medium uppercase tracking-[0.18em] text-ink-faint";
+
+/**
+ * Whether the interaction that opened a surface came from the keyboard.
+ *
+ * The motion budget says keyboard-triggered surfaces render instantly (see
+ * `docs/superpowers/specs/2026-08-08-product-feel-overhaul-design.md`): a
+ * pointer takes time to arrive and the entrance covers that travel, but a
+ * keystroke is instantaneous and an animation after it is just latency you
+ * added yourself. Someone holding Tab through a form should not be watching
+ * sheets bloom.
+ *
+ * The one piece of behaviour in a file of class strings, and it earns the
+ * exception the same way they do: it is the single answer to a question three
+ * separate surfaces ask — the popover, the confirm dialog and the select.
+ * Its first home was `popover.tsx`, which quietly meant every route rendering
+ * a confirm dialog pulled the whole Base UI popover in for ten lines. Nothing
+ * here imports a framework, so nothing here can drag one along.
+ *
+ * Enter and Space on a focused button still dispatch a `click`, which is why
+ * the `KeyboardEvent` check is not enough on its own; the browser marks those
+ * synthesized clicks with a `detail` of `0`, which a real press never has.
+ */
+export function openedFromKeyboard(event: Event | undefined): boolean {
+  if (event === undefined) {
+    return false;
+  }
+  if (typeof KeyboardEvent !== "undefined" && event instanceof KeyboardEvent) {
+    return true;
+  }
+  return (
+    typeof MouseEvent !== "undefined" &&
+    event instanceof MouseEvent &&
+    event.detail === 0
+  );
+}

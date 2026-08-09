@@ -1,5 +1,6 @@
 "use client";
 
+import { openedFromKeyboard } from "@/lib/ui";
 import { Popover as Base } from "@base-ui/react/popover";
 import { useState } from "react";
 import type { ReactNode } from "react";
@@ -21,6 +22,7 @@ import type { ReactNode } from "react";
 export function Popover({
   trigger,
   children,
+  "aria-label": ariaLabel,
   side = "bottom",
   align = "center",
   sideOffset = 8,
@@ -29,6 +31,15 @@ export function Popover({
 }: {
   trigger: ReactNode;
   children: ReactNode;
+  /**
+   * Required, because Base UI renders the sheet as a `role="dialog"` and a
+   * dialog with no accessible name is announced as nothing at all. The sheets
+   * this is for — a composer, a picker — carry no heading of their own, so
+   * there is nothing for Base UI's `aria-labelledby` to point at; say here
+   * what the sheet is for. (Anything that *does* want a visible heading wants
+   * `Base.Title`, which this wrapper deliberately doesn't reach for yet.)
+   */
+  "aria-label": string;
   /** Which side of the trigger to open on. Flips if it doesn't fit. */
   side?: "top" | "bottom" | "left" | "right";
   align?: "start" | "center" | "end";
@@ -61,6 +72,7 @@ export function Popover({
           className="z-50 outline-none"
         >
           <Base.Popup
+            aria-label={ariaLabel}
             className={
               "rounded-md border border-rule bg-surface p-4 font-sans " +
               "shadow-[var(--shadow-sheet)] outline-none " +
@@ -79,38 +91,5 @@ export function Popover({
         </Base.Positioner>
       </Base.Portal>
     </Base.Root>
-  );
-}
-
-/**
- * Whether the interaction that opened a surface came from the keyboard.
- *
- * The motion budget says keyboard-triggered surfaces render instantly (see
- * `docs/superpowers/specs/2026-08-08-product-feel-overhaul-design.md`): a
- * pointer takes time to arrive and the entrance covers that travel, but a
- * keystroke is instantaneous and an animation after it is just latency you
- * added yourself. Someone holding down Tab through a form should not be
- * watching sheets bloom.
- *
- * Lives here rather than in `lib/ui.ts` because it is about behaviour, not
- * classes, and this is the first of the three surfaces that needs it — the
- * confirm dialog and the select import it from the popover for the same
- * reason they all import `pop-in`: there is meant to be one answer.
- *
- * Enter and Space on a focused button still dispatch a `click`, which is why
- * the `KeyboardEvent` check is not enough on its own; the browser marks those
- * synthesized clicks with a `detail` of `0`, which a real press never has.
- */
-export function openedFromKeyboard(event: Event | undefined): boolean {
-  if (event === undefined) {
-    return false;
-  }
-  if (typeof KeyboardEvent !== "undefined" && event instanceof KeyboardEvent) {
-    return true;
-  }
-  return (
-    typeof MouseEvent !== "undefined" &&
-    event instanceof MouseEvent &&
-    event.detail === 0
   );
 }
