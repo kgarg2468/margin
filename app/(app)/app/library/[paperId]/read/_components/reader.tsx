@@ -7,7 +7,7 @@ import { annotationsToCsv, annotationsToJson } from "@/lib/export/csv";
 import { downloadText, exportFilename } from "@/lib/export/download";
 import { pdfAuthHeaders, pdfEndpoint } from "@/lib/pdf/delivery";
 import { loadPdfjs, normalizePdfText } from "@/lib/pdf/extract";
-import { eyebrowClass, skeletonClass } from "@/lib/ui";
+import { boxAnchor, eyebrowClass, skeletonClass } from "@/lib/ui";
 import { useAuthToken } from "@convex-dev/auth/react";
 import { useQuery } from "convex-helpers/react/cache/hooks";
 import Link from "next/link";
@@ -16,19 +16,39 @@ import type {
   PDFDocumentProxy,
 } from "pdfjs-dist/types/src/display/api";
 import type { ReactNode } from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Composer } from "./composer";
+import { draftAnchorBox, nextDraftBox } from "./draft-box";
 import type { RailCard } from "./margin-rail";
 import { MarginRail } from "./margin-rail";
 import type { AnnotationType } from "./ontology";
 import { ANNOTATION_TYPES } from "./ontology";
+import { PAGE_KEYS_HINT_ID, tabStopPage } from "./page-navigation";
 import { PdfPage } from "./pdf-page";
 import type {
   AnnotationId,
   AnnotationView,
   Draft,
+  DraftBox,
   PageResolution,
 } from "./types";
+import {
+  canStepZoom,
+  holdFraction,
+  parsePageJump,
+  restoreDelta,
+  stepZoom,
+  zoomLabel,
+  zoomScale,
+  type ZoomMode,
+} from "./zoom";
 
 /**
  * The reader.
@@ -51,6 +71,17 @@ import type {
 
 /** Below this the margin cannot align to passages, so it becomes a list. */
 const ALIGNED_WIDTH = 1024;
+
+/**
+ * A beat before the link goes out.
+ *
+ * Moving the pointer from a highlight to the card about it crosses the
+ * gutter, which belongs to neither — the page fires `mouseleave`, the card
+ * has not fired `mouseenter` yet, and the link dies halfway through a journey
+ * the reader is deliberately making. Anything that activates in the meantime
+ * cancels the clear, so the only thing this delays is actually leaving.
+ */
+const LINK_GRACE_MS = 120;
 
 function useAligned(): boolean {
   const [aligned, setAligned] = useState(false);
@@ -88,14 +119,149 @@ export function Reader({
   );
   const [columnWidth, setColumnWidth] = useState(0);
   const [columnHeight, setColumnHeight] = useState(0);
-  const [originTop, setOriginTop] = useState(0);
   const [window_, setWindow] = useState<Set<number>>(new Set([0, 1, 2]));
   const [currentPage, setCurrentPage] = useState(0);
   const [activeId, setActiveId] = useState<AnnotationId | null>(null);
   const [filter, setFilter] = useState<Set<AnnotationType>>(new Set());
   const [draft, setDraft] = useState<Draft | null>(null);
+  // Where the page says the draft's passage actually sits, re-measured on every
+  // re-lay. The composer is anchored to it (see `composerAnchor` below), which
+  // is what lets the sheet follow a zoom rather than being stranded by it.
+  const [draftBox, setDraftBox] = useState<DraftBox | null>(null);
   const [resolutions, setResolutions] = useState<Map<number, PageResolution>>(
     new Map(),
+  );
+
+  /**
+   * A new passage, offered by the page on every mouseup.
+   *
+   * Refused while a note is already open. The page reports a selection with no
+   * regard for the composer — it cannot see it — and the two halves of one
+   * ordinary drag used to arrive in opposite orders: the pointerdown reached
+   * Base UI as an outside press and put "Throw this note away?" on screen, and
+   * the mouseup that ended the same drag then swapped the draft underneath it.
+   * The composer is keyed on the passage, so that was a remount: the question
+   * gone unanswered and the note with it.
+   *
+   * The discard confirm is the only way a written note dies. An empty one is
+   * already gone by the time this runs — the outside press closed it on
+   * pointerdown, an event batch earlier — so selecting a second passage after
+   * a highlight still works exactly as it did.
+   */
+  const handleDraft = useCallback((next: Draft) => {
+    setDraft((previous) => (previous === null ? next : previous));
+  }, []);
+
+  const handleDraftBox = useCallback(
+    (pageIndex: number, box: Omit<DraftBox, "pageIndex"> | null) => {
+      // Only the page the composer is anchored to may retract the box; the
+      // other thirty-six report null on every mount and would otherwise
+      // clobber it. See `draft-box.ts`.
+      setDraftBox((previous) => nextDraftBox(previous, pageIndex, box));
+    },
+    [],
+  );
+
+  /**
+   * The page to put the ring back on when the composer goes.
+   *
+   * A ref rather than state because it is not a thing to render — and because
+   * it has to be readable from the commit that removes the sheet, which is the
+   * same commit that sets it.
+   */
+  const returningTo = useRef<number | null>(null);
+
+  /**
+   * Closing the note, from any of the three ways out.
+   *
+   * Save, Discard and an Escape on an empty box all used to leave focus on
+   * `<body>`, which meant the next Tab restarted from the top of the page —
+   * undoing the paper's one roving stop on exactly the path it was built for.
+   * A reader who selected a passage from the keyboard was returned to the
+   * navigation bar for their trouble.
+   *
+   * So focus goes back where the note came from: the page the passage is on,
+   * which is the stop that reader left from. The stop itself moves there too,
+   * or the paper would have its ring in one place and its tab order pointing
+   * at another.
+   *
+   * It is an offer, not a claim — see the restore below. Every dismissal comes
+   * through here, including the ones where the reader has already said where
+   * they are going.
+   */
+  const closeDraft = useCallback((pageIndex: number) => {
+    returningTo.current = pageIndex;
+    setCurrentPage(pageIndex);
+    setDraft(null);
+  }, []);
+
+  useEffect(() => {
+    if (draft !== null) {
+      return;
+    }
+    setDraftBox(null);
+    const page = returningTo.current;
+    if (page === null) {
+      return;
+    }
+    returningTo.current = null;
+    const element = pageElements.current.get(page);
+    if (element === undefined) {
+      return;
+    }
+    // A frame late, and it has to be: the sheet's own teardown moves focus
+    // after this commit paints, and a `focus()` called before that is the one
+    // that loses.
+    const frame = requestAnimationFrame(() => {
+      const root = element.ownerDocument;
+      const active = root.activeElement;
+      // Only when focus has nowhere better to be. Save, Discard and Escape all
+      // leave it on `<body>` — nobody chose that, and it is the case this
+      // restore was written for. But a dismissal can also *be* somebody
+      // choosing: click the zoom control with an empty note open and the note
+      // closes and that button takes focus, which is a real destination and
+      // the reader's own. Taking it back a frame later would move the ring off
+      // the thing they just pressed, which is worse than the bug being fixed.
+      // A detached element is the sheet that has just gone, and counts as
+      // nowhere.
+      const nowhere =
+        active === null || active === root.body || !root.contains(active);
+      if (!nowhere) {
+        return;
+      }
+      // `preventScroll` because the passage is already on screen — the reader
+      // has been looking at it — and a scroll here would only take them
+      // somewhere they did not ask to go.
+      element.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [draft]);
+
+  // Every activation in the reader goes through this rather than through
+  // `setActiveId`, so that the gutter — which fires nobody's `mouseenter` —
+  // cannot put the link out mid-journey. See `LINK_GRACE_MS`.
+  const clearing = useRef<number | null>(null);
+  const activate = useCallback((id: AnnotationId | null) => {
+    if (clearing.current !== null) {
+      window.clearTimeout(clearing.current);
+      clearing.current = null;
+    }
+    if (id === null) {
+      clearing.current = window.setTimeout(() => {
+        clearing.current = null;
+        setActiveId(null);
+      }, LINK_GRACE_MS);
+      return;
+    }
+    setActiveId(id);
+  }, []);
+  useEffect(
+    () => () => {
+      if (clearing.current !== null) {
+        window.clearTimeout(clearing.current);
+      }
+    },
+    [],
   );
 
   // In dark mode the sheet is developed dark by default (see reader.module.css)
@@ -208,22 +374,163 @@ export function Reader({
     const observer = new ResizeObserver(() => {
       setColumnWidth(column.clientWidth);
       setColumnHeight(column.offsetHeight);
-      setOriginTop(column.offsetTop);
     });
     observer.observe(column);
     return () => observer.disconnect();
   }, [doc]);
 
-  const scale = useMemo(() => {
-    if (baseSize === null || columnWidth === 0) {
-      return 1;
-    }
-    return Math.min(2, Math.max(0.4, columnWidth / baseSize.width));
-  }, [baseSize, columnWidth]);
+  const [zoom, setZoom] = useState<ZoomMode>("fit-width");
+  const [pageBox, setPageBox] = useState("");
+
+  const scale = useMemo(
+    () => zoomScale(zoom, { columnWidth, baseWidth: baseSize?.width ?? 0 }),
+    [zoom, columnWidth, baseSize],
+  );
 
   const pageCount = doc?.numPages ?? 0;
   const pageWidth = baseSize === null ? 0 : Math.floor(baseSize.width * scale);
   const pageHeight = baseSize === null ? 0 : Math.floor(baseSize.height * scale);
+
+  /**
+   * The passage the composer points at.
+   *
+   * The page reports where it drew the draft mark (see `DraftBox`), which is
+   * re-measured whenever the page re-lays its text — so this survives a zoom,
+   * where the coordinates frozen at selection time did not.
+   *
+   * Measured against the page itself, and corrected for any size change since
+   * the measurement was taken. A zoom rebuilds the text layer asynchronously
+   * and a page that has scrolled out of the window never rebuilds it at all, so
+   * between the two there is nothing to re-measure with — and a rectangle in
+   * the reader's own coordinates would by then be pointing at a place the page
+   * has moved off. Against the page, where it moved to does not matter and
+   * what size it is now is arithmetic.
+   *
+   * Before the first report lands there is no page rectangle at all, only the
+   * selection's own y/x in the reader's coordinates, which stand in as a
+   * zero-width point for the frame or two until one arrives.
+   *
+   * The scroll container goes along as the anchor's context element: without it
+   * the positioner tracks the window and not the box the reader is scrolling,
+   * and the sheet drifts off its passage on the first flick of the wheel.
+   */
+  const composerAnchor = useMemo(() => {
+    if (draft === null) {
+      return undefined;
+    }
+    if (draftBox === null) {
+      return boxAnchor(
+        { top: draft.top, left: draft.left, width: 0, height: 0 },
+        () => {
+          const content = contentRef.current;
+          if (content === null) {
+            return null;
+          }
+          const at = content.getBoundingClientRect();
+          return { left: at.left, top: at.top };
+        },
+        scrollRef.current,
+      );
+    }
+    const page = draftBox.pageIndex;
+    return boxAnchor(
+      draftAnchorBox(draftBox, scale),
+      () => {
+        const element = pageElements.current.get(page);
+        if (element === undefined) {
+          return null;
+        }
+        const at = element.getBoundingClientRect();
+        return { left: at.left, top: at.top };
+      },
+      scrollRef.current,
+    );
+  }, [draft, draftBox, scale]);
+
+  /**
+   * Where the reader was when the scale changed.
+   *
+   * A zoom re-renders every canvas at a new size, which changes the height of
+   * everything above the viewport — so without this the paper jumps, usually
+   * several pages, and the reader has to find their place again. Kept as a
+   * fraction of the current page rather than a scroll offset, because the
+   * offset is exactly the thing that is about to be invalidated.
+   *
+   * Fractional, which means the error scales with the fraction — so the page it
+   * is keyed to has to be one the viewport is near. `goToPage` sets
+   * `currentPage` optimistically, a frame or two before the observer agrees,
+   * and a hold taken in that window is a fraction in the hundreds: restored, it
+   * lands at an end of the container rather than anywhere the reader was. Two
+   * frames wide and not reachable by hand, which is the only reason it stands.
+   */
+  const holding = useRef<{ page: number; fraction: number } | null>(null);
+
+  const changeZoom = useCallback(
+    (next: ZoomMode) => {
+      const root = scrollRef.current;
+      const element = pageElements.current.get(currentPage);
+      // A press that does not change the *size* must not leave a place held.
+      // The restore below is keyed on `pageHeight`, so the comparison here is
+      // that same floored height, not the raw scale: two scales a hair apart
+      // — fit width landing at 1.24985 beside the 1.25 step — floor to the
+      // same height, and a hold recorded for a dep that never changes would
+      // sit until the next unrelated height change, a window resize an hour
+      // later, and yank the reader to a place recorded then.
+      //
+      // `setZoom` stays unconditional either side of this: the modes really
+      // are different even when the heights agree, and the fit-width button's
+      // `aria-pressed` is the one thing that has to say so.
+      const changesSize =
+        baseSize !== null &&
+        Math.floor(
+          baseSize.height *
+            zoomScale(next, { columnWidth, baseWidth: baseSize.width }),
+        ) !== pageHeight;
+      if (changesSize && root !== null && element !== undefined) {
+        const box = element.getBoundingClientRect();
+        const rootBox = root.getBoundingClientRect();
+        holding.current = {
+          page: currentPage,
+          fraction: holdFraction(rootBox.top, box.top, box.height),
+        };
+      }
+      setZoom(next);
+    },
+    [currentPage, columnWidth, baseSize, pageHeight],
+  );
+
+  useLayoutEffect(() => {
+    const held = holding.current;
+    const root = scrollRef.current;
+    if (held === null || root === null) {
+      return;
+    }
+    const element = pageElements.current.get(held.page);
+    if (element === undefined) {
+      return;
+    }
+    holding.current = null;
+    const box = element.getBoundingClientRect();
+    const rootBox = root.getBoundingClientRect();
+    root.scrollTop += restoreDelta(
+      held.fraction,
+      rootBox.top,
+      box.top,
+      box.height,
+    );
+  }, [pageHeight]);
+
+  const goToPage = useCallback((index: number) => {
+    const element = pageElements.current.get(index);
+    if (element === undefined) {
+      return;
+    }
+    setCurrentPage(index);
+    element.scrollIntoView({ block: "start", behavior: "smooth" });
+    // preventScroll, because the smooth scroll above is the one that should be
+    // seen; focus's own jump would land first and instantly.
+    element.focus({ preventScroll: true });
+  }, []);
 
   const registerPage = useCallback(
     (index: number, element: HTMLDivElement | null) => {
@@ -530,12 +837,21 @@ export function Reader({
     for (const annotation of visible) {
       const page = pageOf(annotation);
       const resolution = resolutions.get(page);
+      // Where a page said its passages were is only true of the size it said
+      // it at. A page outside the render window has no text layer left to
+      // re-measure, so after a zoom it keeps reporting last size's pixels —
+      // for good, if the reader never scrolls back to it, which is how a card
+      // for page 30 ends up sorted in among page 15's. What the page had to
+      // say about the *text* — which notes it could not place, and how it
+      // found the ones it could — is not a measurement and does not expire.
+      const measured = resolution?.scale === scale ? resolution : undefined;
       const element = pageElements.current.get(page);
       const entry = {
         annotation,
         replies: repliesByParent.get(annotation._id) ?? [],
         top: 0,
         state: resolution?.states.get(annotation._id),
+        passage: measured?.points.get(annotation._id),
         // Only when it is somewhere other than where it was written: the rail
         // says so beside the card, and has nothing to say in the ordinary case.
         ...(page === annotation.anchor.pageIndex
@@ -552,11 +868,12 @@ export function Reader({
         continue;
       }
 
-      const known = resolution?.positions.get(annotation._id);
+      const known = measured?.positions.get(annotation._id);
       if (known !== undefined) {
         anchored.push({ ...entry, top: known });
       } else if (element !== undefined) {
-        // The page has not been rendered yet, so the passage has no rectangle.
+        // The page has not been rendered at this size, so the passage has no
+        // rectangle worth believing.
         // Estimate down the page from the anchor's offset — a rough guess that
         // stops the rail piling every unrendered note at the same y, and that
         // is replaced by the real position the moment the page paints.
@@ -573,15 +890,23 @@ export function Reader({
       }
     }
     return { cards: anchored, unanchored: lost };
-  }, [visible, repliesByParent, resolutions, pageCount, pageHeight, pageOf]);
+  }, [
+    visible,
+    repliesByParent,
+    resolutions,
+    pageCount,
+    pageHeight,
+    scale,
+    pageOf,
+  ]);
 
   const focusPassage = useCallback(
     (annotation: AnnotationView) => {
-      setActiveId(annotation._id);
+      activate(annotation._id);
       const element = pageElements.current.get(pageOf(annotation));
       element?.scrollIntoView({ block: "center", behavior: "smooth" });
     },
-    [pageOf],
+    [activate, pageOf],
   );
 
   /**
@@ -650,6 +975,82 @@ export function Reader({
     pageOf,
   ]);
 
+  const counts = useMemo(() => {
+    const map = new Map<AnnotationType, number>();
+    for (const row of rows) {
+      if (row.parentId === undefined && !row.deleted) {
+        map.set(row.type, (map.get(row.type) ?? 0) + 1);
+      }
+    }
+    return map;
+  }, [rows]);
+
+  /**
+   * Whether to hold the chip band's height open.
+   *
+   * The band used to appear when the annotations landed, which shrank the
+   * scroll viewport by its own height and moved every page and every card in
+   * the margin — on the frame a reader is most likely to be looking at. So the
+   * space is held from the first paint, and once a paper has shown chips it
+   * keeps holding it, or withdrawing the last note would do the same thing in
+   * reverse. What is *not* held is the row itself: an empty "Show" reads as a
+   * control that failed to load.
+   */
+  const [bandUsed, setBandUsed] = useState(false);
+  useEffect(() => {
+    if (counts.size > 0) {
+      setBandUsed(true);
+    }
+  }, [counts.size]);
+  const reserveBand = loading || counts.size > 0 || bandUsed;
+
+  /**
+   * The paper saying where it just went.
+   *
+   * Every other part of this is already named: the page-jump field's label
+   * re-renders to "On page 2 of 15", the paper's own group is labelled the
+   * same. But a label is only true on re-read — a reader who presses Page Down
+   * is told nothing at all, and the position they navigated by has silently
+   * changed under them. So a page change is announced, and only a page change:
+   * the first reading of the paper is the label's job, and repeating it here
+   * would be the reader's own screen reader talking over the paper opening.
+   *
+   * And only a page change the paper is not already announcing by itself. Page
+   * Up, Page Down, Home, End and the jump field all move the ring onto a page
+   * wrapper, which is a `role="group"` named "Page 2 of 15" — the very sentence
+   * this region would read. So while the ring is on the paper, the paper
+   * speaks: one announcement per key press rather than two, and none at all for
+   * the thirteen pages that a jump to the back of a paper scrolls smoothly
+   * past on the way. Asked of the DOM at the moment of the change rather than
+   * tracked as a journey with a beginning and an end, because a journey has to
+   * be cleaned up after and this is not a thing that may get stuck.
+   */
+  const [announcement, setAnnouncement] = useState("");
+  const announced = useRef<number | null>(null);
+  useEffect(() => {
+    if (pageCount === 0) {
+      return;
+    }
+    if (announced.current === null || announced.current === currentPage) {
+      announced.current = currentPage;
+      return;
+    }
+    announced.current = currentPage;
+    // The ring is on a page of the paper, so a page is naming itself and this
+    // has nothing to add. `dataset.page` is the wrapper's own marker; anything
+    // else holding the ring — the margin, the toolbar, `<body>` under a wheel
+    // scroll — says nothing about where the paper is, and then this does.
+    const focused = document.activeElement;
+    if (focused instanceof HTMLElement && focused.dataset.page !== undefined) {
+      // Cleared rather than left holding the last sentence: a region still
+      // reading "Page 2 of 15" cannot announce a return to page 2, because
+      // setting it to what it already says is no mutation at all.
+      setAnnouncement("");
+      return;
+    }
+    setAnnouncement(`Page ${currentPage + 1} of ${pageCount}`);
+  }, [currentPage, pageCount]);
+
   const toggleFilter = (type: AnnotationType) =>
     setFilter((previous) => {
       const next = new Set(previous);
@@ -690,13 +1091,6 @@ export function Reader({
         </p>
       </ReaderShell>
     );
-  }
-
-  const counts = new Map<AnnotationType, number>();
-  for (const row of rows) {
-    if (row.parentId === undefined && !row.deleted) {
-      counts.set(row.type, (counts.get(row.type) ?? 0) + 1);
-    }
   }
 
   return (
@@ -791,64 +1185,196 @@ export function Reader({
           >
             White page
           </button>
-          <span className="shrink-0 font-sans text-xs tabular-nums text-ink-faint">
-            {pageCount > 0 ? `Page ${currentPage + 1} of ${pageCount}` : "…"}
-          </span>
+          {/* `gap-3.5`, not the `gap-1` this group was drawn with, and
+              `tap-target` on all three rather than on the outer two.
+              `@utility tap-target` is a 44x44 `::after` that takes no part in
+              layout but — deliberately — every part in pointer-events, so
+              on a ~21px button it overhangs ~11.7px of live hit area past
+              each edge. At a 4px
+              gap the − and + boxes reached ~7px into a ~40px fit-width button
+              that had no box of its own to win the overlap with, so a third of
+              its face zoomed the wrong way and did it silently: a stolen click
+              is indistinguishable from a misclick. 14px clears every overhang
+              by ~2px and puts ~43.5px between the centres, which is the 44px
+              rhythm the utility's own doc comment asks for where two of these
+              sit side by side. */}
+          <div className="flex shrink-0 items-center gap-3.5">
+            <button
+              type="button"
+              aria-label="Zoom out"
+              // What the press would do, asked of the size rather than of the
+              // bound: `MIN_SCALE` is a floor, and a control disabled by a
+              // floor it cannot land on stays live at the last stop above it
+              // and does nothing. See `canStepZoom`.
+              disabled={
+                !canStepZoom(zoom, -1, {
+                  columnWidth,
+                  baseWidth: baseSize?.width ?? 0,
+                })
+              }
+              onClick={() =>
+                changeZoom(
+                  stepZoom(zoom, -1, {
+                    columnWidth,
+                    baseWidth: baseSize?.width ?? 0,
+                  }),
+                )
+              }
+              className="pressable tap-target rounded-sm border border-rule px-1.5 py-0.5 font-sans text-[11px] tabular-nums text-ink-faint hover:border-ink-faint hover:text-accent disabled:opacity-40"
+            >
+              −
+            </button>
+            <button
+              type="button"
+              aria-pressed={zoom === "fit-width"}
+              // What it says, then what it does. The visible text is the
+              // current scale, and a name that buries it behind a sentence is
+              // a name somebody speaking to their computer cannot use to press
+              // the thing they are looking at.
+              aria-label={`${zoomLabel(zoom, { columnWidth, baseWidth: baseSize?.width ?? 0 })}. Fit the page to the column.`}
+              // Nothing to fit to yet. The whole group waits on the page's own
+              // width: pressing before it arrives sets a number against a size
+              // nobody has read, and quietly costs the reader fit width for the
+              // session.
+              disabled={baseSize === null}
+              onClick={() => changeZoom("fit-width")}
+              className={
+                "pressable tap-target rounded-sm border px-1.5 py-0.5 font-sans text-[11px] tabular-nums disabled:opacity-40 " +
+                (zoom === "fit-width"
+                  ? "border-ink-faint text-ink"
+                  : "border-rule text-ink-faint hover:border-ink-faint hover:text-accent")
+              }
+            >
+              {zoomLabel(zoom, {
+                columnWidth,
+                baseWidth: baseSize?.width ?? 0,
+              })}
+            </button>
+            <button
+              type="button"
+              aria-label="Zoom in"
+              disabled={
+                !canStepZoom(zoom, 1, {
+                  columnWidth,
+                  baseWidth: baseSize?.width ?? 0,
+                })
+              }
+              onClick={() =>
+                changeZoom(
+                  stepZoom(zoom, 1, {
+                    columnWidth,
+                    baseWidth: baseSize?.width ?? 0,
+                  }),
+                )
+              }
+              className="pressable tap-target rounded-sm border border-rule px-1.5 py-0.5 font-sans text-[11px] tabular-nums text-ink-faint hover:border-ink-faint hover:text-accent disabled:opacity-40"
+            >
+              +
+            </button>
+          </div>
+
+          {/* The page counter, made into the way you get somewhere. A reader
+              who can see "Page 4 of 31" and cannot type 19 into it is being
+              shown a fact and denied the obvious action on it. */}
+          <form
+            className="flex shrink-0 items-baseline gap-1 font-sans text-xs tabular-nums text-ink-faint"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const index = parsePageJump(pageBox, pageCount);
+              if (index === null) {
+                return;
+              }
+              setPageBox("");
+              goToPage(index);
+              event.currentTarget.querySelector("input")?.blur();
+            }}
+          >
+            {/* The page you are on is in the label, because it is nowhere
+                else any more: it used to be text and it is now the input's
+                placeholder, which assistive tech does not reliably announce
+                and which disappears the moment somebody types. What is left on
+                screen is "of 31". */}
+            <label htmlFor="reader-page-jump" className="sr-only">
+              {pageCount > 0
+                ? `Go to page. On page ${currentPage + 1} of ${pageCount}.`
+                : "Go to page"}
+            </label>
+            <input
+              id="reader-page-jump"
+              value={pageBox}
+              inputMode="numeric"
+              disabled={pageCount === 0}
+              placeholder={pageCount > 0 ? String(currentPage + 1) : "…"}
+              onChange={(event) => setPageBox(event.target.value)}
+              onBlur={() => setPageBox("")}
+              className="w-10 rounded-sm border border-rule bg-surface px-1 py-0.5 text-center text-xs tabular-nums text-ink placeholder:text-ink-faint hover:border-ink-faint focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-1 focus-visible:outline-accent"
+            />
+            <span>{pageCount > 0 ? `of ${pageCount}` : ""}</span>
+          </form>
         </div>
 
-        {/* No notes, no filter: a "Show" with nothing after it reads like a
-            control that failed to load. */}
-        {counts.size > 0 && (
-          <div className="flex items-center gap-x-1.5 overflow-x-auto border-t border-rule px-4 py-2 [scrollbar-width:none] sm:px-6 [&::-webkit-scrollbar]:hidden">
-            <span className={`${eyebrowClass} mr-1 shrink-0`}>Show</span>
-            {ANNOTATION_TYPES.filter(
-              (style) => (counts.get(style.value) ?? 0) > 0,
-            ).map((style) => {
-              const on = filter.size === 0 || filter.has(style.value);
-              return (
-                <button
-                  key={style.value}
-                  type="button"
-                  // The effective state, not the set membership: with no filter
-                  // at all every chip is on, and a row of "off" chips over a
-                  // margin showing everything is a lie a screen reader has no
-                  // way to see through.
-                  aria-pressed={on}
-                  onClick={() => toggleFilter(style.value)}
-                  style={
-                    on
-                      ? { color: style.ink, backgroundColor: style.wash }
-                      : undefined
-                  }
-                  className={
-                    "shrink-0 whitespace-nowrap rounded-full border px-2.5 py-1 font-sans text-[10px] uppercase tracking-[0.1em] " +
-                    "motion-safe:transition-[color,background-color,border-color,transform] motion-safe:duration-200 active:scale-[0.96] " +
-                    (on
-                      ? "border-transparent"
-                      : "border-rule text-ink-faint hover:border-ink-faint hover:text-ink-muted")
-                  }
-                >
-                  {style.label} {counts.get(style.value)}
-                </button>
-              );
-            })}
-            {filter.size > 0 && (
-              <button
-                type="button"
-                onClick={() => setFilter(new Set())}
-                className="shrink-0 px-1.5 font-sans text-[11px] text-accent underline-offset-4 hover:underline"
-              >
-                All
-              </button>
+        {/* Reserved from the first paint. The band used to arrive with the
+            annotations and take 37px out of the scroll viewport as it did,
+            which moved every page and every card in the margin at once. */}
+        {reserveBand && (
+          <div className="flex min-h-[2.375rem] items-center gap-x-1.5 overflow-x-auto border-t border-rule px-4 py-2 [scrollbar-width:none] sm:px-6 [&::-webkit-scrollbar]:hidden">
+            {counts.size > 0 && (
+              <>
+                <span className={`${eyebrowClass} mr-1 shrink-0`}>Show</span>
+                {ANNOTATION_TYPES.filter(
+                  (style) => (counts.get(style.value) ?? 0) > 0,
+                ).map((style) => {
+                  const on = filter.size === 0 || filter.has(style.value);
+                  return (
+                    <button
+                      key={style.value}
+                      type="button"
+                      // The effective state, not the set membership: with no
+                      // filter at all every chip is on, and a row of "off"
+                      // chips over a margin showing everything is a lie a
+                      // screen reader has no way to see through.
+                      aria-pressed={on}
+                      onClick={() => toggleFilter(style.value)}
+                      style={
+                        on
+                          ? { color: style.ink, backgroundColor: style.wash }
+                          : undefined
+                      }
+                      className={
+                        "pressable shrink-0 whitespace-nowrap rounded-full border px-2.5 py-1 font-sans text-[10px] uppercase tracking-[0.1em] " +
+                        (on
+                          ? "border-transparent"
+                          : "border-rule text-ink-faint hover:border-ink-faint hover:text-ink-muted")
+                      }
+                    >
+                      {style.label} {counts.get(style.value)}
+                    </button>
+                  );
+                })}
+                {filter.size > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setFilter(new Set())}
+                    className="shrink-0 px-1.5 font-sans text-[11px] text-accent underline-offset-4 hover:underline"
+                  >
+                    All
+                  </button>
+                )}
+              </>
             )}
           </div>
         )}
       </header>
 
+      {/* Mounted empty and kept, because a live region that arrives with its
+          own first sentence is a region screen readers do not announce. */}
+      <p aria-live="polite" aria-atomic="true" className="sr-only">
+        {announcement}
+      </p>
+
       <div
         ref={scrollRef}
         className="flex-1 overflow-y-auto overscroll-contain"
-        onMouseDown={() => setDraft(null)}
       >
         {/* A breath of page colour under the header, so cards slide beneath
             it instead of shearing off against the border. */}
@@ -862,8 +1388,39 @@ export function Reader({
         >
           <div
             ref={columnRef}
-            className="flex min-w-0 flex-1 flex-col items-center gap-5"
+            // `safe center`, not `center`. Now that the scale can exceed fit
+            // width — the very first press of + from the resting state does
+            // it — the page is routinely wider than this column. Plain
+            // centring splits that overflow evenly, and an LTR scroll
+            // container only ever scrolls toward its end edge, so everything
+            // it put on the left was clipped and unreachable: a reader could
+            // zoom in on a figure and have no way to pan back to the start of
+            // its caption. `safe` keeps the page centred for as long as it
+            // fits and falls back to start-aligned the moment it does not,
+            // which puts the whole overflow on the side that scrolls.
+            //
+            // Alignment, not position: this column still has no `position` of
+            // its own, so `gutterX` and the rail's connector geometry are
+            // untouched. They read `wrapper.offsetLeft` against the content
+            // box and re-measure on every re-lay, so they follow the page
+            // across the switch rather than needing to know about it.
+            className="flex min-w-0 flex-1 flex-col items-center-safe gap-5"
           >
+            {/* The paper is one tab stop, and a stop that moves is only an
+                affordance if you are told it moves. */}
+            {/* What the keys do, and no more than that. The last sentence used
+                to promise that Shift and the arrows select a passage, which is
+                true only in a browser with caret browsing switched on — off by
+                default in every one of them. A hint that describes a setting
+                the reader has not got is worse than no hint: it sends somebody
+                who cannot use a mouse looking for a key that does nothing. */}
+            <p id={PAGE_KEYS_HINT_ID} className="sr-only">
+              Page Up and Page Down move between pages. Home and End go to the
+              first and last. To annotate a passage, select it — by dragging
+              across it, or with Shift and the arrow keys if your browser has
+              caret browsing turned on — and take the &ldquo;Annotate
+              selection&rdquo; button that appears beside it.
+            </p>
             {doc === null || baseSize === null ? (
               <p className="mt-24 font-sans text-sm text-ink-faint">
                 {docFailed
@@ -878,6 +1435,9 @@ export function Reader({
                   key={index}
                   doc={doc}
                   pageIndex={index}
+                  pageCount={pageCount}
+                  tabStop={index === tabStopPage({ current: currentPage, pageCount })}
+                  onNavigate={goToPage}
                   scale={scale}
                   width={pageWidth}
                   height={pageHeight}
@@ -885,10 +1445,11 @@ export function Reader({
                   annotations={byPage.get(index) ?? EMPTY}
                   recovered={recovered}
                   activeId={activeId}
-                  composing={draft?.anchor.pageIndex === index}
-                  onActivate={setActiveId}
+                  draft={draft?.anchor.pageIndex === index ? draft : null}
+                  onDraftBox={handleDraftBox}
+                  onActivate={activate}
                   onResolved={handleResolved}
-                  onDraft={setDraft}
+                  onDraft={handleDraft}
                   registerElement={registerPage}
                 />
               ))
@@ -901,19 +1462,27 @@ export function Reader({
             loading={loading}
             truncated={annotations?.truncated ?? false}
             aligned={aligned}
-            originTop={originTop}
-            height={columnHeight}
+            columnHeight={columnHeight}
             activeId={activeId}
-            onActivate={setActiveId}
+            onActivate={activate}
             onFocusPassage={focusPassage}
           />
 
-          {draft !== null && (
+          {draft !== null && composerAnchor !== undefined && (
             <Composer
+              // A different passage is a different note, and this is what says
+              // so. A note with anything written in it is refused a new passage
+              // outright (see `handleDraft`); this is for the other way round —
+              // an empty composer, closed by the press that began the next
+              // selection and reopened by the mouseup that ended it. Without a
+              // key that is one instance carrying the first passage's state
+              // into the second one.
+              key={`${draft.anchor.pageIndex}:${draft.anchor.start}:${draft.anchor.end}`}
               paperId={paperId}
               sessionId={sessionId}
               draft={draft}
-              onClose={() => setDraft(null)}
+              anchor={composerAnchor}
+              onClose={() => closeDraft(draft.anchor.pageIndex)}
             />
           )}
         </div>

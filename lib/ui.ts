@@ -122,6 +122,61 @@ export function openedFromKeyboard(event: Event | undefined): boolean {
   );
 }
 
+/** A rectangle in some scrolling container's own coordinates. */
+export type AnchorBox = {
+  top: number;
+  left: number;
+  width: number;
+  height: number;
+};
+
+/**
+ * Something for a popover to point at when there is no element to point at.
+ *
+ * The reader's composer is anchored to a passage, and a passage is a run of
+ * pdf.js spans that get thrown away and rebuilt whenever the page re-renders —
+ * there is no stable node to hand a positioner. What there is, is a rectangle
+ * in the scrolling content's coordinates, plus a way to ask where that content
+ * currently is. Both are read on every call rather than captured, because the
+ * positioner re-reads this on scroll and on resize and expects a live answer.
+ *
+ * Returned as a plain object rather than a `new DOMRect` so this can be
+ * reasoned about (and tested) without a browser; the shape is the whole
+ * contract a positioner uses.
+ *
+ * `contextElement` matters when the box lives inside an inner scroll
+ * container: the positioner only attaches scroll listeners to the ancestors
+ * of the element it is handed, and a virtual anchor without one gets only
+ * window scroll. The reader's pages scroll in their own container, so the
+ * composer must pass it — otherwise the sheet holds still while the passage
+ * slides away.
+ */
+export function boxAnchor(
+  box: AnchorBox,
+  origin: () => { left: number; top: number } | null,
+  contextElement?: Element | null,
+): { getBoundingClientRect: () => DOMRect; contextElement?: Element } {
+  return {
+    ...(contextElement ? { contextElement } : {}),
+    getBoundingClientRect: () => {
+      const at = origin() ?? { left: 0, top: 0 };
+      const left = at.left + box.left;
+      const top = at.top + box.top;
+      const value = {
+        x: left,
+        y: top,
+        left,
+        top,
+        width: box.width,
+        height: box.height,
+        right: left + box.width,
+        bottom: top + box.height,
+      };
+      return { ...value, toJSON: () => value } as DOMRect;
+    },
+  };
+}
+
 /**
  * A key, drawn as a key: the brass label on a catalogue drawer rather than a
  * badge. Used for the ⌘K affordance in the rail and for the legend along the

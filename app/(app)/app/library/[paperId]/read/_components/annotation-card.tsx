@@ -148,19 +148,38 @@ export function AnnotationCard({
   const showReplies = expanded || replies.length <= 3;
   const visibleReplies = showReplies ? replies : replies.slice(0, 1);
 
+  const sendReply = () =>
+    void run(async () => {
+      await reply({
+        parentId: annotation._id,
+        body: replyBody,
+        ...(replyMentions.length > 0 ? { mentions: replyMentions } : {}),
+      });
+      setReplyBody("");
+      setReplyPicked([]);
+      setReplying(false);
+      setExpanded(true);
+    }, "That reply didn't send.");
+
   return (
     <article
       ref={(element) => registerElement?.(annotation._id, element)}
       onMouseEnter={() => onActivate(annotation._id)}
       onMouseLeave={() => onActivate(null)}
       onFocus={() => onActivate(annotation._id)}
+      // Tabbing *within* a card — from Reply to Edit — is not leaving it.
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          onActivate(null);
+        }
+      }}
       style={{ borderLeftColor: style.ink }}
       // A card, not a slab: rounded, hairline-bordered, resting on the page
       // with a whisper of shadow — the Fig. 1 grammar. The type's ink keeps
       // the left rule; activation lifts the card rather than boxing it.
       className={
         "rounded-md border border-rule border-l-2 bg-surface py-2.5 pl-3 pr-2.5 " +
-        "motion-safe:transition-[box-shadow,translate] motion-safe:duration-200 " +
+        "motion-safe:transition-[box-shadow,translate] motion-safe:duration-[var(--dur-hover)] " +
         (active
           ? "shadow-[0_0_0_1px_var(--rule),var(--shadow-lift)] motion-safe:-translate-y-px"
           : "shadow-[var(--shadow-card)]")
@@ -403,6 +422,11 @@ export function AnnotationCard({
               )
             }
             rows={2}
+            onSubmit={() => {
+              if (!busy && replyBody.trim().length > 0) {
+                sendReply();
+              }
+            }}
             placeholder="Answer this — type @ to bring somebody in"
             className="w-full resize-y rounded-sm border border-rule bg-page px-2 py-1.5 font-serif text-sm leading-relaxed text-ink placeholder:text-ink-faint"
           />
@@ -410,21 +434,7 @@ export function AnnotationCard({
             <button
               type="button"
               disabled={busy || replyBody.trim().length === 0}
-              onClick={() =>
-                void run(async () => {
-                  await reply({
-                    parentId: annotation._id,
-                    body: replyBody,
-                    ...(replyMentions.length > 0
-                      ? { mentions: replyMentions }
-                      : {}),
-                  });
-                  setReplyBody("");
-                  setReplyPicked([]);
-                  setReplying(false);
-                  setExpanded(true);
-                }, "That reply didn't send.")
-              }
+              onClick={sendReply}
               className="tap-target font-sans text-xs text-accent underline-offset-4 hover:underline disabled:opacity-50"
             >
               Reply
@@ -440,8 +450,28 @@ export function AnnotationCard({
         </div>
       ) : (
         // gap-x-5: `Reply` and `Edit` are 32px and 21px wide, so their 44px
-        // hit boxes would otherwise reach well into each other.
-        <div className="mt-1.5 flex flex-wrap items-baseline gap-x-5">
+        // hit boxes would otherwise reach well into each other. `mt-2.5` is
+        // the same argument on the other axis — the marks row sits directly
+        // above this one, and 6px between two 14px controls left nothing for
+        // even the capped boxes to clear.
+        //
+        // The cap: `tap-target`'s 44x44 `::after` is *centred*, so it costs
+        // 14px of live hit area above and below a 16px control, and this row
+        // sits ~20px under the marks row. Measured, the collision was total —
+        // "Edit" is later in DOM order, so its box took the overlap, and
+        // `elementFromPoint` returned Edit at "Mark"'s own centre; only a 6px
+        // strip at the top of Mark still hit Mark. So down the column the
+        // reach is capped at 8px past each edge, under half the gap to the
+        // next row, and across — where the card has the width — the full 44px
+        // stands.
+        //
+        // Direct children only, and that is the whole point of writing it
+        // here rather than on the card. It is these three inline controls that
+        // collide with the row above; the status panel that unrolls *inside*
+        // this row on the line below has a line of its own and keeps the
+        // utility as written, as do the history button, the reply form and
+        // "more replies".
+        <div className="mt-2.5 flex flex-wrap items-baseline gap-x-5 [&>.tap-target]:after:h-[calc(100%+1rem)] [&>.tap-target]:after:min-h-0">
           {annotation.visibility === "lab" && !annotation.deleted && (
             <button
               type="button"

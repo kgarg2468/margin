@@ -3,21 +3,48 @@
 import { openedFromKeyboard } from "@/lib/ui";
 import { Popover as Base } from "@base-ui/react/popover";
 import { useState } from "react";
-import type { ReactNode } from "react";
+import type { ComponentProps, ReactNode } from "react";
+
+/**
+ * Why Base UI wants to close, and the escape hatch for a caller that would
+ * rather ask first.
+ *
+ * Structural rather than imported from Base UI's internals: the reasons are
+ * strings (`"escape-key"`, `"outside-press"`, …) and the only capability worth
+ * exposing is the one the reader's composer needs — stop the dismissal, put a
+ * question on screen, and let the person who is halfway through a note decide.
+ */
+export type PopoverDismissal = {
+  reason: string;
+  cancel: () => void;
+  /** The native event behind the dismissal, when an event caused it. */
+  event?: Event;
+  /**
+   * Let the event that caused this dismissal keep bubbling. Base UI stops it
+   * by default; a caller that cancelled the dismissal because the event
+   * belongs to a surface above (the ⌘K palette over the composer) calls this
+   * so that surface still hears it. Both fields are on every details object
+   * Base UI builds; the optionality is this type's caution, not a real maybe.
+   */
+  allowPropagation?: () => void;
+};
 
 /**
  * A sheet held above the page, anchored to the thing that opened it.
  *
- * Margin has exactly one popover, and this is it: the reader's composer, a
- * date picker, anything that has to appear beside a control rather than in the
+ * Margin has exactly one popover, and this is it: the reader's composer, a date
+ * picker, anything that has to appear beside a control rather than in the
  * middle of the screen. The positioning, the focus return, the Escape and the
  * ARIA wiring are Base UI's — they are the parts that are tedious to get right
  * and invisible when they are wrong. What lives here is the paper: the app's
  * own surface tokens, and the app's own entrance.
  *
- * `trigger` is the *content* of the trigger button, not a button itself —
- * Base UI renders the `<button>` — so pass a label or an icon, and reach for
- * `triggerClassName` to dress it.
+ * Two shapes, because the composer needs the second one. Uncontrolled with a
+ * `trigger`: pass the *content* of the trigger button, not a button — Base UI
+ * renders the `<button>`. Controlled with `open` and `anchor`: no trigger at
+ * all, and the thing being pointed at is a rectangle rather than a control (see
+ * `boxAnchor` in `lib/ui.ts`), which is the only way to anchor a sheet to a run
+ * of selected text.
  */
 export function Popover({
   trigger,
@@ -28,8 +55,14 @@ export function Popover({
   sideOffset = 8,
   triggerClassName,
   className,
+  open,
+  onOpenChange,
+  anchor,
+  initialFocus,
+  instant,
 }: {
-  trigger: ReactNode;
+  /** Omit for a controlled popover with an `anchor`. */
+  trigger?: ReactNode;
   children: ReactNode;
   /**
    * Required, because Base UI renders the sheet as a `role="dialog"` and a
@@ -40,31 +73,61 @@ export function Popover({
    * `Base.Title`, which this wrapper deliberately doesn't reach for yet.)
    */
   "aria-label": string;
-  /** Which side of the trigger to open on. Flips if it doesn't fit. */
+  /** Which side of the anchor to open on. Flips if it doesn't fit. */
   side?: "top" | "bottom" | "left" | "right";
   align?: "start" | "center" | "end";
-  /** Gap between trigger and sheet, in pixels. */
+  /** Gap between anchor and sheet, in pixels. */
   sideOffset?: number;
   triggerClassName?: string;
   /** Extra classes on the sheet — sizing, mostly. */
   className?: string;
+  /** Controlled open. Leave undefined and the trigger owns it. */
+  open?: boolean;
+  /**
+   * Called when Base UI wants the sheet opened or closed. `details.cancel()`
+   * refuses the dismissal, which is how a caller gets to ask "discard this?"
+   * before Escape takes a half-written note away.
+   */
+  onOpenChange?: (open: boolean, details: PopoverDismissal) => void;
+  /** What to position against, when it isn't the trigger. */
+  anchor?: ComponentProps<typeof Base.Positioner>["anchor"];
+  /** `false` leaves focus where it is, for a sheet whose own field autofocuses. */
+  initialFocus?: ComponentProps<typeof Base.Popup>["initialFocus"];
+  /**
+   * Skip the entrance, for a controlled sheet whose caller knows it was
+   * summoned from the keyboard.
+   *
+   * A popover with a trigger settles this by itself, from the event Base UI
+   * hands it when it opens. A controlled one mounted with `open` already
+   * `true` is never opened as far as Base UI is concerned — there is no event,
+   * the callback below never fires with `true`, and the sheet would play
+   * `pop-in` after a keystroke forever. So the one shape that cannot answer
+   * the question gets to be told.
+   */
+  instant?: boolean;
 }) {
-  const [instant, setInstant] = useState(false);
+  const [openedByKey, setOpenedByKey] = useState(false);
+  const withoutEntrance = instant ?? openedByKey;
 
   return (
     <Base.Root
-      onOpenChange={(open, details) => {
-        if (open) {
-          setInstant(openedFromKeyboard(details.event));
+      {...(open === undefined ? {} : { open })}
+      onOpenChange={(next, details) => {
+        if (next) {
+          setOpenedByKey(openedFromKeyboard(details.event));
         }
+        onOpenChange?.(next, details);
       }}
     >
-      <Base.Trigger className={triggerClassName}>{trigger}</Base.Trigger>
+      {trigger !== undefined && (
+        <Base.Trigger className={triggerClassName}>{trigger}</Base.Trigger>
+      )}
       <Base.Portal>
         <Base.Positioner
           side={side}
           align={align}
           sideOffset={sideOffset}
+          {...(anchor === undefined ? {} : { anchor })}
           // Flip to the far side when the near one won't fit; slide along the
           // other axis rather than flipping, so a sheet anchored to something
           // near the edge of the window stays where the eye left it.
@@ -73,6 +136,7 @@ export function Popover({
         >
           <Base.Popup
             aria-label={ariaLabel}
+            {...(initialFocus === undefined ? {} : { initialFocus })}
             className={
               "rounded-md border border-rule bg-surface p-4 font-sans " +
               "shadow-[var(--shadow-sheet)] outline-none " +
@@ -82,7 +146,7 @@ export function Popover({
               // frames fades rather than snapping.
               "transition-opacity duration-[var(--dur-exit)] ease-out " +
               "data-[ending-style]:animate-none data-[ending-style]:opacity-0 " +
-              (instant ? "" : "pop-in ") +
+              (withoutEntrance ? "" : "pop-in ") +
               (className ?? "")
             }
           >

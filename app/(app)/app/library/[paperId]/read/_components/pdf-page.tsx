@@ -10,6 +10,7 @@ import {
   resolveAnchor,
 } from "@/lib/anchoring";
 import { loadPdfjs, normalizePdfText } from "@/lib/pdf/extract";
+import { openedFromKeyboard } from "@/lib/ui";
 import type {
   PDFDocumentProxy,
   PDFPageProxy,
@@ -17,14 +18,24 @@ import type {
 } from "pdfjs-dist/types/src/display/api";
 import type { CSSProperties, KeyboardEvent, MouseEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { suppressNextClick } from "./click-suppressor";
+import { unionOfRects } from "./draft-box";
+import { ruleOpacity, washOpacity } from "./mark-alpha";
 import { typeStyle } from "./ontology";
+import {
+  PAGE_KEYS_HINT_ID,
+  offerIsTabbable,
+  pageKeyTarget,
+} from "./page-navigation";
 import styles from "./reader.module.css";
 import type {
   AnchorState,
   AnnotationId,
   AnnotationView,
   Draft,
+  DraftBox,
   PageResolution,
+  PassagePoint,
 } from "./types";
 
 /**
@@ -128,6 +139,11 @@ const LIVE_PAGES = new Map<number, LivePage>();
 export type PdfPageProps = {
   doc: PDFDocumentProxy;
   pageIndex: number;
+  /** How many pages the paper has, for the keyboard navigation's ends. */
+  pageCount: number;
+  /** This is the page the one tab stop is currently on. */
+  tabStop: boolean;
+  onNavigate: (pageIndex: number) => void;
   scale: number;
   width: number;
   height: number;
@@ -144,8 +160,17 @@ export type PdfPageProps = {
    */
   recovered: ReadonlySet<AnnotationId>;
   activeId: AnnotationId | null;
-  /** A composer is already open on this page, so it does not need offering. */
-  composing: boolean;
+  /**
+   * The composer's draft, when it belongs to this page. Draws the passage the
+   * note is being written about — otherwise there is nothing on the paper at
+   * all while somebody writes — and reports where that passage ended up so the
+   * composer can be anchored to it.
+   */
+  draft: Draft | null;
+  onDraftBox: (
+    pageIndex: number,
+    box: Omit<DraftBox, "pageIndex"> | null,
+  ) => void;
   onActivate: (id: AnnotationId | null) => void;
   onResolved: (pageIndex: number, resolution: PageResolution) => void;
   onDraft: (draft: Draft) => void;
@@ -155,6 +180,9 @@ export type PdfPageProps = {
 export function PdfPage({
   doc,
   pageIndex,
+  pageCount,
+  tabStop,
+  onNavigate,
   scale,
   width,
   height,
@@ -162,7 +190,8 @@ export function PdfPage({
   annotations,
   recovered,
   activeId,
-  composing,
+  draft,
+  onDraftBox,
   onActivate,
   onResolved,
   onDraft,
@@ -174,6 +203,8 @@ export function PdfPage({
   const hoveredRef = useRef<AnnotationId | null>(null);
 
   const [layer, setLayer] = useState<TextLayerIndex | null>(null);
+  /** The scale the text layer now on screen was rendered at. */
+  const layerScale = useRef(scale);
   const [marks, setMarks] = useState<Mark[]>([]);
   const [failed, setFailed] = useState(false);
   /**
@@ -265,6 +296,12 @@ export function PdfPage({
         }
       }
       setExtractedLength(normalizePdfText(extracted).length);
+      // Written where the layer is built, and read by the two effects that
+      // report pixels measured off it. Neither of them can depend on `scale`:
+      // a scale change tears this layer down before either could re-measure,
+      // so an effect that re-ran on it would be measuring spans that are no
+      // longer in the document.
+      layerScale.current = scale;
       setLayer(indexTextLayer(container));
     };
 
@@ -335,6 +372,14 @@ export function PdfPage({
     const orphaned: AnnotationId[] = [];
     const positions = new Map<AnnotationId, number>();
     const states = new Map<AnnotationId, AnchorState>();
+    const points = new Map<AnnotationId, PassagePoint>();
+    // The gutter starts at the page's right edge, and the page does not move
+    // between annotations, so this is read once rather than per mark.
+    // This offset is relative to the reader's content box (the `relative`
+    // wrapper in reader.tsx), which is also the rail spacer's offsetParent —
+    // margin-rail.tsx subtracts its own origin from this value. Giving the
+    // page column or the rail root a `position` breaks both axes silently.
+    const gutterX = wrapper.offsetLeft + wrapper.offsetWidth;
 
     for (const annotation of annotations) {
       const resolved = cachedResolve(
@@ -380,6 +425,15 @@ export function PdfPage({
         ambiguous: resolved.ambiguous,
       });
       positions.set(annotation._id, wrapper.offsetTop + (rects[0]?.top ?? 0));
+      let lowest = 0;
+      for (const rect of rects) {
+        lowest = Math.max(lowest, rect.top + rect.height);
+      }
+      points.set(annotation._id, {
+        top: wrapper.offsetTop + (rects[0]?.top ?? 0),
+        bottom: wrapper.offsetTop + lowest,
+        gutterX,
+      });
       states.set(annotation._id, {
         method: resolved.method,
         confidence: resolved.confidence,
@@ -402,8 +456,74 @@ export function PdfPage({
     }
 
     setMarks(placed);
-    onResolved(pageIndex, { positions, states, orphaned });
+    onResolved(pageIndex, {
+      positions,
+      points,
+      states,
+      orphaned,
+      scale: layerScale.current,
+    });
   }, [layer, extractedLength, annotations, recovered, pageIndex, onResolved]);
+
+  // --- the passage being written about ------------------------------------
+  const [draftRects, setDraftRects] = useState<Mark["rects"]>([]);
+  const reported = useRef(false);
+
+  useEffect(() => {
+    const wrapper = wrapperRef.current;
+    if (draft !== null && layer === null) {
+      // The text layer is gone but the note being written about it is not:
+      // either this page scrolled out of the render window, or a zoom is
+      // rebuilding the layer at a new scale. Drop the rectangles — they are
+      // stale pixels and would be drawn over a page that has moved — but do
+      // *not* retract the box. Held, it is the page's own rectangle stamped
+      // with the size it was taken at, which the reader can put back where the
+      // page is now for as long as this takes; retracted, it is null, and the
+      // composer anchored to it would jump on every zoom step.
+      setDraftRects((previous) => (previous.length === 0 ? previous : []));
+      return;
+    }
+    const range =
+      draft === null || layer === null
+        ? null
+        : rangeForOffsets(layer, draft.anchor.start, draft.anchor.end);
+    if (wrapper === null || range === null) {
+      setDraftRects((previous) => (previous.length === 0 ? previous : []));
+      if (reported.current) {
+        reported.current = false;
+        onDraftBox(pageIndex, null);
+      }
+      return;
+    }
+
+    const bounds = wrapper.getBoundingClientRect();
+    const rects = [...range.getClientRects()]
+      .filter((rect) => rect.width > 0.5 && rect.height > 0.5)
+      .map((rect) => ({
+        left: rect.left - bounds.left,
+        top: rect.top - bounds.top,
+        width: rect.width,
+        height: rect.height,
+      }));
+    setDraftRects(rects);
+    if (rects.length === 0) {
+      if (reported.current) {
+        reported.current = false;
+        onDraftBox(pageIndex, null);
+      }
+      return;
+    }
+
+    const union = unionOfRects(rects);
+    if (union === null) {
+      return;
+    }
+    reported.current = true;
+    // In the page's own coordinates. The reader puts it back where the page
+    // currently is, which is the only version of that sum that survives a zoom
+    // — see `draftAnchorBox`.
+    onDraftBox(pageIndex, { ...union, scale: layerScale.current });
+  }, [draft, layer, pageIndex, onDraftBox]);
 
   // --- selection ---------------------------------------------------------
   /**
@@ -453,6 +573,9 @@ export function PdfPage({
     const selectionBox = range.getBoundingClientRect();
     return {
       anchor,
+      // The default, overridden by whichever gesture is asking. A selection is
+      // a selection; how it was made is the caller's news, not the range's.
+      fromKeyboard: false,
       top:
         owner.wrapper.offsetTop +
         Math.min(
@@ -466,13 +589,32 @@ export function PdfPage({
     };
   }, []);
 
-  const captureSelection = useCallback(() => {
-    const draft = draftFromSelection();
-    if (draft !== null) {
-      onDraft(draft);
+  const captureSelection = useCallback(
+    (fromKeyboard: boolean): boolean => {
+      const draft = draftFromSelection();
+      if (draft === null) {
+        return false;
+      }
+      onDraft({ ...draft, fromKeyboard });
       setPending(null);
-    }
-  }, [draftFromSelection, onDraft]);
+      return true;
+    },
+    [draftFromSelection, onDraft],
+  );
+
+  /**
+   * The suppressor armed by the last drag that produced a note, held so the
+   * page can take it with it if it unmounts before the click lands. See
+   * `click-suppressor.ts` for why the click has to be swallowed at all.
+   */
+  const swallowing = useRef<(() => void) | null>(null);
+  useEffect(
+    () => () => {
+      swallowing.current?.();
+      swallowing.current = null;
+    },
+    [],
+  );
 
   // The keyboard path. Shift-arrow through the text layer moves the selection
   // without any pointer event, and caret browsing makes that the way a
@@ -573,21 +715,58 @@ export function PdfPage({
     <div
       ref={setWrapper}
       data-page={pageIndex}
-      // Focusable so a keyboard reader can reach the page at all: pdf.js's
-      // text layer is a pile of positioned spans with nothing tabbable in it,
-      // and caret browsing needs somewhere to start.
-      tabIndex={0}
+      // One stop for the whole paper, on the page being read. pdf.js's text
+      // layer is a pile of positioned spans with nothing tabbable in it, and
+      // caret browsing needs somewhere to start — so the affordance stays and
+      // the other thirty-six stops go. Page Up and Page Down move it.
+      tabIndex={tabStop ? 0 : -1}
       role="group"
-      aria-label={`Page ${pageIndex + 1}`}
+      aria-label={`Page ${pageIndex + 1} of ${pageCount}`}
+      // Only on the page that carries the stop: somebody who tabs straight
+      // into the paper hears which keys move it. On the other thirty-six it
+      // would be thirty-six copies of the same sentence in the tree.
+      aria-describedby={tabStop ? PAGE_KEYS_HINT_ID : undefined}
       // A sheet of paper on the desk, not a rectangle in a void: a hair of
       // radius and a soft drop shadow instead of the old hard 1px ledge.
       className={`${styles.page} shrink-0 rounded-[3px] border border-rule bg-surface shadow-[var(--shadow-card)] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-accent`}
       style={pageStyle}
-      onMouseUp={captureSelection}
+      onMouseUp={() => {
+        if (!captureSelection(false)) {
+          return;
+        }
+        // A note has just opened over this page and the gesture that opened it
+        // still has a `click` to fire. Base UI would read that click as an
+        // outside press and close the sheet before the reader saw it.
+        swallowing.current?.();
+        swallowing.current = suppressNextClick(document);
+      }}
+      onKeyDown={(event: KeyboardEvent<HTMLDivElement>) => {
+        // Held down, and these keys are not navigation any more: Shift+End
+        // extends the selection to the end of the line, which is the gesture
+        // the whole caret path exists to serve, and a page jump would eat it
+        // and then hand `onKeyUp` a selection that was never extended.
+        if (
+          event.shiftKey ||
+          event.metaKey ||
+          event.ctrlKey ||
+          event.altKey
+        ) {
+          return;
+        }
+        const target = pageKeyTarget(event.key, {
+          current: pageIndex,
+          pageCount,
+        });
+        if (target === null || target === pageIndex) {
+          return;
+        }
+        event.preventDefault();
+        onNavigate(target);
+      }}
       onKeyUp={(event: KeyboardEvent<HTMLDivElement>) => {
         // Shift-arrow selection never fires a mouseup.
         if (event.shiftKey) {
-          captureSelection();
+          captureSelection(true);
         }
       }}
       onMouseMove={handleMove}
@@ -617,13 +796,10 @@ export function PdfPage({
                       width: rect.width,
                       height: rect.height,
                       background: style.wash,
-                      opacity: mark.drifted
-                        ? isActive
-                          ? 0.55
-                          : 0.25
-                        : isActive
-                          ? 1
-                          : 0.5,
+                      opacity: washOpacity({
+                        drifted: mark.drifted,
+                        active: isActive,
+                      }),
                       borderRadius: 2,
                       transition: "opacity 120ms",
                     }}
@@ -639,7 +815,7 @@ export function PdfPage({
                         ? `${rule}px dashed ${ink}`
                         : undefined,
                       background: mark.drifted ? undefined : ink,
-                      opacity: isActive ? 1 : 0.75,
+                      opacity: ruleOpacity({ active: isActive }),
                     }}
                   />
                 </span>
@@ -647,18 +823,69 @@ export function PdfPage({
             </div>
           );
         })}
+
+        {/* The passage, while it is still only a selection. It wears the
+            selection's own wash rather than a type's: nothing has been chosen
+            yet, nothing has been saved, and the composer above it is still a
+            question. The dashed rule says the same thing in the language the
+            drifted marks already use.
+
+            The wash is the same literal as the `::selection` rule in
+            reader.module.css, and for the same reason — see the comment there.
+            This mark stands in for a selection the composer's `autoFocus` has
+            just collapsed, so anything fainter than the thing it replaces is a
+            passage that dims the moment you start writing about it. Going
+            through `--highlight` at 0.9 would land near 27%: visibly less than
+            the 40% it is impersonating, on the one surface where the two are
+            swapped in front of the reader. The two literals have to move
+            together. */}
+        {draftRects.map((rect, index) => (
+          <span key={`draft-${index}`}>
+            <span
+              style={{
+                position: "absolute",
+                left: rect.left,
+                top: rect.top,
+                width: rect.width,
+                height: rect.height,
+                background: "rgba(64, 104, 160, 0.4)",
+                opacity: 1,
+                borderRadius: 2,
+              }}
+            />
+            <span
+              style={{
+                position: "absolute",
+                left: rect.left,
+                top: rect.top + rect.height - 2,
+                width: rect.width,
+                height: 0,
+                borderTop: "1.5px dashed var(--accent)",
+                opacity: 0.8,
+              }}
+            />
+          </span>
+        ))}
       </div>
 
       <div ref={textLayerRef} className={styles.textLayer} />
 
-      {pending !== null && !composing && (
+      {pending !== null && draft === null && (
         <button
           type="button"
           data-annotate=""
+          // Only while the selection it offers is still the one on screen. A
+          // page the reader has left keeps its offer — the selection is live
+          // and a pointer can still take it up — but it is not on the way to
+          // anywhere. See `offerIsTabbable`.
+          tabIndex={offerIsTabbable({ onPageBeingRead: tabStop })}
           // Losing the selection to the button's own focus would defeat it.
           onMouseDown={(event) => event.preventDefault()}
-          onClick={() => {
-            onDraft(pending);
+          onClick={(event) => {
+            onDraft({
+              ...pending,
+              fromKeyboard: openedFromKeyboard(event.nativeEvent),
+            });
             setPending(null);
           }}
           style={{
