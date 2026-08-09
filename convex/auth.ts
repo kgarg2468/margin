@@ -209,26 +209,85 @@ const SEND_ATTEMPTS = 3;
 const MAX_BACKOFF_MS = 8_000;
 
 /** Sleeping in an action is legal and, for a rate limit, is the entire remedy. */
-function pause(ms: number): Promise<void> {
+export function pause(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Doubling, for when the server said nothing about when to come back. */
+function backoffMs(attempt: number): number {
+  return Math.min(500 * 2 ** attempt, MAX_BACKOFF_MS);
+}
+
 /**
- * How long to wait after a refusal that is worth asking again about.
+ * One `retry-after`-shaped header value, in milliseconds, or `null`.
+ *
+ * Both spellings the RFC allows: a count of seconds, and an HTTP-date. The
+ * date form is rarer but it is not exotic — a proxy in front of Resend is
+ * entitled to emit it — and reading it as `NaN` used to mean the header was
+ * quietly discarded and the caller waited an invented amount instead.
+ */
+function directedDelayMs(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+  const seconds = Number(trimmed);
+  if (Number.isFinite(seconds)) {
+    return seconds >= 0 ? seconds * 1000 : null;
+  }
+  const at = Date.parse(trimmed);
+  if (Number.isNaN(at)) {
+    return null;
+  }
+  // A date already in the past is a window that has already reopened.
+  return Math.max(at - Date.now(), 0);
+}
+
+/**
+ * How long to wait after a refusal that is worth asking again about, or `null`
+ * for "do not wait, this attempt was the last one worth making".
  *
  * Resend answers a rate limit with the headers that say when the window
  * reopens, so the first choice is simply to believe it. `retry-after` is in
  * seconds; `ratelimit-reset` is Resend's own spelling of the same idea. Only
  * when neither is present or parseable does this fall back to doubling.
+ *
+ * Two things this gets wrong easily, and got wrong before:
+ *
+ *   - `headers.get()` answers `null` for a header that is not there, and
+ *     `Number(null)` is `0`, which is finite and non-negative. So an absent
+ *     `retry-after` used to be read as "come back immediately", the loop
+ *     returned on its first pass, and neither `ratelimit-reset` nor the
+ *     exponential fallback was reachable at all. A missing header has to be
+ *     skipped before it is ever handed to `Number`.
+ *   - Believing a *long* directed delay is worse than not retrying. `MAX_BACKOFF_MS`
+ *     used to clamp `retry-after: 60` down to eight seconds, which guarantees
+ *     the re-ask lands inside the window the server just told us to sit out —
+ *     a wasted attempt, a wasted eight seconds, and the same refusal. If the
+ *     server asks for longer than we are willing to wait, the honest answer is
+ *     to stop now.
  */
-function retryAfterMs(response: Response, attempt: number): number {
+export function retryAfterMs(
+  response: Response,
+  attempt: number,
+): number | null {
   for (const header of ["retry-after", "ratelimit-reset"]) {
-    const seconds = Number(response.headers.get(header));
-    if (Number.isFinite(seconds) && seconds >= 0) {
-      return Math.min(seconds * 1000 + 250, MAX_BACKOFF_MS);
+    const raw = response.headers.get(header);
+    if (raw === null) {
+      continue;
     }
+    const directed = directedDelayMs(raw);
+    if (directed === null) {
+      continue;
+    }
+    if (directed > MAX_BACKOFF_MS) {
+      return null;
+    }
+    // A little past the window rather than exactly on its edge: clocks
+    // disagree, and arriving a moment early is arriving into the same 429.
+    return directed + 250;
   }
-  return Math.min(500 * 2 ** attempt, MAX_BACKOFF_MS);
+  return backoffMs(attempt);
 }
 
 /**
@@ -279,31 +338,68 @@ export async function sendEmail(message: {
     html: message.html,
   });
 
+  // One key per *message*, minted outside the loop and sent on every attempt.
+  //
+  // This is what makes the retry above safe rather than merely hopeful. A
+  // `502` or `504` from an edge in front of Resend does not mean the message
+  // was refused — it means the answer was lost, and Resend may well have
+  // accepted and queued it already. Re-asking without a key is how a labmate
+  // gets mentioned once and mailed twice. With `Idempotency-Key` constant
+  // across attempts, Resend replays the first outcome instead of sending
+  // again, and a re-ask can only ever be a re-ask.
+  const idempotencyKey = crypto.randomUUID();
+
+  const failed = () =>
+    new ConvexError(
+      "We couldn't send that email. The address may be wrong, or mail delivery may be misconfigured.",
+    );
+
   for (let attempt = 0; attempt < SEND_ATTEMPTS; attempt++) {
-    const response = await fetch(RESEND_ENDPOINT, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body,
-    });
+    const lastAttempt = attempt === SEND_ATTEMPTS - 1;
+
+    let response: Response;
+    try {
+      response = await fetch(RESEND_ENDPOINT, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKey,
+        },
+        body,
+      });
+    } catch (caught) {
+      // A `fetch` that throws is a network-level failure — DNS, a dropped
+      // connection, a TLS handshake that went nowhere — and it is *more*
+      // transient than any status code, not less. Retrying only HTTP statuses
+      // meant the one failure mode that always deserves a second ask was the
+      // one that never got it.
+      if (!lastAttempt) {
+        await pause(backoffMs(attempt));
+        continue;
+      }
+      console.error(`Resend was unreachable: ${String(caught)}`);
+      throw failed();
+    }
 
     if (response.ok) {
       return;
     }
 
     const worthRetrying = response.status === 429 || response.status >= 500;
-    if (worthRetrying && attempt < SEND_ATTEMPTS - 1) {
-      await pause(retryAfterMs(response, attempt));
-      continue;
+    if (worthRetrying && !lastAttempt) {
+      const wait = retryAfterMs(response, attempt);
+      // `null` is the server asking for longer than this action is willing to
+      // wait. Falling through to the failure below is the point.
+      if (wait !== null) {
+        await pause(wait);
+        continue;
+      }
     }
 
     const detail = await response.text().catch(() => "");
     console.error(`Resend refused a message (${response.status}): ${detail}`);
-    throw new ConvexError(
-      "We couldn't send that email. The address may be wrong, or mail delivery may be misconfigured.",
-    );
+    throw failed();
   }
 }
 
