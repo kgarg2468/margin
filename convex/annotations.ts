@@ -16,7 +16,10 @@ import {
 } from "./schema";
 import { canApprove } from "./sessions";
 import { isStillShared } from "./synthesis";
-import { checkTransition } from "../lib/epistemic/status";
+import {
+  checkTransition,
+  grantsPresenterStanding,
+} from "../lib/epistemic/status";
 import { disambiguate, MAX_MENTIONS_PER_NOTE } from "../lib/mentions";
 
 /**
@@ -508,10 +511,16 @@ async function requireOwn(
  * question asked is "have you ever run this lab's discussion of this paper",
  * which is the standing the rule is actually about.
  *
- * Cancelled sessions do not count. Nobody presented a meeting that was never
- * held, and a member who books a session on a paper, cancels it, and thereby
- * acquires the right to rule on everyone's notes about it would be a hole in
- * this rule rather than an edge of it.
+ * The standing comes from meetings that were *held* — `live`, `ended`,
+ * `synthesized` — and never from one that is merely on the calendar. Being
+ * assigned to present next Thursday is not having run a discussion, so a member
+ * who could rule on this paper's claims the moment the session was booked would
+ * be signing the lab's name to their own reading of a paper the lab has not met
+ * to argue about. It is also the hole a person could open at will: book a
+ * session on any paper, acquire standing over every note in its margin, cancel.
+ * `grantsPresenterStanding` is the same hour `canRecord` admits outcomes in
+ * (`lib/actions/outcomes.ts`) — during the meeting is exactly when verdicts get
+ * recorded, before it is not.
  *
  * What this cannot yet express: a lab whose PI has left, and a lab that would
  * rather every member could rule. Both are settings, and settings are a surface
@@ -530,7 +539,8 @@ async function mayRuleOnStatus(
     .withIndex("by_paper", (q) => q.eq("paperId", paperId))
     .take(MAX_SESSIONS_CONSULTED);
   return sessions.some(
-    (session) => session.status !== "cancelled" && canApprove(session, membership),
+    (session) =>
+      grantsPresenterStanding(session.status) && canApprove(session, membership),
   );
 }
 

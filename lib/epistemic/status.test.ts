@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { canRecord, type SessionStatus } from "../actions";
 import {
   checkTransition,
   EPISTEMIC_STATUSES,
+  grantsPresenterStanding,
   STATUS_MARKS,
   statusLine,
   statusWord,
@@ -92,6 +94,42 @@ describe("the line a card wears", () => {
     expect(statusLine(mark)).toBe(
       `${statusWord(mark.value)} ${supersessionLine(mark) ?? ""}`,
     );
+  });
+});
+
+describe("presenter standing", () => {
+  const LIFECYCLE: SessionStatus[] = [
+    "scheduled",
+    "live",
+    "ended",
+    "synthesized",
+    "cancelled",
+  ];
+
+  it("comes from the meetings that were actually held", () => {
+    expect(LIFECYCLE.filter(grantsPresenterStanding)).toEqual([
+      "live",
+      "ended",
+      "synthesized",
+    ]);
+  });
+
+  it("refuses a meeting that has only been scheduled", () => {
+    // The failure this guards is the quiet one: being assigned to present next
+    // Thursday is not having run a discussion, and standing granted on the
+    // assignment lets a member record the lab's verdict on a claim the lab has
+    // not met to argue about.
+    expect(grantsPresenterStanding("scheduled")).toBe(false);
+    expect(grantsPresenterStanding("cancelled")).toBe(false);
+  });
+
+  it("agrees with its twin in the outcome record", () => {
+    // `canRecord` gates the same hour for session outcomes. The two are
+    // mirrored rather than shared because they answer different questions, so
+    // this is what stops one from being changed without the other.
+    for (const status of LIFECYCLE) {
+      expect(grantsPresenterStanding(status), status).toBe(canRecord(status));
+    }
   });
 });
 

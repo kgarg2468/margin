@@ -164,6 +164,38 @@ export function statusLine(mark: {
   return citation === null ? word : `${word} ${citation}`;
 }
 
+/**
+ * Whether a meeting is one whose presenter has standing to rule on this
+ * paper's claims: `live` while the room is talking, `ended` or `synthesized`
+ * afterwards.
+ *
+ * The gate is the hour, not the calendar. Being *assigned* to present next
+ * Thursday is not having run a discussion, and a member who could record the
+ * lab's verdict on a claim the lab has not met to argue about would be signing
+ * the group's name to their own reading. `scheduled` is refused for that
+ * reason and `cancelled` for the plainer version of it: there was no
+ * discussion. During the meeting is exactly when verdicts get recorded; before
+ * it is not.
+ *
+ * ## Its twin
+ *
+ * This is the same union `canRecord` in `lib/actions/outcomes.ts` applies to
+ * session outcomes, and for the same reason — an outcome and a status are both
+ * claims about an hour that happened. It is mirrored rather than imported
+ * because the two predicates answer different questions ("may this meeting be
+ * given outcomes" against "does this meeting confer standing") and a call site
+ * reading `canRecord(session.status)` inside a permission check would leave the
+ * next reader asking what is being recorded. What keeps the copies honest is
+ * mechanical rather than hopeful: `status.test.ts` asserts the two agree on
+ * every member of the lifecycle, so a change to one that is not made to the
+ * other fails the build.
+ */
+export function grantsPresenterStanding(
+  status: "scheduled" | "live" | "ended" | "synthesized" | "cancelled",
+): boolean {
+  return status === "live" || status === "ended" || status === "synthesized";
+}
+
 export type TransitionCheck =
   | {
       ok: true;
