@@ -30,6 +30,7 @@ import type { RailCard } from "./margin-rail";
 import { MarginRail } from "./margin-rail";
 import type { AnnotationType } from "./ontology";
 import { ANNOTATION_TYPES } from "./ontology";
+import { tabStopPage } from "./page-navigation";
 import { PdfPage } from "./pdf-page";
 import type {
   AnnotationId,
@@ -1226,7 +1227,7 @@ export function Reader({
                   doc={doc}
                   pageIndex={index}
                   pageCount={pageCount}
-                  tabStop={index === Math.min(currentPage, pageCount - 1)}
+                  tabStop={index === tabStopPage({ current: currentPage, pageCount })}
                   onNavigate={goToPage}
                   scale={scale}
                   width={pageWidth}

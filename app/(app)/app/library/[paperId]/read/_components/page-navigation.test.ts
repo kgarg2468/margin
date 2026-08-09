@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { pageKeyTarget } from "./page-navigation";
+import { pageKeyTarget, tabStopPage } from "./page-navigation";
 
 const PAPER = { pageCount: 37 };
 
@@ -39,5 +39,21 @@ describe("keys this navigation has no opinion about", () => {
 describe("a paper that has not loaded", () => {
   it("has nowhere to go", () => {
     expect(pageKeyTarget("PageDown", { current: 0, pageCount: 0 })).toBeNull();
+  });
+});
+
+describe("where the one stop sits", () => {
+  it("is on the page being read", () => {
+    expect(tabStopPage({ current: 12, ...PAPER })).toBe(12);
+  });
+
+  it("falls back to the last page when the paper got shorter under it", () => {
+    // A second document loaded into the same reader, and the page the
+    // observer last reported is off the end of it.
+    expect(tabStopPage({ current: 40, ...PAPER })).toBe(36);
+  });
+
+  it("gives an unloaded paper no stop at all rather than page zero", () => {
+    expect(tabStopPage({ current: 0, pageCount: 0 })).toBeNull();
   });
 });

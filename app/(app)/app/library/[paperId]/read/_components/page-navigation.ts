@@ -14,6 +14,33 @@
  * would take annotation away in exchange for scrolling.
  */
 
+/**
+ * Which page carries the stop.
+ *
+ * Ordinarily the one being read. The clamp is for the case where it is not:
+ * the page being read is reported by an IntersectionObserver over the pages
+ * that exist, and when a second document loads into the same reader the
+ * observer's last answer can be off the end of the new one. Unclamped, every
+ * page would compare false and the paper would have no tab stop at all —
+ * unreachable by keyboard, and silently, since nothing else in the reader
+ * depends on this number.
+ *
+ * `null` for a paper with no pages, which is not the same answer as page zero:
+ * there is nothing to put a stop on yet.
+ */
+export function tabStopPage({
+  current,
+  pageCount,
+}: {
+  current: number;
+  pageCount: number;
+}): number | null {
+  if (pageCount <= 0) {
+    return null;
+  }
+  return Math.min(current, pageCount - 1);
+}
+
 export function pageKeyTarget(
   key: string,
   { current, pageCount }: { current: number; pageCount: number },
