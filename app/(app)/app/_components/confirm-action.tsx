@@ -101,7 +101,7 @@ export function ConfirmAction({
     >
       <AlertDialog.Trigger
         disabled={disabled}
-        className={`font-sans ${scale} ${quiet} tap-target`}
+        className={`font-sans ${scale} ${quiet} pressable tap-target`}
       >
         {label}
       </AlertDialog.Trigger>
