@@ -70,8 +70,73 @@ describe("sessionWriteUpToMarkdown", () => {
         "  [Note 1](#note-visible-1) · _Some of the notes behind this are no longer shared._\n\n" +
         "## Open questions\n\n" +
         "- Does the effect survive replication?\n\n" +
-        "  Grace Hopper · [Note 1](#note-visible-2)\n",
+        // Numbered across the whole document, not inside one bullet: this is
+        // the same note the summary cited second, so it is Note 2 here too.
+        "  Grace Hopper · [Note 2](#note-visible-2)\n",
     );
+  });
+
+  it("numbers a note once for the whole document, in display order", () => {
+    const markdown = sessionWriteUpToMarkdown({
+      title: "Numbering",
+      generatedSections: [
+        {
+          key: "connections",
+          heading: "Connections",
+          items: [
+            { text: "Third.", attribution: [], annotationIds: ["c", "a"] },
+          ],
+        },
+        {
+          key: "summary",
+          heading: "Summary",
+          items: [
+            { text: "First.", attribution: [], annotationIds: ["a"] },
+            { text: "Second.", attribution: [], annotationIds: ["b", "a"] },
+          ],
+        },
+      ],
+      visibleAnnotationIds: new Set(["a", "b", "c"]),
+    });
+
+    // `summary` leads `connections` in the canonical order, so the numbers
+    // follow the reader rather than the array: a=1, b=2, c=3 — and `a` keeps
+    // its 1 in all three lines that rest on it.
+    expect(markdown).toBe(
+      "# Numbering\n\n" +
+        "## Summary\n\n" +
+        "- First.\n\n  [Note 1](#note-a)\n\n" +
+        "- Second.\n\n  [Note 2](#note-b) · [Note 1](#note-a)\n\n" +
+        "## Connections\n\n" +
+        "- Third.\n\n  [Note 3](#note-c) · [Note 1](#note-a)\n",
+    );
+  });
+
+  it("does not spend a number on a citation it never prints", () => {
+    // A withdrawn note is redacted out of the document, so numbering it would
+    // leave the reader a hole — "Note 1 · Note 3" — where the second citation
+    // was never drawn.
+    const markdown = sessionWriteUpToMarkdown({
+      title: "Gaps",
+      generatedSections: [
+        {
+          key: "summary",
+          heading: "Summary",
+          items: [
+            {
+              text: "Partly withdrawn.",
+              attribution: [],
+              annotationIds: ["gone", "here"],
+            },
+            { text: "Still shared.", attribution: [], annotationIds: ["also"] },
+          ],
+        },
+      ],
+      visibleAnnotationIds: new Set(["here", "also"]),
+    });
+
+    expect(markdown).toContain("[Note 1](#note-here)");
+    expect(markdown).toContain("[Note 2](#note-also)");
   });
 
   it("writes a heading-only document when no synthesis exists", () => {

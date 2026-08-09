@@ -1,3 +1,5 @@
+import { citationNumbering } from "../citations/numbering";
+
 const SECTION_ORDER = [
   { key: "summary", fallback: "What the session was about" },
   { key: "open-questions", fallback: "Open questions" },
@@ -37,6 +39,7 @@ function escapeMarkdownInline(value: string): string {
 function markdownItem<A extends string>(
   item: GeneratedSynthesisSection<A>["items"][number],
   visibleAnnotationIds: ReadonlySet<A>,
+  numbering: ReadonlyMap<A, number>,
 ): string {
   const cited = item.annotationIds.filter((id) => visibleAnnotationIds.has(id));
   const withdrawn = item.annotationIds.length > 0 && cited.length === 0;
@@ -50,9 +53,12 @@ function markdownItem<A extends string>(
     if (!partial && item.attribution.length > 0) {
       metadata.push(escapeMarkdownInline(item.attribution.join(", ")));
     }
-    cited.forEach((id, index) => {
-      metadata.push(`[Note ${index + 1}](#note-${id})`);
-    });
+    for (const id of cited) {
+      const number = numbering.get(id);
+      if (number !== undefined) {
+        metadata.push(`[Note ${number}](#note-${id})`);
+      }
+    }
     if (partial) {
       metadata.push(`_${PARTIAL_ITEM_TEXT}_`);
     }
@@ -66,6 +72,12 @@ function markdownItem<A extends string>(
 /**
  * The approved string is already the lab's authored Markdown. Generated text
  * follows the same citation/redaction thresholds as the session component.
+ *
+ * Citation numbers are built here, from the sections this function was already
+ * handed, in the canonical order it prints them — not passed in. The page
+ * builds its map by the same rule from the same ordered array, so a downloaded
+ * .md and the screen it came from cannot disagree about which note "Note 3"
+ * is: there is no argument to forget to thread through.
  */
 export function sessionWriteUpToMarkdown<A extends string = string>({
   title,
@@ -81,19 +93,31 @@ export function sessionWriteUpToMarkdown<A extends string = string>({
       : `${titleLine}\n`;
   }
 
-  const sections: string[] = [];
-  for (const { key, fallback } of SECTION_ORDER) {
+  const ordered = SECTION_ORDER.flatMap(({ key, fallback }) => {
     const section = generatedSections?.find((candidate) => candidate.key === key);
-    if (section === undefined || section.items.length === 0) {
-      continue;
-    }
+    return section === undefined || section.items.length === 0
+      ? []
+      : [{ section, fallback }];
+  });
+
+  // Over the visible citations only: a withdrawn note is redacted out of the
+  // document, and a number spent on it would leave a hole in the sequence.
+  const numbering = citationNumbering(
+    ordered.flatMap(({ section }) =>
+      section.items.map((item) => ({
+        annotationIds: item.annotationIds.filter((id) =>
+          visibleAnnotationIds.has(id),
+        ),
+      })),
+    ),
+  );
+
+  const sections = ordered.map(({ section, fallback }) => {
     const heading = section.heading.length > 0 ? section.heading : fallback;
-    sections.push(
-      `## ${escapeMarkdownInline(heading)}\n\n${section.items
-        .map((item) => markdownItem(item, visibleAnnotationIds))
-        .join("\n\n")}`,
-    );
-  }
+    return `## ${escapeMarkdownInline(heading)}\n\n${section.items
+      .map((item) => markdownItem(item, visibleAnnotationIds, numbering))
+      .join("\n\n")}`;
+  });
 
   return sections.length > 0
     ? `${titleLine}\n\n${sections.join("\n\n")}\n`
