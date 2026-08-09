@@ -655,7 +655,6 @@ export default defineSchema({
     /** Set by an explicit act of the recipient's. Absent means outstanding. */
     acknowledgedAt: v.optional(v.number()),
   })
-    .index("by_recipient", ["recipientId"])
     .index("by_recipient_and_lab", ["recipientId", "labId"])
     /**
      * The count in the rail. Reading outstanding items through the index means
