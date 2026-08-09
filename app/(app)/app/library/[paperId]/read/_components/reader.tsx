@@ -18,6 +18,7 @@ import type {
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Composer } from "./composer";
+import { nextDraftBox } from "./draft-box";
 import type { RailCard } from "./margin-rail";
 import { MarginRail } from "./margin-rail";
 import type { AnnotationType } from "./ontology";
@@ -105,13 +106,13 @@ export function Reader({
   const [activeId, setActiveId] = useState<AnnotationId | null>(null);
   const [filter, setFilter] = useState<Set<AnnotationType>>(new Set());
   const [draft, setDraft] = useState<Draft | null>(null);
-  // Held but not yet read: the composer is still placed from the coordinates
-  // frozen at selection time, and anchoring it to this re-measured box is the
-  // next step. Kept here anyway because the measuring is the page's to do and
-  // the box has to land somewhere the composer can reach. Both suppressions
-  // come off the moment something reads it.
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const [_draftBox, setDraftBox] = useState<DraftBox | null>(null);
+  // The read half is deliberately unnamed for now: the composer is still
+  // placed from the coordinates frozen at selection time, and anchoring it to
+  // this re-measured box is the next step. The measuring is the page's to do
+  // either way, and the box has to land somewhere the composer can reach — so
+  // it is collected here, and the `draftBox` binding appears when something
+  // reads it.
+  const [, setDraftBox] = useState<DraftBox | null>(null);
   const [resolutions, setResolutions] = useState<Map<number, PageResolution>>(
     new Map(),
   );
@@ -121,15 +122,10 @@ export function Reader({
       pageIndex: number,
       box: { top: number; left: number; width: number; height: number } | null,
     ) => {
-      setDraftBox((previous) => {
-        if (box === null) {
-          // Only the page the composer is anchored to may retract the box; the
-          // other thirty-six report null on every mount and would otherwise
-          // clobber it.
-          return previous?.pageIndex === pageIndex ? null : previous;
-        }
-        return { pageIndex, ...box };
-      });
+      // Only the page the composer is anchored to may retract the box; the
+      // other thirty-six report null on every mount and would otherwise
+      // clobber it. See `draft-box.ts`.
+      setDraftBox((previous) => nextDraftBox(previous, pageIndex, box));
     },
     [],
   );

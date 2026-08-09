@@ -17,6 +17,7 @@ import type {
 } from "pdfjs-dist/types/src/display/api";
 import type { CSSProperties, KeyboardEvent, MouseEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { unionOfRects } from "./draft-box";
 import { ruleOpacity, washOpacity } from "./mark-alpha";
 import { typeStyle } from "./ontology";
 import styles from "./reader.module.css";
@@ -440,6 +441,17 @@ export function PdfPage({
 
   useEffect(() => {
     const wrapper = wrapperRef.current;
+    if (draft !== null && layer === null) {
+      // The text layer is gone but the note being written about it is not:
+      // either this page scrolled out of the render window, or a zoom is
+      // rebuilding the layer at a new scale. Drop the rectangles — they are
+      // stale pixels and would be drawn over a page that has moved — but do
+      // *not* retract the box. Held, it is exactly right through an unload and
+      // one frame stale through a zoom; retracted, it is null, and the
+      // composer anchored to it would jump on every zoom step.
+      setDraftRects((previous) => (previous.length === 0 ? previous : []));
+      return;
+    }
     const range =
       draft === null || layer === null
         ? null
@@ -471,22 +483,16 @@ export function PdfPage({
       return;
     }
 
-    let left = Infinity;
-    let top = Infinity;
-    let right = -Infinity;
-    let bottom = -Infinity;
-    for (const rect of rects) {
-      left = Math.min(left, rect.left);
-      top = Math.min(top, rect.top);
-      right = Math.max(right, rect.left + rect.width);
-      bottom = Math.max(bottom, rect.top + rect.height);
+    const union = unionOfRects(rects);
+    if (union === null) {
+      return;
     }
     reported.current = true;
     onDraftBox(pageIndex, {
-      left: wrapper.offsetLeft + left,
-      top: wrapper.offsetTop + top,
-      width: right - left,
-      height: bottom - top,
+      left: wrapper.offsetLeft + union.left,
+      top: wrapper.offsetTop + union.top,
+      width: union.width,
+      height: union.height,
     });
   }, [draft, layer, pageIndex, onDraftBox]);
 
@@ -734,7 +740,17 @@ export function PdfPage({
             selection's own wash rather than a type's: nothing has been chosen
             yet, nothing has been saved, and the composer above it is still a
             question. The dashed rule says the same thing in the language the
-            drifted marks already use. */}
+            drifted marks already use.
+
+            The wash is the same literal as the `::selection` rule in
+            reader.module.css, and for the same reason — see the comment there.
+            This mark stands in for a selection the composer's `autoFocus` has
+            just collapsed, so anything fainter than the thing it replaces is a
+            passage that dims the moment you start writing about it. Going
+            through `--highlight` at 0.9 would land near 27%: visibly less than
+            the 40% it is impersonating, on the one surface where the two are
+            swapped in front of the reader. The two literals have to move
+            together. */}
         {draftRects.map((rect, index) => (
           <span key={`draft-${index}`}>
             <span
@@ -744,8 +760,8 @@ export function PdfPage({
                 top: rect.top,
                 width: rect.width,
                 height: rect.height,
-                background: "var(--highlight)",
-                opacity: 0.9,
+                background: "rgba(64, 104, 160, 0.4)",
+                opacity: 1,
                 borderRadius: 2,
               }}
             />
