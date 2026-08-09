@@ -408,9 +408,15 @@ export function Reader({
   }, [pageHeight]);
 
   const goToPage = useCallback((index: number) => {
-    pageElements.current
-      .get(index)
-      ?.scrollIntoView({ block: "start", behavior: "smooth" });
+    const element = pageElements.current.get(index);
+    if (element === undefined) {
+      return;
+    }
+    setCurrentPage(index);
+    element.scrollIntoView({ block: "start", behavior: "smooth" });
+    // preventScroll, because the smooth scroll above is the one that should be
+    // seen; focus's own jump would land first and instantly.
+    element.focus({ preventScroll: true });
   }, []);
 
   const registerPage = useCallback(
@@ -1198,6 +1204,13 @@ export function Reader({
             // across the switch rather than needing to know about it.
             className="flex min-w-0 flex-1 flex-col items-center-safe gap-5"
           >
+            {/* The paper is one tab stop, and a stop that moves is only an
+                affordance if you are told it moves. */}
+            <p className="sr-only">
+              Page Up and Page Down move between pages. Home and End go to the
+              first and last. Hold Shift with the arrow keys to select a passage
+              to annotate.
+            </p>
             {doc === null || baseSize === null ? (
               <p className="mt-24 font-sans text-sm text-ink-faint">
                 {docFailed
@@ -1212,6 +1225,9 @@ export function Reader({
                   key={index}
                   doc={doc}
                   pageIndex={index}
+                  pageCount={pageCount}
+                  tabStop={index === Math.min(currentPage, pageCount - 1)}
+                  onNavigate={goToPage}
                   scale={scale}
                   width={pageWidth}
                   height={pageHeight}

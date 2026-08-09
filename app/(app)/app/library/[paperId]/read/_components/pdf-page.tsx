@@ -20,6 +20,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { unionOfRects } from "./draft-box";
 import { ruleOpacity, washOpacity } from "./mark-alpha";
 import { typeStyle } from "./ontology";
+import { pageKeyTarget } from "./page-navigation";
 import styles from "./reader.module.css";
 import type {
   AnchorState,
@@ -131,6 +132,11 @@ const LIVE_PAGES = new Map<number, LivePage>();
 export type PdfPageProps = {
   doc: PDFDocumentProxy;
   pageIndex: number;
+  /** How many pages the paper has, for the keyboard navigation's ends. */
+  pageCount: number;
+  /** This is the page the one tab stop is currently on. */
+  tabStop: boolean;
+  onNavigate: (pageIndex: number) => void;
   scale: number;
   width: number;
   height: number;
@@ -167,6 +173,9 @@ export type PdfPageProps = {
 export function PdfPage({
   doc,
   pageIndex,
+  pageCount,
+  tabStop,
+  onNavigate,
   scale,
   width,
   height,
@@ -664,17 +673,29 @@ export function PdfPage({
     <div
       ref={setWrapper}
       data-page={pageIndex}
-      // Focusable so a keyboard reader can reach the page at all: pdf.js's
-      // text layer is a pile of positioned spans with nothing tabbable in it,
-      // and caret browsing needs somewhere to start.
-      tabIndex={0}
+      // One stop for the whole paper, on the page being read. pdf.js's text
+      // layer is a pile of positioned spans with nothing tabbable in it, and
+      // caret browsing needs somewhere to start — so the affordance stays and
+      // the other thirty-six stops go. Page Up and Page Down move it.
+      tabIndex={tabStop ? 0 : -1}
       role="group"
-      aria-label={`Page ${pageIndex + 1}`}
+      aria-label={`Page ${pageIndex + 1} of ${pageCount}`}
       // A sheet of paper on the desk, not a rectangle in a void: a hair of
       // radius and a soft drop shadow instead of the old hard 1px ledge.
       className={`${styles.page} shrink-0 rounded-[3px] border border-rule bg-surface shadow-[var(--shadow-card)] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-accent`}
       style={pageStyle}
       onMouseUp={captureSelection}
+      onKeyDown={(event: KeyboardEvent<HTMLDivElement>) => {
+        const target = pageKeyTarget(event.key, {
+          current: pageIndex,
+          pageCount,
+        });
+        if (target === null || target === pageIndex) {
+          return;
+        }
+        event.preventDefault();
+        onNavigate(target);
+      }}
       onKeyUp={(event: KeyboardEvent<HTMLDivElement>) => {
         // Shift-arrow selection never fires a mouseup.
         if (event.shiftKey) {
