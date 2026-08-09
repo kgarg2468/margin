@@ -16,6 +16,7 @@ import { use, useMemo } from "react";
 import { SessionDigest } from "../../_components/digest";
 import { byline } from "../../library/_components/paper-meta";
 import { SessionStatusChip } from "../_components/session-row";
+import { AddToCalendar } from "./_components/add-to-calendar";
 import { LiveSession } from "./_components/live-session";
 import type { SessionDetail } from "./_components/manage";
 import { ManageSession, PresenterNotes } from "./_components/manage";
@@ -156,6 +157,10 @@ function Record({
             : ""}
           {ran !== null ? ` · ran ${ran}` : ""}
         </p>
+
+        {session.status === "scheduled" && (
+          <AddToCalendar session={session} />
+        )}
 
         <p className="font-sans text-sm text-ink-muted">
           Presented by {session.presenterName ?? "a member who has left the lab"}
