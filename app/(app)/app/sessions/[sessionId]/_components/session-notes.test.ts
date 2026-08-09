@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ANNOTATION_TYPES } from "../../../library/[paperId]/read/_components/ontology";
 import type { AnnotationType } from "../../../library/[paperId]/read/_components/ontology";
+import { FLOOR } from "./session-board";
 import {
   anchoredIds,
   AT_THE_PASSAGE,
@@ -68,14 +69,41 @@ describe("anchoredIds", () => {
     // A passage groups everything written on it, but its card only draws the
     // four types that have no column of their own — the critique on that same
     // sentence is anchored down on the floor instead, once.
-    const critique = note("c1", "critique");
+    //
+    // The critique is deliberately *not* in `inSession` here, which no real
+    // grouping would produce: the point is to run the passage loop on its own,
+    // where the type guard is the only thing that can decide. With the
+    // critique also on the floor — as it always is in real data — the floor
+    // loop anchors it either way, and the expectation below would hold with
+    // the guard deleted, which is a test that watches nothing.
     const anchored = anchoredIds(
       board({
-        inSession: [critique],
-        passages: [{ notes: [critique, note("h1", "hypothesis")] }],
+        passages: [{ notes: [note("c1", "critique"), note("h1", "hypothesis")] }],
       }),
     );
-    expect([...anchored].sort()).toEqual(["c1", "h1"]);
+    expect([...anchored].sort()).toEqual(["h1"]);
+  });
+
+  it("anchors a floor note whose passage card was never drawn", () => {
+    // The same rule from the other side, on data the grouping really makes: a
+    // critique written on the four-hundredth passage has no card, and does not
+    // need one. It stands in the floor's Critiques column, so the citation
+    // pointing at it still lands.
+    const critique = note("c1", "critique");
+    const passages = Array.from({ length: MAX_PASSAGE_CARDS + 1 }, (_, i) => ({
+      notes: [note(`p${i}`, "hypothesis")],
+    }));
+    passages[MAX_PASSAGE_CARDS]?.notes.push(critique);
+
+    const anchored = anchoredIds(
+      board({
+        passages,
+        inSession: passages.flatMap((passage) => passage.notes),
+      }),
+    );
+
+    expect(anchored.has("c1")).toBe(true);
+    expect(anchored.has(`p${MAX_PASSAGE_CARDS}`)).toBe(false);
   });
 
   it("anchors nothing when the lab wrote nothing", () => {
@@ -92,5 +120,16 @@ describe("where a note is drawn", () => {
     expect([...AT_THE_PASSAGE, ...ON_THE_FLOOR].sort()).toEqual(
       ANNOTATION_TYPES.map((style) => style.value).sort(),
     );
+  });
+
+  it("draws the floor's columns from the same three types it anchors", () => {
+    // The partition above cannot see this. `FLOOR` is what the board actually
+    // renders; `ON_THE_FLOOR` is what `anchoredIds` emits anchors for. Move a
+    // type between the two lists and the partition still holds — every type
+    // still has exactly one home — while the board grows a column whose notes
+    // no citation can link to. In order, too: the columns are the order a
+    // meeting works down them, and reading it out of one list keeps the
+    // comparison honest about which list is the rule.
+    expect(FLOOR.map((column) => column.type)).toEqual([...ON_THE_FLOOR]);
   });
 });

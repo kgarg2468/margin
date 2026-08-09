@@ -33,25 +33,38 @@ import { AT_THE_PASSAGE, MAX_PASSAGE_CARDS, ofType } from "./session-notes";
  * is per type, and no view in this file can answer "who has read this".
  */
 
-/** The three types the floor is built from, in the order a meeting works down them. */
-const FLOOR: readonly { type: AnnotationType; heading: string; empty: string }[] =
-  [
-    {
-      type: "open-question",
-      heading: "Open questions",
-      empty: "Questions the lab types in the margin land here.",
-    },
-    {
-      type: "critique",
-      heading: "Critiques",
-      empty: "Nothing challenged yet.",
-    },
-    {
-      type: "connection-to-own-work",
-      heading: "Connections",
-      empty: "Nobody has tied this to their own work yet.",
-    },
-  ];
+/**
+ * The three types the floor is built from, in the order a meeting works down
+ * them.
+ *
+ * Exported only so `session-notes.test.ts` can hold it against `ON_THE_FLOOR`,
+ * which is the list `anchoredIds` anchors from. The two have to name the same
+ * three types: a type moved from one list and not the other renders a column
+ * whose notes no citation can link to, or emits anchors for a column that
+ * isn't drawn — and the partition test next door would stay green through
+ * either, because both lists would still cover the ontology exactly once.
+ */
+export const FLOOR: readonly {
+  type: AnnotationType;
+  heading: string;
+  empty: string;
+}[] = [
+  {
+    type: "open-question",
+    heading: "Open questions",
+    empty: "Questions the lab types in the margin land here.",
+  },
+  {
+    type: "critique",
+    heading: "Critiques",
+    empty: "Nothing challenged yet.",
+  },
+  {
+    type: "connection-to-own-work",
+    heading: "Connections",
+    empty: "Nobody has tied this to their own work yet.",
+  },
+];
 
 /**
  * The session's spine: one segmented rule, a band of ink per annotation type,

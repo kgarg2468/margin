@@ -159,6 +159,12 @@ export function ofType(
  * pure rule about the board should be testable without mounting it — and the
  * test asserts the partition, so a type added to the ontology and to neither
  * list cannot slip through as a note nobody can link to.
+ *
+ * The floor's columns are declared over in `session-board.tsx`, since they
+ * carry headings and empty-state copy this file has no business holding. The
+ * suite holds that list against `ON_THE_FLOOR` type for type: the partition
+ * alone would survive a type moved between these two lists, and what that
+ * moves is a column onto the board with no anchor behind it.
  */
 export const AT_THE_PASSAGE: readonly AnnotationType[] = [
   "hypothesis",
