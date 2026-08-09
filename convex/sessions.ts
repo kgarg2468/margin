@@ -498,6 +498,15 @@ export const createSession = mutation({
     }
 
     const title = sessionTitleFrom(args.title, template?.title);
+    // Through the same gate the presenter's own notes go through, rather than
+    // straight into the insert. It is a no-op today — a template is capped at
+    // 4,000 characters and arrives already trimmed — and that is the point:
+    // the 4,000 < 20,000 gap stops being a fact held in a comment. Raise the
+    // template ceiling past this one some day and scheduling refuses here,
+    // rather than writing a session whose notes `updateSession` will not
+    // accept and whose presenter cannot edit their way out of.
+    const templateNotes =
+      template !== null ? cleanNotes(template.presenterNotes) : undefined;
     const sessionId = await ctx.db.insert("sessions", {
       labId: args.labId,
       paperId: args.paperId,
@@ -505,8 +514,8 @@ export const createSession = mutation({
       scheduledAt,
       presenterId,
       status: "scheduled",
-      ...(template !== null
-        ? { presenterNotes: template.presenterNotes }
+      ...(templateNotes !== undefined
+        ? { presenterNotes: templateNotes }
         : {}),
       createdBy: membership.userId,
     });

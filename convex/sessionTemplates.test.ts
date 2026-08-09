@@ -6,6 +6,7 @@ import {
   cleanTemplateName,
   cleanTemplateNotes,
   requireNameFree,
+  requireRoom,
 } from "./sessionTemplates";
 
 /**
@@ -127,6 +128,45 @@ describe("requireNameFree", () => {
 
   it("allows anything into an empty lab", () => {
     expect(() => requireNameFree([], "Methods week")).not.toThrow();
+  });
+});
+
+describe("requireRoom", () => {
+  const shapes = (count: number) =>
+    Array.from({ length: count }, (_, index) =>
+      template(`t${index}`, `Shape ${index}`),
+    );
+
+  it("lets a lab with room save another", () => {
+    expect(() => requireRoom(shapes(11))).not.toThrow();
+  });
+
+  it("refuses the thirteenth", () => {
+    // The boundary, written down: twelve is the cap, so a lab holding twelve
+    // is full. A `>` here instead of `>=` would let a thirteenth through and
+    // nothing else in the suite would notice.
+    expect(() => requireRoom(shapes(12))).toThrow(ConvexError);
+  });
+
+  it("reads the same for a lab already over the cap", () => {
+    // `labTemplates` takes one past the ceiling precisely so this is
+    // detectable rather than saturated — the check should refuse whether the
+    // lab has just reached the cap or was somehow already past it.
+    expect(() => requireRoom(shapes(13))).toThrow(ConvexError);
+  });
+
+  it("says what the cap is, since the fix is deleting one", () => {
+    try {
+      requireRoom(shapes(12));
+      expect.unreachable("a full lab should not have room");
+    } catch (caught) {
+      expect(caught).toBeInstanceOf(ConvexError);
+      expect((caught as ConvexError<string>).data).toContain("12");
+    }
+  });
+
+  it("allows anything into an empty lab", () => {
+    expect(() => requireRoom([])).not.toThrow();
   });
 });
 

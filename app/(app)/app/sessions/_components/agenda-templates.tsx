@@ -67,15 +67,28 @@ export function AgendaTemplateField({
 
   const chosen = templates?.find((template) => template._id === value) ?? null;
   const empty = templates !== undefined && templates.length === 0;
+  /** Whether there is a `<select>` for a `<label>` to point at — see below. */
+  const hasPicker = templates !== undefined && !empty;
 
   function close() {
     setMode("idle");
     setName("");
     setTitle("");
     setAgenda("");
+    // The refusal goes with the editor that earned it. Left behind, it sits
+    // under the picker with nothing left to refuse.
+    setError(null);
   }
 
   async function submit() {
+    // The Save button is `disabled={pending}`; the Enter key is not, and key
+    // repeat is a real thing. Two overlapping saves of the same name means the
+    // second is correctly refused for being a duplicate of the first — and
+    // that refusal lands after `close()`, so a save that worked reads as one
+    // that failed.
+    if (pending) {
+      return;
+    }
     setError(null);
     setPending(true);
     try {
@@ -96,6 +109,20 @@ export function AgendaTemplateField({
           title,
           presenterNotes: agenda,
         });
+      } else {
+        // The shape was deleted out from under this editor while it was open.
+        // Closing here would collapse the panel as though the save had worked
+        // and take the typed text with it — which is the exact dishonesty
+        // `cleanTemplateNotes` refuses to commit on the server. Say so and
+        // leave the editor standing; the words are still in state.
+        setError(
+          "That template was deleted while you were editing it. Your text is still here — save it as a new one.",
+        );
+        // And make that sentence actionable: the panel is now a new-template
+        // editor holding the same words, so the next press does what the
+        // message just said rather than hitting this branch again.
+        setMode("new");
+        return;
       }
       close();
     } catch (caught) {
@@ -107,9 +134,17 @@ export function AgendaTemplateField({
 
   return (
     <div className="flex flex-col gap-1.5">
-      <label htmlFor="session-template" className={labelClass}>
-        Agenda
-      </label>
+      {/* The picker only exists once the lab has saved a shape, and on day one
+          no lab has. A `<label for>` pointing at nothing is worse than a
+          heading: it promises a control that is not there. So the word is a
+          label exactly when there is something to label. */}
+      {hasPicker ? (
+        <label htmlFor="session-template" className={labelClass}>
+          Agenda
+        </label>
+      ) : (
+        <span className={labelClass}>Agenda</span>
+      )}
 
       {templates === undefined ? (
         <p className="font-sans text-sm text-ink-faint">

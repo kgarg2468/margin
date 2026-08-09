@@ -144,6 +144,27 @@ export function requireNameFree(
   }
 }
 
+/**
+ * Room for one more shape, or the reason there isn't.
+ *
+ * A sibling of `requireNameFree` in every respect — same argument, same place
+ * in `saveTemplate`, same reason for being a function rather than three lines
+ * inline: the cap is a rule, and a rule that only exists inside a mutation is
+ * a rule this repo has no way to test. It takes the list the caller is already
+ * holding for the uniqueness check.
+ *
+ * Exported for tests.
+ */
+export function requireRoom(
+  templates: readonly Doc<"sessionTemplates">[],
+): void {
+  if (templates.length >= MAX_TEMPLATES_PER_LAB) {
+    throw new ConvexError(
+      `This lab already keeps ${MAX_TEMPLATES_PER_LAB} agenda templates. Delete one before saving another.`,
+    );
+  }
+}
+
 /** Whoever saved it, or the PI. See the module note. */
 function canManage(
   template: Doc<"sessionTemplates">,
@@ -247,11 +268,7 @@ export const saveTemplate = mutation({
     const presenterNotes = cleanTemplateNotes(args.presenterNotes);
 
     const existing = await labTemplates(ctx, args.labId);
-    if (existing.length >= MAX_TEMPLATES_PER_LAB) {
-      throw new ConvexError(
-        `This lab already keeps ${MAX_TEMPLATES_PER_LAB} agenda templates. Delete one before saving another.`,
-      );
-    }
+    requireRoom(existing);
     requireNameFree(existing, name);
 
     const title = cleanTitle(args.title);
