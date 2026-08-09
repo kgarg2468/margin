@@ -9,7 +9,7 @@ import {
   query,
 } from "./_generated/server";
 import { emailIsConfigured, renderEmail, sendEmail } from "./auth";
-import { requireUserId } from "./lib/authz";
+import { getMembership, requireUserId } from "./lib/authz";
 import { notificationKind } from "./schema";
 
 /**
@@ -106,6 +106,28 @@ export async function raiseNotification(
   request: NotificationRequest,
 ): Promise<boolean> {
   if (request.recipientId === request.actorId) {
+    return false;
+  }
+
+  // Membership is re-checked *here*, at the moment of delivery, and not only
+  // where the mention was picked.
+  //
+  // The two moments can be far apart. A mention is chosen and validated when a
+  // note is written, but a note written privately delivers whenever its author
+  // shares it — a day, a week, a resignation later. `mentions` is a list of
+  // ids frozen at composition time, so trusting it at delivery time would post
+  // a lab's margin to somebody who has since left it. Same for a reply landing
+  // under a note whose author is no longer in the lab.
+  //
+  // Silent rather than an error: the author did nothing wrong, and failing
+  // their share because a labmate left last week would be a strange way to say
+  // so. They simply are not told.
+  const membership = await getMembership(
+    ctx,
+    request.labId,
+    request.recipientId,
+  );
+  if (membership === null) {
     return false;
   }
 
@@ -212,11 +234,19 @@ function snippetOf(annotation: Doc<"annotations"> | null): string {
 /**
  * Your mail in one lab, newest first.
  *
- * No `userId` argument, and that is the access control: the query starts from
- * the signed-in identity, so there is no value a caller could pass to read
- * somebody else's. Acknowledged items stay in the list rather than vanishing —
- * the panel is short, and an inbox that erases what you just clicked makes
- * "which paper was that?" unanswerable.
+ * No `userId` argument, and that is half the access control: the query starts
+ * from the signed-in identity, so there is no value a caller could pass to
+ * read somebody else's. Acknowledged items stay in the list rather than
+ * vanishing — the panel is short, and an inbox that erases what you just
+ * clicked makes "which paper was that?" unanswerable.
+ *
+ * The other half is the membership check, and it is not redundant with the one
+ * on the write. A notification row outlives the membership that justified it:
+ * it carries an annotation's snippet, a paper's title and a labmate's name,
+ * and none of those stay readable to somebody who has left the lab. Being
+ * mailed something once is not a standing licence to keep reading it. So the
+ * gate is on both ends — the write refuses to address a former member, and the
+ * read refuses to serve one whatever is already on the table.
  *
  * Rows whose annotation or paper has gone are dropped from the result rather
  * than rendered as a dead line. They are not deleted here: a query does not
@@ -227,6 +257,13 @@ export const listMine = query({
   returns: v.array(notificationView),
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
+    // Empty rather than an error, and the same answer whether the lab is gone
+    // or merely no longer yours — a rail that renders nothing is the correct
+    // reading of "you are not in this lab", and an error here would only tell
+    // a prober which of the two it was.
+    if ((await getMembership(ctx, args.labId, userId)) === null) {
+      return [];
+    }
 
     const rows = await ctx.db
       .query("notifications")
@@ -282,12 +319,20 @@ export const listMine = query({
  * Capped, and says so: `capped` is what lets the rail render "20+" instead of
  * either lying with a round number or paying for a count that grows with the
  * lab's whole history.
+ *
+ * Gated on membership like `listMine`. A bare number discloses less than a
+ * snippet does, but "you have four things waiting in the lab you left" is
+ * still a fact about that lab, and there is no reason for the two reads to
+ * disagree about who may ask.
  */
 export const outstandingCount = query({
   args: { labId: v.id("labs") },
   returns: v.object({ count: v.number(), capped: v.boolean() }),
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
+    if ((await getMembership(ctx, args.labId, userId)) === null) {
+      return { count: 0, capped: false };
+    }
     const rows = await ctx.db
       .query("notifications")
       .withIndex("by_recipient_lab_and_ack", (q) =>
@@ -338,24 +383,57 @@ export const acknowledge = mutation({
   },
 });
 
-/** "I've seen these" — the same act, taken over everything outstanding at once. */
+/**
+ * "I've seen these" — the same act, taken over everything outstanding at once.
+ *
+ * Drained in pages rather than in one `take`. The count in the rail stops at
+ * `COUNT_CAP` because a badge does not need to be exact, but this is not a
+ * badge: a button that says "I'm caught up" and leaves twenty-one items behind
+ * is a button that lies, and the member is left clicking it until it stops
+ * doing anything. So it pages until the index has nothing left.
+ *
+ * Terminating, because each page is patched out of the range it was read from
+ * — `by_recipient_lab_and_ack` is keyed on `acknowledgedAt`, so an
+ * acknowledged row leaves the `undefined` bucket and cannot be read twice. The
+ * loop is bounded anyway at `MAX_PAGES × PAGE`, which is a ceiling on what one
+ * transaction should be rewriting rather than on what a person may have
+ * waiting: past it the remainder stays outstanding and a second press finishes
+ * the job, which is the safe way to run out of room.
+ *
+ * The natural bound is small in any case. A notification is written once per
+ * (note, person), the mention fan-out is capped at ten people per note, and
+ * this is scoped to one lab — so the outstanding set is the notes addressed to
+ * one member since they last pressed this, not the lab's whole history.
+ */
+const ACK_PAGE = 256;
+const ACK_MAX_PAGES = 16;
+
 export const acknowledgeAll = mutation({
   args: { labId: v.id("labs") },
   returns: v.null(),
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
     const now = Date.now();
-    const rows = await ctx.db
-      .query("notifications")
-      .withIndex("by_recipient_lab_and_ack", (q) =>
-        q
-          .eq("recipientId", userId)
-          .eq("labId", args.labId)
-          .eq("acknowledgedAt", undefined),
-      )
-      .take(COUNT_CAP + 1);
-    for (const row of rows) {
-      await ctx.db.patch(row._id, { acknowledgedAt: now });
+
+    for (let page = 0; page < ACK_MAX_PAGES; page++) {
+      const rows = await ctx.db
+        .query("notifications")
+        .withIndex("by_recipient_lab_and_ack", (q) =>
+          q
+            .eq("recipientId", userId)
+            .eq("labId", args.labId)
+            .eq("acknowledgedAt", undefined),
+        )
+        .take(ACK_PAGE);
+      if (rows.length === 0) {
+        return null;
+      }
+      for (const row of rows) {
+        await ctx.db.patch(row._id, { acknowledgedAt: now });
+      }
+      if (rows.length < ACK_PAGE) {
+        return null;
+      }
     }
     return null;
   },

@@ -129,6 +129,7 @@ export function NotificationRail({ labId }: { labId: Id<"labs"> }) {
           <NotificationPanel
             id={panelId}
             labId={labId}
+            waiting={waiting}
             onClose={close}
             onNavigate={() => setOpen(false)}
           />
@@ -141,11 +142,22 @@ export function NotificationRail({ labId }: { labId: Id<"labs"> }) {
 function NotificationPanel({
   id,
   labId,
+  waiting,
   onClose,
   onNavigate,
 }: {
   id: string;
   labId: Id<"labs">;
+  /**
+   * Whether anything is outstanding *at all*, from the count query.
+   *
+   * Deliberately not derived from the list below. The panel shows the most
+   * recent items and the outstanding ones are not necessarily among them — a
+   * member coming back to a busy lab can have thirty read items on top of
+   * older unread ones. Reading "caught up" off this list would grey the button
+   * out while the rail beside it was still showing a number.
+   */
+  waiting: boolean;
   onClose: () => void;
   onNavigate: () => void;
 }) {
@@ -154,10 +166,6 @@ function NotificationPanel({
   const reduce = useReducedMotion();
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-
-  const outstanding = (items ?? []).filter(
-    (item) => item.acknowledgedAt === undefined,
-  );
 
   return (
     <motion.div
@@ -208,7 +216,7 @@ function NotificationPanel({
          */}
         <button
           type="button"
-          disabled={busy || outstanding.length === 0}
+          disabled={busy || !waiting}
           onClick={async () => {
             setError(null);
             setBusy(true);
@@ -222,7 +230,7 @@ function NotificationPanel({
           }}
           className="font-sans text-xs text-accent underline-offset-4 hover:underline disabled:cursor-not-allowed disabled:text-ink-faint disabled:no-underline"
         >
-          {outstanding.length === 0 ? "All caught up" : "I'm caught up"}
+          {waiting ? "I'm caught up" : "All caught up"}
         </button>
         <button
           type="button"
