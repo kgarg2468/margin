@@ -51,6 +51,9 @@ const UNDO_WINDOW = 10 * 60 * 1000;
 /** The synthesis generation lease, restated for the same reason. */
 const GENERATION_LEASE = 3 * 60 * 1000;
 
+/** How many meetings a lab may have on the books at once. Same bargain. */
+const MAX_SCHEDULED = 50;
+
 /**
  * The at-the-boundary cases stop the clock, because they are a millisecond
  * wide. The handler reads `Date.now()` itself, so a test that seeded
@@ -358,6 +361,48 @@ describe("restoreSession", () => {
     const session = await sessionRow(ctx, sessionId);
     expect(session.status).toBe("scheduled");
     expect(session.prepDigestJobId).toBeUndefined();
+  });
+
+  it("refuses when the lab's calendar is already full", async () => {
+    // The way around the ceiling that an unchecked undo opens: a lab at fifty
+    // cancels one, schedules its replacement, and restores the cancelled one.
+    // `seedLab` leaves one scheduled session behind, so the fill is one short.
+    const { ctx, seed } = await world();
+    for (let i = 0; i < MAX_SCHEDULED - 1; i++) {
+      await seedSession(ctx, seed, { status: "scheduled" });
+    }
+    const sessionId = await seedSession(ctx, seed, {
+      status: "cancelled",
+      cancelledAt: Date.now() - MINUTE,
+    });
+
+    try {
+      await restore(ctx, sessionId);
+      expect.unreachable("a lab at the ceiling cannot restore a fifty-first");
+    } catch (caught) {
+      expect(caught).toBeInstanceOf(ConvexError);
+      expect((caught as ConvexError<string>).data).toContain(
+        `already has ${MAX_SCHEDULED} sessions on the calendar`,
+      );
+    }
+    expect((await sessionRow(ctx, sessionId)).status).toBe("cancelled");
+  });
+
+  it("restores the one that takes the lab back up to the ceiling", async () => {
+    // One below, which is the case the cap must not eat: cancelling is what
+    // freed the slot, and the undo is entitled to the slot it freed.
+    const { ctx, seed } = await world();
+    for (let i = 0; i < MAX_SCHEDULED - 2; i++) {
+      await seedSession(ctx, seed, { status: "scheduled" });
+    }
+    const sessionId = await seedSession(ctx, seed, {
+      status: "cancelled",
+      cancelledAt: Date.now() - MINUTE,
+    });
+
+    await restore(ctx, sessionId);
+
+    expect((await sessionRow(ctx, sessionId)).status).toBe("scheduled");
   });
 
   it("still restores at the last instant of the window", async () => {

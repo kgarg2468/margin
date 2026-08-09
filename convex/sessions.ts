@@ -891,6 +891,10 @@ export const reopenSession = mutation({
  * arm a "coming up in two hours" digest about yesterday. The same clock-skew
  * grace applies, so "this afternoon" does not become the past because a laptop
  * is three minutes fast.
+ *
+ * And it is held to the same calendar ceiling as scheduling one, because it
+ * puts the same row back in the same list — see the check below for the way
+ * around the cap that an unchecked undo would open.
  */
 export const restoreSession = mutation({
   args: { sessionId: v.id("sessions") },
@@ -907,6 +911,24 @@ export const restoreSession = mutation({
     if (!withinUndoWindow(session.cancelledAt)) {
       throw new ConvexError(
         "That session was cancelled more than ten minutes ago. A cancellation can be taken back for ten minutes — from the toast, or from the session's own page while the window is open. Past that, holding the meeting after all means putting it back on the calendar as a new one.",
+      );
+    }
+
+    // The ceiling `createSession` enforces, enforced again on the way back.
+    // Restoring puts a meeting on the calendar exactly as scheduling one does,
+    // and an undo that walked past the cap is a way through it: a lab at fifty
+    // cancels one, schedules its replacement, restores the cancelled one, and
+    // lands at fifty-one with an extra prep-digest job queued behind it. One
+    // past the cap, so the check reads the same at the ceiling as over it.
+    const outstanding = await ctx.db
+      .query("sessions")
+      .withIndex("by_lab_and_status", (q) =>
+        q.eq("labId", session.labId).eq("status", "scheduled"),
+      )
+      .take(MAX_SCHEDULED_SESSIONS + 1);
+    if (outstanding.length >= MAX_SCHEDULED_SESSIONS) {
+      throw new ConvexError(
+        `This lab already has ${MAX_SCHEDULED_SESSIONS} sessions on the calendar. Hold or cancel one before putting this one back.`,
       );
     }
 
