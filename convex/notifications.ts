@@ -8,7 +8,7 @@ import {
   mutation,
   query,
 } from "./_generated/server";
-import { emailIsConfigured, renderEmail, sendEmail } from "./auth";
+import { emailIsConfigured, renderEmail, sendEmail, siteUrl } from "./auth";
 import { getMembership, requireUserId } from "./lib/authz";
 import { notificationKind } from "./schema";
 
@@ -518,6 +518,61 @@ export const emailPayload = internalQuery({
 });
 
 /**
+ * The message itself, as text and as HTML, from nothing but its facts.
+ *
+ * Pure and exported so the copy can be read back in a test — the wording of
+ * what lands in a labmate's inbox is product surface, and it is the one
+ * surface nobody on the team sees again after they write it. Both parts say
+ * the same sentence in the same order: a mail client that shows the plain part
+ * is not being shown a worse email, just an unstyled one.
+ *
+ * Two kinds and two openings. "Mentioned you" and "replied to your note" are
+ * different pieces of news — the first says this was addressed to you in
+ * particular, the second that something landed under something of yours — and
+ * collapsing them into one line would lose the only thing the subject is for.
+ */
+export function composeNotificationEmail(message: {
+  kind: Doc<"notifications">["kind"];
+  actorName: string;
+  paperTitle: string;
+  snippet: string;
+  url: string;
+}): { subject: string; text: string; html: string } {
+  const subject =
+    message.kind === "mention"
+      ? `${message.actorName} mentioned you on “${message.paperTitle}”`
+      : `${message.actorName} replied to your note on “${message.paperTitle}”`;
+  const opening =
+    message.kind === "mention"
+      ? `${message.actorName} mentioned you in the margin of “${message.paperTitle}”.`
+      : `${message.actorName} answered your note in the margin of “${message.paperTitle}”.`;
+  const because =
+    "You're getting this because you're in this lab and this note was addressed to you.";
+
+  return {
+    subject,
+    text: [
+      opening,
+      "",
+      message.snippet,
+      "",
+      "Open the margin:",
+      message.url,
+      "",
+      because,
+      "",
+      "Margin",
+    ].join("\n"),
+    html: renderEmail({
+      heading: opening,
+      paragraphs: [message.snippet],
+      action: { label: "Open the margin", url: message.url },
+      footnotes: [because],
+    }),
+  };
+}
+
+/**
  * One notification, as one plain email.
  *
  * On-brand through `renderEmail`, which means: a sheet of paper with a rule
@@ -531,10 +586,11 @@ export const emailPayload = internalQuery({
  * person once ever, and a lab that generates enough of these to want batching
  * has a different problem than an email problem.
  *
- * Failures are logged, not thrown. A scheduled action that throws is retried
- * and re-logged, and there is nothing a second attempt at a rejected address
- * would do differently; the in-app notification is already delivered and is
- * the channel of record.
+ * Failures are logged, not thrown. `sendEmail` has already waited out and
+ * re-asked anything worth re-asking — a rate limit, a bad minute at Resend —
+ * so what reaches here is a rejected address or a misconfigured key, and there
+ * is nothing a second attempt at either would do differently. The in-app
+ * notification is already delivered and is the channel of record.
  */
 export const deliverEmail = internalAction({
   args: { notificationId: v.id("notifications") },
@@ -548,6 +604,18 @@ export const deliverEmail = internalAction({
       return null;
     }
 
+    // A deployment that can send mail but does not know its own origin would
+    // send a real message with `href="/app/library/…"` in it — a relative URL,
+    // which resolves to nothing at all in a mail client. Better to stay in the
+    // app, where the notification already is, and say why in the log.
+    const site = siteUrl();
+    if (site === null) {
+      console.error(
+        "SITE_URL is not set on this deployment, so notification mail would carry a link to nowhere. Nothing was sent; the in-app notification stands.",
+      );
+      return null;
+    }
+
     const payload = await ctx.runQuery(internal.notifications.emailPayload, {
       notificationId: args.notificationId,
     });
@@ -555,41 +623,16 @@ export const deliverEmail = internalAction({
       return null;
     }
 
-    const siteUrl = (process.env.SITE_URL ?? "").replace(/\/$/, "");
-    const url = `${siteUrl}/app/library/${payload.paperId}/read`;
-
-    const subject =
-      payload.kind === "mention"
-        ? `${payload.actorName} mentioned you on “${payload.paperTitle}”`
-        : `${payload.actorName} replied to your note on “${payload.paperTitle}”`;
-    const opening =
-      payload.kind === "mention"
-        ? `${payload.actorName} mentioned you in the margin of “${payload.paperTitle}”.`
-        : `${payload.actorName} answered your note in the margin of “${payload.paperTitle}”.`;
+    const message = composeNotificationEmail({
+      kind: payload.kind,
+      actorName: payload.actorName,
+      paperTitle: payload.paperTitle,
+      snippet: payload.snippet,
+      url: `${site}/app/library/${payload.paperId}/read`,
+    });
 
     try {
-      await sendEmail({
-        to: payload.to,
-        subject,
-        text: [
-          opening,
-          "",
-          payload.snippet,
-          "",
-          "Open the margin:",
-          url,
-          "",
-          "Margin",
-        ].join("\n"),
-        html: renderEmail({
-          heading: opening,
-          paragraphs: [payload.snippet],
-          action: { label: "Open the margin", url },
-          footnotes: [
-            "You're getting this because you're in this lab and this note was addressed to you.",
-          ],
-        }),
-      });
+      await sendEmail({ to: payload.to, ...message });
     } catch (caught) {
       // The in-app notification is already written and is the delivery of
       // record; mail is the courtesy copy. Losing it is not worth a retry
