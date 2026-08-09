@@ -121,7 +121,12 @@ function ToastViewport({ store }: { store: ToastStore }) {
     // live region below has to be in the document *before* the text it is
     // going to announce, and a viewport that unmounted itself when the stack
     // emptied would take it with it.
-    <div className="pointer-events-none fixed right-6 bottom-6 z-50 flex max-w-[calc(100vw-3rem)] flex-col gap-2">
+    // Above the dialogs, not level with them: Base UI portals a popup to the
+    // end of <body> at z-50, so a toast sharing that layer loses on source
+    // order and fades in behind whatever sheet is open. The one flow that
+    // needs a toast most — confirm, then undo — is exactly the flow with a
+    // dialog on screen when it fires.
+    <div className="pointer-events-none fixed right-6 bottom-6 z-[60] flex max-w-[calc(100vw-3rem)] flex-col gap-2">
       <Announcer toasts={live} />
       {rendered.map((toast) => (
         <ToastCard

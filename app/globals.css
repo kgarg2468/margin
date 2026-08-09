@@ -279,6 +279,9 @@
 @layer base {
   button:not(:disabled),
   [role="button"]:not([aria-disabled="true"]),
+  /* A listbox row is pressed like a button even though it is an <li>: the ⌘K
+     palette's commands and the select's items both land here. */
+  [role="option"]:not([aria-disabled="true"]),
   select:not(:disabled),
   summary,
   label[for] {
@@ -378,7 +381,7 @@
 
 @utility pop-in {
   @media (prefers-reduced-motion: no-preference) {
-    animation: margin-pop 180ms cubic-bezier(0.16, 1, 0.3, 1);
+    animation: margin-pop var(--dur-enter) var(--ease-settle);
   }
 }
 

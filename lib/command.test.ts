@@ -44,6 +44,18 @@ describe("rankCommands", () => {
     // instead of as a TypeError.
     expect(rankCommands("gtl", items)[0]?.label).toBe("Go to Library");
   });
+  it("keeps a dangerous command from winning a tie", () => {
+    const items = [
+      // Both score 3 on `s` — one word-start hit each — and "Sign out" is the
+      // shorter label, so without the safety rule ⌘K, s, Enter signs you out.
+      { label: "Sign out", dangerous: true },
+      { label: "Go to Sessions" },
+    ];
+    expect(rankCommands("s", items).map((i) => i.label)).toEqual([
+      "Go to Sessions",
+      "Sign out",
+    ]);
+  });
   it("leaves the authored order alone when there is no query", () => {
     const items = [
       { label: "Go to lab home" },

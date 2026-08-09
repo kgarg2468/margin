@@ -1,6 +1,7 @@
 "use client";
 
 import { primaryButtonClass } from "@/lib/ui";
+import { useEffect } from "react";
 
 /**
  * The app shell's last line of defence.
@@ -16,7 +17,20 @@ import { primaryButtonClass } from "@/lib/ui";
  * your connection") is worse than admitting there isn't one, because the
  * reader can tell when they are being told something generic.
  */
-export default function AppError({ reset }: { reset: () => void }) {
+export default function AppError({
+  error,
+  reset,
+}: {
+  error: Error & { digest?: string };
+  reset: () => void;
+}) {
+  // Next's own pattern. The `error` prop was being discarded, which meant a
+  // boundary that told the reader something had gone wrong and told us nothing
+  // — every production occurrence invisible.
+  useEffect(() => {
+    console.error(error);
+  }, [error]);
+
   return (
     <div
       role="alert"

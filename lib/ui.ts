@@ -1,5 +1,5 @@
 /**
- * Shared control classes.
+ * Shared control classes, and the one question they all ask.
  *
  * These live in one place so the sign-in page and the app shell cannot drift
  * apart, and so every control keeps referencing the semantic tokens from

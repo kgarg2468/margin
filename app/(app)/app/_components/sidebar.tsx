@@ -2,7 +2,12 @@
 
 import { api } from "@/convex/_generated/api";
 import { shortcutLabel } from "@/lib/command";
-import { chipClass, eyebrowClass, skeletonClass } from "@/lib/ui";
+import {
+  chipClass,
+  eyebrowClass,
+  linkButtonClass,
+  skeletonClass,
+} from "@/lib/ui";
 import { useAuthActions } from "@convex-dev/auth/react";
 import { useQuery } from "convex-helpers/react/cache/hooks";
 import Link from "next/link";
@@ -100,13 +105,24 @@ export function Sidebar() {
         {/* The palette is invisible until it is summoned, so the rail carries
             the only thing that says it exists. It is text, not a button: the
             shortcut is the affordance, and a second control that opens the
-            same sheet would teach the slower of the two ways. */}
-        {shortcut !== null && (
-          <span className="flex items-center gap-2 font-sans text-xs text-ink-faint">
-            <kbd className={chipClass}>{shortcut}</kbd>
-            Commands
-          </span>
-        )}
+            same sheet would teach the slower of the two ways.
+
+            Rendered from the first paint and merely hidden until the modifier
+            is known, rather than mounted when the answer arrives: the row is
+            the same height either way, so the footer's geometry is settled
+            before hydration and nothing below it moves. An element that
+            appeared a commit later would push the sign-out down after the eye
+            had already found it. `invisible` also takes it out of the
+            accessibility tree, so nothing announces an empty chip. */}
+        <span
+          className={
+            "flex items-center gap-2 font-sans text-xs text-ink-faint " +
+            (shortcut === null ? "invisible" : "")
+          }
+        >
+          <kbd className={chipClass}>{shortcut ?? "⌘K"}</kbd>
+          Commands
+        </span>
         {/*
           A document navigation, not `router.push` — the one place in the app
           where throwing the JS context away is the point.
@@ -126,7 +142,7 @@ export function Sidebar() {
         */}
         <button
           type="button"
-          className="self-start font-sans text-sm text-accent underline-offset-4 hover:underline"
+          className={`${linkButtonClass} self-start`}
           onClick={async () => {
             await signOut();
             window.location.assign("/signin");

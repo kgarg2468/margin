@@ -58,7 +58,10 @@ const eslintConfig = [
     ],
   },
   {
-    files: ["app/**/*.ts", "app/**/*.tsx"],
+    // `lib/**` as well as `app/**`: a hook lifted out of a route into a shared
+    // module is exactly the move that would carry the wrong import somewhere
+    // nothing is watching, and it would then be wrong for every caller at once.
+    files: ["app/**/*.ts", "app/**/*.tsx", "lib/**/*.ts", "lib/**/*.tsx"],
     rules: {
       "no-restricted-imports": [
         "error",

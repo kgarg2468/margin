@@ -31,6 +31,10 @@ type Command = {
   section: string;
   /** Matched but never shown: the words people reach for that aren't the label. */
   keywords: string[];
+  /** Where a Navigate command goes. Present so the row can be prefetched. */
+  href?: string;
+  /** Not undoable from a keystroke. `rankCommands` never lets it win a tie. */
+  dangerous?: boolean;
   run: () => void | Promise<void>;
 };
 
@@ -50,18 +54,21 @@ export function CommandPalette() {
         label: "Go to lab home",
         section: "Navigate",
         keywords: ["overview", "dashboard", "start"],
+        href: "/app",
         run: () => router.push("/app"),
       },
       {
         label: "Go to Library",
         section: "Navigate",
         keywords: ["papers", "reading", "pdf"],
+        href: "/app/library",
         run: () => router.push("/app/library"),
       },
       {
         label: "Go to Sessions",
         section: "Navigate",
         keywords: ["journal club", "meetings", "schedule"],
+        href: "/app/sessions",
         run: () => router.push("/app/sessions"),
       },
       {
@@ -73,6 +80,10 @@ export function CommandPalette() {
         label: "Sign out",
         section: "Account",
         keywords: ["log out", "logout", "leave"],
+        // The only row here you cannot press your way back from. `s` scores
+        // the same on this and on "Go to Sessions", and the shorter label used
+        // to settle it — so ⌘K, s, Enter ended the session. See `rankCommands`.
+        dangerous: true,
         run: async () => {
           await signOut();
           window.location.assign("/signin");
@@ -106,6 +117,13 @@ export function CommandPalette() {
       // Both browser and OS have their own ⌘K/Ctrl+K in places (search bar,
       // kill-line in a text field), and taking it is the point.
       event.preventDefault();
+      // A held ⌘K auto-repeats, and every repeat used to be another toggle:
+      // whether the palette ended up open depended on when the fingers came
+      // off the keys. The shortcut is a door, not a switch — only the first
+      // press of a hold means anything. After `preventDefault`, not before:
+      // the repeats are still ours to swallow, or holding the key would hand
+      // the browser its own ⌘K back mid-hold.
+      if (event.repeat) return;
       if (open) {
         setOpen(false);
         return;
@@ -128,6 +146,19 @@ export function CommandPalette() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [open]);
+
+  // The rail's links carry `prefetch`, so a destination reached from there is
+  // usually already in the router cache; the palette's `router.push` had
+  // nothing behind it, and the same route arrived wearing a skeleton depending
+  // on which way you asked for it. So the highlighted row warms its own
+  // destination — by the time the arrow key stops moving, the page is on its
+  // way. `router.prefetch` is idempotent and cached, so re-running this as the
+  // highlight walks a list costs one entry per route, once.
+  useEffect(() => {
+    if (!open) return;
+    if (active?.href === undefined) return;
+    router.prefetch(active.href);
+  }, [open, active, router]);
 
   // `aria-activedescendant` does not scroll the way real focus does — the
   // browser has no idea the highlight moved — so the list has to be told.

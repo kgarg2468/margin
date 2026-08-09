@@ -66,27 +66,38 @@ export function fuzzyScore(query: string, target: string): number | null {
  * adding a synonym can only ever help a query that mentions it; it cannot
  * quietly float a command up the list for every other query too.
  *
- * Equal scores are broken by the shorter label, because the same number of
- * points spread over fewer characters is the closer match: `gtl` is three
- * word-start hits on both "Go to lab home" and "Go to Library" and scores 9 on
- * each, but it is the whole of "Go to Library"'s initials and only part of the
- * other's. Without this, an initialism that two commands share resolved by
- * declaration order, which is invisible to the person typing.
+ * Equal scores are broken first by *safety*, and that rule exists because the
+ * one below it wrote a bug. `s` is a single word-start hit on both "Go to
+ * Sessions" and "Sign out" — 3 points each — and the shorter label is "Sign
+ * out", so ⌘K, `s`, Enter signed you out of the app. A tie means the ranking
+ * has no opinion, and a ranking with no opinion must not hand the Enter key to
+ * the command you cannot take back. `dangerous` commands sort last among their
+ * equals; they are never *dropped*, only never volunteered.
  *
- * The tiebreak is skipped when the query is empty, and that guard is the load-
- * bearing half of it. `fuzzyScore` returns 0 for every command in that case —
- * "no opinion", not "all equally good" — so sorting those by length would
- * reorder the list the palette shows the moment it opens, and the shortest
- * label in the app is "Sign out". Nobody's default first command is signing
- * out. With no query the authored order stands.
+ * Then the shorter label, because the same number of points spread over fewer
+ * characters is the closer match: `gtl` is three word-start hits on both "Go to
+ * lab home" and "Go to Library" and scores 9 on each, but it is the whole of
+ * "Go to Library"'s initials and only part of the other's. Without this, an
+ * initialism that two commands share resolved by declaration order, which is
+ * invisible to the person typing.
  *
- * `Array.prototype.sort` is stable, so anything still tied after both rules
+ * The *length* tiebreak is skipped when the query is empty, and that guard is
+ * load-bearing. `fuzzyScore` returns 0 for every command in that case — "no
+ * opinion", not "all equally good" — so sorting those by length would reorder
+ * the list the palette shows the moment it opens, and the shortest label in the
+ * app is "Sign out". With no query the authored order stands.
+ *
+ * The safety rule is not skipped there, and that asymmetry is deliberate: an
+ * empty field is precisely the state the palette opens in, one Enter away from
+ * whatever is on top. A rule that protects that key everywhere except at rest
+ * is not protecting it.
+ *
+ * `Array.prototype.sort` is stable, so anything still tied after every rule
  * keeps the order the caller declared.
  */
-export function rankCommands<T extends { label: string; keywords?: string[] }>(
-  query: string,
-  items: T[],
-): T[] {
+export function rankCommands<
+  T extends { label: string; keywords?: string[]; dangerous?: boolean },
+>(query: string, items: T[]): T[] {
   const tiebreak = query.length > 0;
   return items
     .map((item) => {
@@ -98,6 +109,9 @@ export function rankCommands<T extends { label: string; keywords?: string[] }>(
     .filter((x): x is { item: T; score: number } => x.score !== null)
     .sort((a, b) => {
       if (a.score !== b.score) return b.score - a.score;
+      const danger =
+        Number(a.item.dangerous ?? false) - Number(b.item.dangerous ?? false);
+      if (danger !== 0) return danger;
       return tiebreak ? a.item.label.length - b.item.label.length : 0;
     })
     .map((x) => x.item);

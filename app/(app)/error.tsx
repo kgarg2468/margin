@@ -1,6 +1,7 @@
 "use client";
 
-import { primaryButtonClass } from "@/lib/ui";
+import { primaryButtonClass, secondaryButtonClass } from "@/lib/ui";
+import { useEffect } from "react";
 
 /**
  * The boundary for the authenticated shell itself.
@@ -14,7 +15,20 @@ import { primaryButtonClass } from "@/lib/ui";
  *
  * The rail is gone by the time this renders, so it frames the whole page.
  */
-export default function AuthedError({ reset }: { reset: () => void }) {
+export default function AuthedError({
+  error,
+  reset,
+}: {
+  error: Error & { digest?: string };
+  reset: () => void;
+}) {
+  // Next's own pattern. Without it the boundary is silent in production: the
+  // reader sees the copy, we see nothing, and the one failure most likely to
+  // land here is the one hardest to reproduce on a laptop.
+  useEffect(() => {
+    console.error(error);
+  }, [error]);
+
   return (
     <div
       role="alert"
@@ -28,9 +42,26 @@ export default function AuthedError({ reset }: { reset: () => void }) {
         has been lost — the margin only ever adds. Try again, and if that
         doesn&rsquo;t work, sign in once more.
       </p>
-      <button type="button" onClick={reset} className={primaryButtonClass}>
-        Try again
-      </button>
+      <div className="flex flex-wrap items-center gap-3">
+        <button type="button" onClick={reset} className={primaryButtonClass}>
+          Try again
+        </button>
+        {/*
+          A plain anchor, not `<Link>`, and for exactly the reason the rail's
+          sign-out is one: this has to be a document navigation.
+
+          `reset()` re-renders the same tree against the same client, and on an
+          expired session the query store still holds the recorded failure —
+          `getMyLabs` rethrows it during render and lands right back here. That
+          is a trap the reader cannot press their way out of. A full load throws
+          the JS context away with the poisoned store in it, so the next attempt
+          starts from nothing. `<Link>` would keep both and offer a way out that
+          isn't one.
+        */}
+        <a href="/signin" className={secondaryButtonClass}>
+          Sign in again
+        </a>
+      </div>
     </div>
   );
 }
