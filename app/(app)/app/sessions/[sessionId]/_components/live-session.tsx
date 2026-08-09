@@ -58,7 +58,7 @@ export function LiveSession({
 }) {
   const elapsed = useElapsed(session.startedAt);
   const endSession = useMutation(api.sessions.endSession);
-  const announceMove = useUndoableMove();
+  const { announceMove } = useUndoableMove();
   const [error, setError] = useState<string | null>(null);
 
   const heading = session.title ?? session.paperTitle ?? "This session";

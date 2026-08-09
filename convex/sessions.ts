@@ -6,11 +6,7 @@ import { ConvexError, v } from "convex/values";
  * The rule itself lives in `lib/` so the button that offers the start and the
  * mutation that enforces it cannot drift apart.
  */
-import {
-  UNDO_WINDOW_MS,
-  awayProse,
-  startWindow,
-} from "../lib/session-window";
+import { UNDO_WINDOW_MS, awayProse, startWindow } from "../lib/session-window";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
