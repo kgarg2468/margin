@@ -168,7 +168,6 @@ export function Reader({
     }
   }, [draft]);
 
-
   // Every activation in the reader goes through this rather than through
   // `setActiveId`, so that the gutter — which fires nobody's `mouseenter` —
   // cannot put the link out mid-journey. See `LINK_GRACE_MS`.
@@ -822,7 +821,15 @@ export function Reader({
       }
     }
     return { cards: anchored, unanchored: lost };
-  }, [visible, repliesByParent, resolutions, pageCount, pageHeight, scale, pageOf]);
+  }, [
+    visible,
+    repliesByParent,
+    resolutions,
+    pageCount,
+    pageHeight,
+    scale,
+    pageOf,
+  ]);
 
   const focusPassage = useCallback(
     (annotation: AnnotationView) => {

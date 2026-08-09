@@ -93,7 +93,9 @@ export function canStepZoom(
   if (input.columnWidth <= 0 || input.baseWidth <= 0) {
     return false;
   }
-  return zoomScale(stepZoom(mode, direction, input), input) !== zoomScale(mode, input);
+  return (
+    zoomScale(stepZoom(mode, direction, input), input) !== zoomScale(mode, input)
+  );
 }
 
 export function zoomLabel(mode: ZoomMode, input: ZoomInput): string {
