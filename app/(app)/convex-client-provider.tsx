@@ -1,10 +1,8 @@
 "use client";
 
 import { ConvexAuthNextjsProvider } from "@convex-dev/auth/nextjs";
-import { useConvexAuth } from "@convex-dev/auth/react";
 import { ConvexReactClient } from "convex/react";
 import { ConvexQueryCacheProvider } from "convex-helpers/react/cache/provider";
-import { useState } from "react";
 import type { ReactNode } from "react";
 
 /**
@@ -36,56 +34,24 @@ const convex = new ConvexReactClient(convexUrl);
 const QUERY_CACHE_EXPIRATION_MS = 300_000;
 
 /**
- * A warm cache must not outlive the identity that filled it.
+ * Nothing here scopes the cache to a session, and that is deliberate.
  *
- * `convex` is a module singleton and the registry is memoised on it, so
- * without this both would survive a sign-out — which is a client-side
- * `router.push`, not a reload. `clearAuth()` only sends an `Authenticate`
- * message; it does not clear the client's stored query results. So the server
- * re-runs every still-subscribed query with no identity, `requireUserId`
- * throws, and the failures sit in the store under those tokens. The cache hook
- * rethrows a stored `Error` during render, so the next mount of a cached query
- * can blow up in a component that did nothing wrong.
- *
- * Re-keying on the identity gives each session its own registry, so nothing a
- * signed-out session recorded is ever read by the next one.
- *
- * The epoch, rather than the flag itself, is the key because `isAuthenticated`
- * is false while the token is still being read. Keying on that directly would
- * remount the whole app tree once on every page load — the exact skeleton
- * flash this cache exists to prevent. Only a change *between settled* answers
- * counts as a new session; the first settle is the answer to "who is this?",
- * not a transition. Adjusting state during render is the supported React
- * pattern for this and re-renders before the children commit.
+ * The registry is memoised on a module-singleton client, so it would outlive a
+ * sign-out — and a stale session's failed query results are read straight out
+ * of the client-global store by query token, without the registry being
+ * consulted at all (`BaseConvexClient.localQueryResult`). Re-keying this
+ * provider therefore protects nothing: the fresh registry just refcounts back
+ * onto a token that is still subscribed. The eviction has to happen a level
+ * down, so signing out is a document navigation instead — see the rail's
+ * `Sign out`. That drops the client, its result store and every pending
+ * timer at once.
  */
-function AuthScopedQueryCache({ children }: { children: ReactNode }) {
-  const { isLoading, isAuthenticated } = useConvexAuth();
-  const [session, setSession] = useState<{
-    identity: boolean | null;
-    epoch: number;
-  }>({ identity: null, epoch: 0 });
-
-  if (!isLoading && session.identity !== isAuthenticated) {
-    setSession((prev) => ({
-      identity: isAuthenticated,
-      epoch: prev.identity === null ? prev.epoch : prev.epoch + 1,
-    }));
-  }
-
-  return (
-    <ConvexQueryCacheProvider
-      key={session.epoch}
-      expiration={QUERY_CACHE_EXPIRATION_MS}
-    >
-      {children}
-    </ConvexQueryCacheProvider>
-  );
-}
-
 export function ConvexClientProvider({ children }: { children: ReactNode }) {
   return (
     <ConvexAuthNextjsProvider client={convex}>
-      <AuthScopedQueryCache>{children}</AuthScopedQueryCache>
+      <ConvexQueryCacheProvider expiration={QUERY_CACHE_EXPIRATION_MS}>
+        {children}
+      </ConvexQueryCacheProvider>
     </ConvexAuthNextjsProvider>
   );
 }

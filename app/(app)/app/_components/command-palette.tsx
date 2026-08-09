@@ -67,13 +67,15 @@ export function CommandPalette() {
       {
         // The same two calls the rail makes, in the same order — the palette
         // is another way to press the same control, not a second
-        // implementation of signing out.
+        // implementation of signing out. That includes the document
+        // navigation: see the rail for why signing out must not be a
+        // `router.push`.
         label: "Sign out",
         section: "Account",
         keywords: ["log out", "logout", "leave"],
         run: async () => {
           await signOut();
-          router.push("/signin");
+          window.location.assign("/signin");
         },
       },
     ],

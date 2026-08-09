@@ -6,7 +6,7 @@ import { chipClass, eyebrowClass, skeletonClass } from "@/lib/ui";
 import { useAuthActions } from "@convex-dev/auth/react";
 import { useQuery } from "convex-helpers/react/cache/hooks";
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useLabs } from "./lab-provider";
 import { Select } from "./select";
@@ -21,7 +21,6 @@ export function Sidebar() {
   const { labs, currentLab, selectLab } = useLabs();
   const viewer = useQuery(api.users.viewer);
   const { signOut } = useAuthActions();
-  const router = useRouter();
   const pathname = usePathname();
   const shortcut = useShortcut();
 
@@ -108,12 +107,29 @@ export function Sidebar() {
             Commands
           </span>
         )}
+        {/*
+          A document navigation, not `router.push` — the one place in the app
+          where throwing the JS context away is the point.
+
+          `clearAuth()` only tells the server to stop trusting us; it does not
+          clear the client's stored query results. Everything still subscribed
+          re-runs without an identity, `requireUserId` throws, and those
+          failures sit in the client-global result store keyed by query token.
+          The query cache holds those tokens subscribed for five minutes after
+          the last unmount, so `QueryRemoved` never fires and the failures
+          outlive the session — and the cached `useQuery` rethrows a stored
+          Error during render. Signing back in would then read a dead session's
+          errors. A full load destroys the client singleton, the result store
+          and every pending eviction timer, so the next session starts every
+          query at `undefined`. One page load at a session boundary costs
+          nothing: there is nothing worth keeping warm across it.
+        */}
         <button
           type="button"
           className="self-start font-sans text-sm text-accent underline-offset-4 hover:underline"
           onClick={async () => {
             await signOut();
-            router.push("/signin");
+            window.location.assign("/signin");
           }}
         >
           Sign out
