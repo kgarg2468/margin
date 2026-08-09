@@ -57,6 +57,16 @@ const LONG_TITLE =
     500,
   );
 
+/**
+ * A display name nothing in the product bounds.
+ *
+ * `users.name` is filled from a Google profile or from the sign-up form, and
+ * no schema validator, no mutation and no composer used to cap it — so the
+ * subject-line limit was really a limit on the title alone.
+ */
+const LONG_ACTOR =
+  "Ada Augusta Byron King Countess of Lovelace and Analytical Engines";
+
 type Message = {
   name: string;
   subject: string;
@@ -116,6 +126,36 @@ const messages: Message[] = [
       url: `${SITE}/app/library/p2/read`,
     }),
     url: `${SITE}/app/library/p2/read`,
+  },
+  {
+    // Both kinds, because they do not cost the same. "replied to your note
+    // on" is seven characters longer than "mentioned you on", which was
+    // exactly enough to put this subject at 120 while the mention above sat
+    // comfortably inside it — a bound that held only for the fixture that
+    // happened to be tested.
+    name: "reply about a paper with a 500-character title",
+    ...composeNotificationEmail({
+      kind: "reply",
+      actorName: "Ada Lovelace",
+      paperTitle: LONG_TITLE,
+      snippet: "Not quite — theirs holds the head count fixed.",
+      url: `${SITE}/app/library/p2/read`,
+    }),
+    url: `${SITE}/app/library/p2/read`,
+  },
+  {
+    // The other unbounded component. A display name is whatever Google handed
+    // over or whatever somebody typed into the sign-up form, and nothing
+    // anywhere caps it.
+    name: "reply from somebody with a very long name",
+    ...composeNotificationEmail({
+      kind: "reply",
+      actorName: LONG_ACTOR,
+      paperTitle: LONG_TITLE,
+      snippet: "Not quite — theirs holds the head count fixed.",
+      url: `${SITE}/app/library/p3/read`,
+    }),
+    url: `${SITE}/app/library/p3/read`,
   },
 ];
 
@@ -255,13 +295,45 @@ describe("both parts of every message", () => {
     // 500-character title — which `convex/papers.ts` accepts — would otherwise
     // become a ~540-character subject line that every client truncates
     // somewhere different.
-    const long = messages.find((m) => m.name.includes("500-character"));
-    expect(long?.subject).toContain("…”");
-    expect(long?.subject).toContain("On the Reproducibility of Attention");
-    expect(long?.subject).not.toContain(LONG_TITLE);
-    // Both halves say the same thing, so the opening is shortened too.
-    expect(long?.text).not.toContain(LONG_TITLE);
-    expect(long?.html).not.toContain(LONG_TITLE);
+    const long = messages.filter((m) => m.name.includes("500-character"));
+    expect(long).toHaveLength(2);
+    for (const message of long) {
+      expect(message.subject).toContain("…”");
+      expect(message.subject).toContain("On the Reproducibility of Attention");
+      expect(message.subject).not.toContain(LONG_TITLE);
+      // Both halves say the same thing, so the opening is shortened too.
+      expect(message.text).not.toContain(LONG_TITLE);
+      expect(message.html).not.toContain(LONG_TITLE);
+    }
+  });
+
+  it("shortens an unbounded display name too", () => {
+    const long = messages.find((m) => m.name.includes("very long name"));
+    expect(long?.subject).not.toContain(LONG_ACTOR);
+    expect(long?.subject).toContain("Ada Augusta Byron");
+    expect(long?.text).not.toContain(LONG_ACTOR);
+    expect(long?.html).not.toContain(LONG_ACTOR);
+  });
+
+  it("keeps every kind inside the bound by construction", () => {
+    // Not by fixture. The two kinds do not cost the same number of fixed
+    // characters, so a flat title cap that fits one can put the other at
+    // exactly the limit — which is what happened, and what a list of hand-
+    // picked examples is structurally bad at noticing. This asks the composer
+    // directly, with every variable component at its worst.
+    for (const kind of ["mention", "reply"] as const) {
+      const composed = composeNotificationEmail({
+        kind,
+        actorName: "Q".repeat(400),
+        paperTitle: "Z".repeat(500),
+        snippet: "…",
+        url: `${SITE}/app/library/p1/read`,
+      });
+      expect(composed.subject.length).toBeLessThan(120);
+      // Still says who and what, rather than being clipped into nothing.
+      expect(composed.subject).toContain("Q");
+      expect(composed.subject).toContain("Z");
+    }
   });
 
   it("tells a notification's recipient why they were written to", () => {
@@ -352,14 +424,29 @@ describe("siteUrl", () => {
     ).toBeNull();
   });
 
-  it("takes an absolute origin and drops its trailing slashes", () => {
+  it("refuses what Convex Auth would read differently", () => {
+    // The rule is byte-identical to Convex Auth's own base or nothing at all.
+    // Its base is `requireEnv("SITE_URL").replace(/\/$/, "")` — no trim, and
+    // exactly one trailing slash removed — so anything this function tidies up
+    // that the library does not leaves two bases that disagree about where
+    // Margin lives, which is the divergence `convex/invites.ts` claims is
+    // impossible. Padding and a doubled slash are refused rather than cleaned,
+    // because cleaning them here does not clean them there.
+    expect(withSiteUrl(" https://margin.example.edu", siteUrl)).toBeNull();
+    expect(withSiteUrl("https://margin.example.edu ", siteUrl)).toBeNull();
+    expect(withSiteUrl("https://margin.example.edu//", siteUrl)).toBeNull();
+    expect(withSiteUrl("https://margin.example.edu///", siteUrl)).toBeNull();
+    expect(withSiteUrl("  http://localhost:3000/  ", siteUrl)).toBeNull();
+  });
+
+  it("takes an absolute origin and drops one trailing slash, as the library does", () => {
     expect(withSiteUrl("https://margin.example.edu", siteUrl)).toBe(
       "https://margin.example.edu",
     );
-    expect(withSiteUrl("https://margin.example.edu///", siteUrl)).toBe(
+    expect(withSiteUrl("https://margin.example.edu/", siteUrl)).toBe(
       "https://margin.example.edu",
     );
-    expect(withSiteUrl("  http://localhost:3000/  ", siteUrl)).toBe(
+    expect(withSiteUrl("http://localhost:3000/", siteUrl)).toBe(
       "http://localhost:3000",
     );
   });

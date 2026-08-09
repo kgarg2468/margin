@@ -122,24 +122,45 @@ export function googleIsConfigured(): boolean {
  * string and resolves to nothing. Credentials in the authority are worse: they
  * would be mailed to everyone the lab invites.
  *
- * The obvious fix is to normalize to `parsed.origin`, and that is the wrong
- * one. Convex Auth builds its own base as `requireEnv("SITE_URL").replace(/\/$/,
- * "")` and nothing here can change that, so normalizing would leave two bases
- * that quietly disagree — `convex/invites.ts` states out loud that they agree,
- * and the sign-in a link triggers has to land on the same origin the link came
- * from. So this validates and refuses instead: anything with a path, a query,
- * a fragment or credentials is treated as absent, which surfaces as "nothing
- * was sent, and here is why" rather than as mail with a broken link in it.
+ * The obvious fix is to normalize — to `parsed.origin`, or by trimming — and
+ * that is the wrong one. Convex Auth builds its own base as
+ * `requireEnv("SITE_URL").replace(/\/$/, "")`: no trim, and exactly one
+ * trailing slash removed. Anything this function cleans up that Convex Auth
+ * does not leaves two bases that quietly disagree about where Margin lives —
+ * which is precisely what `convex/invites.ts` states out loud cannot happen,
+ * and it matters because the sign-in a link triggers has to land on the same
+ * origin the link came from.
+ *
+ * So the rule is: byte-identical to Convex Auth's base, or nothing at all.
+ * `" https://x.example"` and `"https://x.example//"` are both refused rather
+ * than tidied, because tidying them here does not tidy them there. And so are
+ * a path, a query, a fragment and credentials — none of which survive
+ * concatenation into `${site}/app?invite=…` in any useful form.
+ *
+ * Refusing is not a worse outcome than guessing. It surfaces as an invitation
+ * that declines to send and says why, and a notification that stays in the app
+ * where it already is, rather than as real mail with a dead link in it.
  */
 export function siteUrl(): string | null {
   const configured = process.env.SITE_URL;
   if (typeof configured !== "string") {
     return null;
   }
-  const trimmed = configured.trim().replace(/\/+$/, "");
+  // Convex Auth does not trim, so neither may we: a padded value would give
+  // this function a usable origin and the library a broken one.
+  if (configured !== configured.trim()) {
+    return null;
+  }
+  // Convex Auth strips one trailing slash. A value ending in more than one
+  // is a misconfiguration whichever way you read it, and the two readings
+  // differ — so it is refused rather than picked between.
+  if (configured.endsWith("//")) {
+    return null;
+  }
+  const base = configured.replace(/\/$/, "");
   let parsed: URL;
   try {
-    parsed = new URL(trimmed);
+    parsed = new URL(base);
   } catch {
     return null;
   }
@@ -155,7 +176,7 @@ export function siteUrl(): string | null {
   if (parsed.pathname !== "/" || parsed.search !== "" || parsed.hash !== "") {
     return null;
   }
-  return trimmed;
+  return base;
 }
 
 /** Text is escaped into HTML in three places; one function so it cannot be forgotten in the fourth. */

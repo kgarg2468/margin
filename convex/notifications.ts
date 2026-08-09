@@ -70,18 +70,54 @@ const MAX_PER_ANNOTATION = 64;
 const SNIPPET_LENGTH = 140;
 
 /**
+ * The most of a subject line an inbox list will show.
+ *
+ * Past this a subject is truncated by the client, at a different place in
+ * every client, and none of them truncate well.
+ */
+const MAX_SUBJECT_LENGTH = 120;
+
+/**
  * How much of a paper's title one subject line will carry.
  *
  * `papers.ts` caps a title at 500 characters, which is generous and correct
  * for a library row and ruinous for an inbox: "Ada Lovelace mentioned you on
  * “…”" around a 500-character title is a subject line five hundred and forty
- * characters long, which every mail client truncates at a different place and
- * none of them truncate well. Eighty plus an ellipsis keeps the whole subject
- * inside the ~120 characters an inbox list shows, and the truncation lives
- * here rather than at the call site so it is a property of the message rather
- * than of whichever fixture happened to be short.
+ * characters long. The truncation lives here rather than at the call site so
+ * it is a property of the message rather than of whichever fixture happened
+ * to be short.
  */
 const TITLE_IN_SUBJECT = 80;
+
+/**
+ * And how much of a person's name.
+ *
+ * A display name comes from a Google profile or from whatever somebody typed
+ * into the sign-up form, and nothing anywhere bounds it. It is the other
+ * variable component of a subject line, so leaving it unbounded meant the
+ * bound below was really a bound on the *title* alone — which held for the
+ * fixtures and not for a lab with one theatrically-named member in it.
+ *
+ * Forty is past every real name and short enough that it always leaves room
+ * for a recognisable amount of title.
+ */
+const ACTOR_IN_SUBJECT = 40;
+
+/**
+ * At most `limit` characters, with an ellipsis if anything was dropped.
+ *
+ * The ellipsis is counted, not added on top — a "shortened" string longer than
+ * the limit it was shortened to is how a bound stops being one.
+ */
+function shorten(value: string, limit: number): string {
+  if (value.length <= limit) {
+    return value;
+  }
+  if (limit < 1) {
+    return "";
+  }
+  return `${value.slice(0, limit - 1).trimEnd()}…`;
+}
 
 /* -------------------------------------------------------------------------
  * Writing (called from convex/annotations.ts)
@@ -582,22 +618,34 @@ export function composeNotificationEmail(message: {
   snippet: string;
   url: string;
 }): { subject: string; text: string; html: string } {
-  // Shortened once, so the subject and the opening sentence agree about what
-  // the paper is called. `cleanTitle` has already collapsed every run of
-  // whitespace, so there is no CR or LF in here to worry a mail header about.
-  const title =
-    message.paperTitle.length > TITLE_IN_SUBJECT
-      ? `${message.paperTitle.slice(0, TITLE_IN_SUBJECT).trimEnd()}…`
-      : message.paperTitle;
-
-  const subject =
+  // Both variable parts are bounded, and the title's budget is computed from
+  // the sentence it is going into rather than guessed.
+  //
+  // Guessing is what went wrong the first time. A flat 80-character title cap
+  // keeps a *mention* subject inside the limit and puts a *reply* subject at
+  // exactly 120 — "replied to your note on" is seven characters longer than
+  // "mentioned you on", which is precisely the margin. So the frame is
+  // measured with an empty title and the title takes whatever is left, which
+  // means the bound holds for both kinds now and for a third one written
+  // later by somebody who never read this comment.
+  //
+  // `cleanTitle` has already collapsed every run of whitespace, so there is no
+  // CR or LF in here to worry a mail header about.
+  const actor = shorten(message.actorName, ACTOR_IN_SUBJECT);
+  const subjectWith = (paper: string) =>
     message.kind === "mention"
-      ? `${message.actorName} mentioned you on “${title}”`
-      : `${message.actorName} replied to your note on “${title}”`;
+      ? `${actor} mentioned you on “${paper}”`
+      : `${actor} replied to your note on “${paper}”`;
+  const title = shorten(
+    message.paperTitle,
+    Math.min(TITLE_IN_SUBJECT, MAX_SUBJECT_LENGTH - 1 - subjectWith("").length),
+  );
+
+  const subject = subjectWith(title);
   const opening =
     message.kind === "mention"
-      ? `${message.actorName} mentioned you in the margin of “${title}”.`
-      : `${message.actorName} answered your note in the margin of “${title}”.`;
+      ? `${actor} mentioned you in the margin of “${title}”.`
+      : `${actor} answered your note in the margin of “${title}”.`;
   const because =
     "You're getting this because you're in this lab and this note was addressed to you.";
 
