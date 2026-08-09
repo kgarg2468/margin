@@ -265,6 +265,32 @@ export const eventDoc = v.union(
     sessionId: v.id("sessions"),
   }),
   /**
+   * A person signed the write-up off. `session.synthesized` says a model
+   * produced a draft; this says a human read it, edited it, and put the lab's
+   * name on the result — which is the only version that is the lab's official
+   * record, and a different fact with a different actor.
+   *
+   * Written on every approval rather than only the first. An approved copy
+   * goes stale when a note it cites is withdrawn, and the fix is to review it
+   * and approve it again; the ledger is where that history lives, since the
+   * session row only ever holds the latest one.
+   *
+   * `citationCount` is the size of the citation snapshot the copy was checked
+   * against at that moment — a number, not the ids, because the ledger is
+   * append-only and holds references rather than a second copy of state it
+   * would then have to keep true. The ids live on the session, where they can
+   * be re-checked against the margin as it stands.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("synthesis.approved"),
+    paperId: v.id("papers"),
+    sessionId: v.id("sessions"),
+    citationCount: v.number(),
+    /** True when this replaced a copy that had already been approved. */
+    reapproved: v.boolean(),
+  }),
+  /**
    * A meeting that was scheduled and then wasn't held. The row stays — a
    * cancelled session is a fact about the lab's history, and annotations
    * written during its prep still point at it.
@@ -410,8 +436,29 @@ export default defineSchema({
     presenterId: v.id("users"),
     status: sessionStatus,
     presenterNotes: v.optional(v.string()),
+    /**
+     * The approved write-up: the markdown a person edited and signed off, and
+     * the only version that is the lab's official record. The generated
+     * sections in `syntheses` are the draft it was made from — re-generating
+     * replaces that row and deliberately leaves this one alone, because a
+     * human artifact is not something a model gets to overwrite.
+     */
     synthesis: v.optional(v.string()),
     synthesisApprovedAt: v.optional(v.number()),
+    /**
+     * The annotations the approved copy rested on when it was approved, as
+     * they stood at that moment.
+     *
+     * The generated draft re-checks its citations on every read and redacts
+     * what is no longer shared (see `applyWithdrawals`). An approved copy
+     * cannot do that: it is prose a person wrote, and no machine can tell
+     * which sentence of it came from which note. So it does the honest other
+     * thing — it keeps the list it was checked against, and when one of those
+     * notes is withdrawn or made private the reader is told the copy is no
+     * longer current and asked to review it. Silence would be the write-up
+     * quoting a note somebody has taken back.
+     */
+    synthesisCitedAnnotationIds: v.optional(v.array(v.id("annotations"))),
     /**
      * When a synthesis run claimed this session, if one currently has it.
      *
