@@ -89,6 +89,14 @@ export function CommandPalette() {
   // The one global listener in the app. On `window` rather than on a wrapper
   // element so it fires wherever focus happens to be — including inside the
   // PDF canvas, which is exactly where someone is when they want it.
+  //
+  // Re-subscribed whenever `open` changes rather than reading the flag through
+  // a functional updater, because opening is not just a flag flip: the field
+  // and the highlight have to be cleared in the same commit. `setOpen(c => !c)`
+  // cannot tell the two directions apart from outside, and telling them apart
+  // *inside* the updater would mean calling other setters from it — updaters
+  // have to be pure, and React is entitled to run them twice. One listener,
+  // swapped twice per use of the palette, costs nothing.
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       if (event.key.toLowerCase() !== "k") return;
@@ -96,11 +104,28 @@ export function CommandPalette() {
       // Both browser and OS have their own ⌘K/Ctrl+K in places (search bar,
       // kill-line in a text field), and taking it is the point.
       event.preventDefault();
-      setOpen((current) => !current);
+      if (open) {
+        setOpen(false);
+        return;
+      }
+      // Every open starts from a blank field, and this is the only place that
+      // can say so. The dialog has no `Dialog.Trigger`, so Base UI never opens
+      // it and never reports an opening — a controlled `open` prop turning true
+      // is not an event it raises. A reset hung off `onOpenChange(true, …)` is
+      // code that never runs, and the palette would reopen still holding the
+      // last thing typed into it: `sign` + Escape + ⌘K would come back with one
+      // row showing and "Sign out" highlighted, one Enter away.
+      //
+      // Batched with `setOpen` into a single commit, so no stale query is ever
+      // painted — including under reduced motion, where there is no entrance
+      // fade to hide a frame behind.
+      setQuery("");
+      setActiveIndex(0);
+      setOpen(true);
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [open]);
 
   // `aria-activedescendant` does not scroll the way real focus does — the
   // browser has no idea the highlight moved — so the list has to be told.
@@ -123,13 +148,15 @@ export function CommandPalette() {
     <Dialog.Root
       open={open}
       onOpenChange={(next) => {
-        // Reset on the way in, not on the way out: the popup spends 120ms
-        // fading, and a list that emptied itself first would be the last
-        // thing seen of it.
-        if (next) {
-          setQuery("");
-          setActiveIndex(0);
-        }
+        // `next` is only ever `false` here. With no `Dialog.Trigger` the dialog
+        // has no way to open itself, so everything Base UI reports through this
+        // is a *closing*: Escape, an outside press, a close press. The opening —
+        // and the reset it owes — belongs to the keydown listener above, which
+        // is the only thing that can raise `open`.
+        //
+        // Note also what this deliberately does not do: clear the query on the
+        // way out. The popup spends 120ms fading, and a list that emptied itself
+        // first would be the last thing seen of it.
         setOpen(next);
       }}
     >
