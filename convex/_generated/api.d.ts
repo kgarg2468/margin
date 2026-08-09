@@ -8,6 +8,7 @@
  * @module
  */
 
+import type * as actions from "../actions.js";
 import type * as annotationVersions from "../annotationVersions.js";
 import type * as annotations from "../annotations.js";
 import type * as auth from "../auth.js";
@@ -35,6 +36,7 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  actions: typeof actions;
   annotationVersions: typeof annotationVersions;
   annotations: typeof annotations;
   auth: typeof auth;

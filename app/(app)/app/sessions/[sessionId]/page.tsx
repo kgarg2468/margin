@@ -22,6 +22,7 @@ import { PresenterBrief } from "./_components/brief";
 import { LiveSession } from "./_components/live-session";
 import type { SessionDetail } from "./_components/manage";
 import { ManageSession, PresenterNotes } from "./_components/manage";
+import { SessionOutcomes } from "./_components/outcomes";
 import {
   FloorColumns,
   MarginElsewhere,
@@ -283,6 +284,15 @@ function Record({
           )}
         </section>
       )}
+
+      {/* What the discussion produced, and what earlier meetings on this paper
+          left open. Below the board because the board is what the outcomes are
+          drawn *from* — a reader works down what the lab flagged and then
+          across what it settled — and above the write-up because the write-up
+          is prose about the same hour and this is the part of it that is still
+          owed. Drawn on a cancelled session too, since a meeting that was
+          called off can still be holding somebody else's open question. */}
+      <SessionOutcomes session={session} rows={rows} />
 
       {held && (
         <div className="border-t border-rule pt-8">
