@@ -11,16 +11,18 @@ import { getMembership, requireMembership, requireUserId } from "./lib/authz";
 import {
   assembleDigest,
   detectCollisions,
+  type Collision,
   type DigestAnnotation,
 } from "../lib/digest/engine";
+import { papersToScan, planSinceAway } from "../lib/digest/since-away";
 
 /**
  * Boundary-delivered digests.
  *
  * The architecture decision puts delivery at boundaries and nowhere else: a
  * prep digest computed two hours before a session, a refresh at session start,
- * and an in-app "since you were away" per paper. There are no per-write
- * notifications, ever.
+ * and an in-app "since you were away" built when a member comes back to a lab
+ * they have been gone from. There are no per-write notifications, ever.
  *
  * This module is the plumbing — reads, authorization, writes. The policy it
  * runs is `lib/digest/engine.ts`, which is pure and unit-tested: deterministic
@@ -77,14 +79,40 @@ const POOL_LIMIT = 1000;
 /** How many digests a member's inbox hands back at once. */
 const INBOX_PAGE = 20;
 
+/**
+ * How much of the ledger an arrival reads to find out which papers moved.
+ *
+ * Newest-first over the window since the member's cursor. It is a sample, not
+ * a census: all it has to do is name the handful of papers below, and the
+ * newest two hundred facts in a lab name the papers currently being argued
+ * about far more reliably than the oldest two hundred would.
+ */
+const SINCE_AWAY_EVENT_SCAN = 200;
+
+/**
+ * How many papers one "since you were away" digest reads annotations for, and
+ * how many of each paper's annotations it pools.
+ *
+ * The product of the two is `POOL_LIMIT`: an arrival costs the same ceiling in
+ * reads as a session boundary does, spread across the papers a lab actually
+ * touched instead of concentrated on one. Five is also the digest's own cap,
+ * and the papers arrive most-recently-written-first — so a lab that moved on
+ * six papers spends its five lines on the five it is currently arguing about
+ * and drops the quietest one, which is the same order the cap would have cut
+ * in anyway.
+ */
+const SINCE_AWAY_PAPERS = 5;
+const SINCE_AWAY_POOL_LIMIT = 200;
+
 /* -------------------------------------------------------------------------
  * Validators
  * ---------------------------------------------------------------------- */
 
 /**
  * The two boundaries that arrive as a scheduled job. The `digests` table has a
- * third, `since-away`, which is computed when a member opens a paper rather
- * than queued in advance — so it is not a value this argument ever takes.
+ * third, `since-away`, which is built by `catchUp` when a member comes back to
+ * the lab rather than queued in advance — so it is not a value this argument
+ * ever takes.
  */
 const sessionBoundary = v.union(
   v.literal("session-prep"),
@@ -152,6 +180,39 @@ async function sessionCursor(
     .unique();
 }
 
+/**
+ * A member's lab-wide cursor: how far into the *lab* they have caught up,
+ * as opposed to into one paper or one session.
+ *
+ * It is the row in `seenCursors` with neither a `paperId` nor a `sessionId` —
+ * the schema has always allowed one, and "since you were away" is what finally
+ * needs it, because an absence is from the lab rather than from a document.
+ * There is at most one per member per lab: only `markSeen` creates it, and only
+ * when there isn't one.
+ *
+ * The read is bounded by the cursors this member holds *in this one lab* —
+ * `by_user_and_lab` cannot see another lab's, and a member's cursor count in a
+ * lab is bounded by the papers they have caught up on.
+ */
+async function labCursor(
+  ctx: QueryCtx | MutationCtx,
+  userId: Id<"users">,
+  labId: Id<"labs">,
+): Promise<Doc<"seenCursors"> | null> {
+  return await ctx.db
+    .query("seenCursors")
+    .withIndex("by_user_and_lab", (q) =>
+      q.eq("userId", userId).eq("labId", labId),
+    )
+    .filter((q) =>
+      q.and(
+        q.eq(q.field("paperId"), undefined),
+        q.eq(q.field("sessionId"), undefined),
+      ),
+    )
+    .first();
+}
+
 /** The one refusal for a digest that isn't the caller's — as `markDigestSeen`. */
 const NOT_YOUR_DIGEST = "That digest isn't in your inbox.";
 
@@ -179,7 +240,7 @@ async function advanceCursor(
 }
 
 /**
- * Mark a paper or a session as looked at.
+ * Mark a paper, a session or a whole lab as looked at.
  *
  * **Only ever an explicit act by the person it is about.** Nothing calls this
  * on open, and nothing may: a cursor that moved because a panel scrolled into
@@ -191,7 +252,10 @@ async function advanceCursor(
  * so that "what's new since you last looked" has a meaning. Nothing reads it
  * to ask whether a member has kept up.
  *
- * Exactly one of `paperId` / `sessionId` — a cursor addresses one thing.
+ * Exactly one of `paperId` / `sessionId` / `labId` — a cursor addresses one
+ * thing. The lab-wide one is what a "since you were away" digest is
+ * acknowledged against: that digest is about an absence from the lab, and no
+ * per-paper cursor can record the end of one.
  *
  * ## Why `digestId` rather than `now`
  *
@@ -206,8 +270,9 @@ async function advanceCursor(
  * It is derived here from the id rather than passed as a timestamp, because a
  * timestamp is an argument a client can be wrong about — or lie about — and
  * this one decides what a member is never shown again. The digest must be the
- * caller's own, and must actually address the paper or session being stamped;
- * otherwise a stale acknowledgement could be pointed at an unrelated cursor.
+ * caller's own, and must actually address the paper, session or lab being
+ * stamped; otherwise a stale acknowledgement could be pointed at an unrelated
+ * cursor.
  *
  * Without `digestId` the stamp is `now`, which is what an acknowledgement of
  * something other than a digest would mean.
@@ -216,13 +281,18 @@ export const markSeen = mutation({
   args: {
     paperId: v.optional(v.id("papers")),
     sessionId: v.optional(v.id("sessions")),
+    /** The lab a "since you were away" digest was an absence from. */
+    labId: v.optional(v.id("labs")),
     /** The digest this acknowledgement is of; its `generatedAt` is the stamp. */
     digestId: v.optional(v.id("digests")),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    if ((args.paperId === undefined) === (args.sessionId === undefined)) {
-      throw new ConvexError("Mark either a paper or a session as seen.");
+    const targets = [args.paperId, args.sessionId, args.labId].filter(
+      (target) => target !== undefined,
+    );
+    if (targets.length !== 1) {
+      throw new ConvexError("Mark one paper, session or lab as seen.");
     }
     const userId = await requireUserId(ctx);
 
@@ -232,14 +302,34 @@ export const markSeen = mutation({
       if (digest === null || digest.userId !== userId) {
         throw new ConvexError(NOT_YOUR_DIGEST);
       }
+      // A lab-wide cursor may only be moved by a lab-wide digest. A session's
+      // prep covers one paper, so letting it stamp the lab cursor would mark a
+      // whole lab caught up on the strength of one meeting's reading — and
+      // bury every other paper's delta behind a cursor that never saw it.
       const addresses =
-        args.paperId === undefined
-          ? digest.sessionId === args.sessionId
-          : digest.items.some((item) => item.paperId === args.paperId);
+        args.labId !== undefined
+          ? digest.labId === args.labId && digest.boundary === "since-away"
+          : args.paperId === undefined
+            ? digest.sessionId === args.sessionId
+            : digest.items.some((item) => item.paperId === args.paperId);
       if (!addresses) {
         throw new ConvexError(NOT_YOUR_DIGEST);
       }
       at = digest.generatedAt;
+    }
+
+    if (args.labId !== undefined) {
+      const membership = await getMembership(ctx, args.labId, userId);
+      if (membership === null) {
+        throw new ConvexError(NO_SUCH_TARGET);
+      }
+      await advanceCursor(
+        ctx,
+        await labCursor(ctx, userId, args.labId),
+        at,
+        { userId, labId: args.labId },
+      );
+      return null;
     }
 
     if (args.paperId !== undefined) {
@@ -260,7 +350,7 @@ export const markSeen = mutation({
 
     const sessionId = args.sessionId;
     if (sessionId === undefined) {
-      throw new ConvexError("Mark either a paper or a session as seen.");
+      throw new ConvexError("Mark one paper, session or lab as seen.");
     }
     const session = await ctx.db.get(sessionId);
     const membership =
@@ -452,6 +542,211 @@ export const buildSessionPrep = internalMutation({
     }
 
     return null;
+  },
+});
+
+/* -------------------------------------------------------------------------
+ * The third boundary: coming back
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Build this member's "since you were away" digest, if they have been away.
+ *
+ * ## Why a mutation the client calls, and not a job
+ *
+ * The other two boundaries are on a calendar, so a scheduler can hold them.
+ * This one is a fact about a person — they were gone, and now they are back —
+ * and the server has no way to learn it in advance. It could only be polled,
+ * and polling for "who is away" means keeping the thing the privacy
+ * constitution forbids: a record of when each member was last around. There
+ * isn't one, and there is not going to be one. So the trigger is the arrival
+ * itself. The lab dashboard calls this when it mounts, most calls decide
+ * nothing needs building, and the decision is `lib/digest/since-away.ts` —
+ * pure, and tested there.
+ *
+ * ## What an arrival is allowed to write
+ *
+ * A digest, and nothing else. **It does not move the cursor.** A cursor that
+ * advanced because a page mounted would be dwell tracking wearing an
+ * acknowledgement's clothes — and it would eat the very delta it claims to
+ * report, since the next digest starts where the cursor stopped. The cursor
+ * moves in `markSeen`, when the member presses "I'm caught up", and the stamp
+ * is this digest's `generatedAt`.
+ *
+ * The digest row does carry one new fact — that this member opened the lab at
+ * `generatedAt`. That is as narrow as the trigger can be made: the row lives in
+ * the member's own inbox, `listMine` is pinned to the caller's id, and nothing
+ * anywhere aggregates digests or reads another member's. No one but them can
+ * learn it.
+ *
+ * ## Idempotent by construction
+ *
+ * At most one unacknowledged since-away digest exists per member per lab. A
+ * revisit finds it and returns it; a revisit an hour later rebuilds it *in
+ * place*, over the same row, so the card can neither duplicate nor go stale
+ * while it waits. Once acknowledged, the cursor has moved past its window and
+ * the next one starts from there.
+ *
+ * Returns the digest's id when there is one to show, so a caller can tell
+ * "built" from "nothing to say" — the UI reads it out of `listMine` either way.
+ */
+export const catchUp = mutation({
+  args: { labId: v.id("labs") },
+  returns: v.union(v.id("digests"), v.null()),
+  handler: async (ctx, args) => {
+    const membership = await requireMembership(ctx, args.labId);
+    const userId = membership.userId;
+    const now = Date.now();
+
+    // Deduped against exactly the window the inbox can show. A since-away
+    // digest that has fallen out of the newest `INBOX_PAGE` is one the member
+    // cannot see, so building a fresh one is not a duplicate — and bounding
+    // the scan here keeps an arrival's cost flat in a busy inbox.
+    const recent = await ctx.db
+      .query("digests")
+      .withIndex("by_user_and_lab", (q) =>
+        q.eq("userId", userId).eq("labId", args.labId),
+      )
+      .order("desc")
+      .take(INBOX_PAGE);
+    const waiting =
+      recent.find(
+        (digest) =>
+          digest.boundary === "since-away" &&
+          digest.acknowledgedAt === undefined,
+      ) ?? null;
+
+    const cursor = await labCursor(ctx, userId, args.labId);
+    const plan = planSinceAway({
+      now,
+      joinedAt: membership.joinedAt,
+      cursorAt: cursor?.lastSeenAt ?? null,
+      waiting: waiting === null ? null : { generatedAt: waiting.generatedAt },
+      lookbackMs: NO_CURSOR_LOOKBACK_MS,
+    });
+    if (plan.kind !== "build") {
+      return plan.kind === "reuse" && waiting !== null ? waiting._id : null;
+    }
+
+    // The ledger names the field. A paper nobody has written on since the
+    // member's cursor cannot produce a line, so it is not worth a read — and
+    // an empty answer here is the "nothing happened while you were gone" case,
+    // which is most absences.
+    const beats = await ctx.db
+      .query("events")
+      .withIndex("by_lab_and_at", (q) =>
+        q.eq("labId", args.labId).gt("at", plan.since),
+      )
+      .order("desc")
+      .take(SINCE_AWAY_EVENT_SCAN);
+    const paperIds = papersToScan<Id<"papers">>(beats, SINCE_AWAY_PAPERS);
+    if (paperIds.length === 0) {
+      return waiting?._id ?? null;
+    }
+
+    const names = new Map<Id<"users">, string>();
+    const paperTitles = new Map<Id<"papers">, string>();
+    const pool: DigestAnnotation<Id<"papers">, Id<"annotations">, Id<"users">>[] =
+      [];
+    const collisions: Collision<
+      Id<"papers">,
+      Id<"annotations">,
+      Id<"users">
+    >[] = [];
+
+    for (const paperId of paperIds) {
+      const paper = await ctx.db.get(paperId);
+      // The ids came out of this lab's own ledger, so the lab check is belt
+      // and braces — but a pool is one query away from a member's annotations
+      // and that is not a place to rely on an invariant holding elsewhere.
+      if (paper === null || paper.labId !== args.labId) {
+        continue;
+      }
+
+      // Privacy is the index, not a filter, exactly as in the session job:
+      // `by_paper_and_visibility` at "lab" cannot return a private annotation.
+      const visible = await ctx.db
+        .query("annotations")
+        .withIndex("by_paper_and_visibility", (q) =>
+          q.eq("paperId", paperId).eq("visibility", "lab"),
+        )
+        .order("desc")
+        .take(SINCE_AWAY_POOL_LIMIT);
+      const live = visible.filter((a) => a.deletedAt === undefined);
+      if (live.length === 0) {
+        continue;
+      }
+      paperTitles.set(paper._id, paper.title);
+
+      for (const authorId of new Set(live.map((a) => a.memberId))) {
+        if (names.has(authorId)) continue;
+        const user = await ctx.db.get(authorId);
+        names.set(authorId, user?.name ?? user?.email ?? "Someone");
+      }
+
+      const paperPool = live.map((a) => ({
+        id: a._id,
+        paperId: a.paperId,
+        memberId: a.memberId,
+        memberName: names.get(a.memberId) ?? "Someone",
+        type: a.type,
+        pageIndex: a.anchor.pageIndex,
+        start: a.anchor.start,
+        end: a.anchor.end,
+        quote: a.anchor.quote,
+        createdAt: a._creationTime,
+      }));
+
+      // Detected per paper and concatenated, rather than in one pass over the
+      // whole pool. The answer is identical — a collision is a passage, and a
+      // passage is inside one paper — but the cost is not: detection is
+      // quadratic, and five papers of 200 is a twenty-fifth of the work of one
+      // pass over 1000. `assembleDigest` re-ranks the concatenation itself, so
+      // the order the cap cuts against is unchanged.
+      collisions.push(...detectCollisions(paperPool));
+      pool.push(...paperPool);
+    }
+
+    const delta = pool.filter(
+      (a) => a.memberId !== userId && a.createdAt > plan.since,
+    );
+    if (delta.length === 0) {
+      return waiting?._id ?? null;
+    }
+
+    const { items, droppedCount } = assembleDigest({
+      recipientId: userId,
+      pool,
+      delta,
+      paperTitles,
+      collisions,
+    });
+    if (items.length === 0) {
+      return waiting?._id ?? null;
+    }
+
+    const dropped = droppedCount > 0 ? droppedCount : undefined;
+    if (plan.rebuild && waiting !== null) {
+      // Over the top of the card they haven't cleared: same row, same place in
+      // the inbox, current contents. Safe because an unacknowledged digest is
+      // also an undelivered one — `markDigestSeen` stamps both at once — so
+      // nothing here rewrites something a member has already read.
+      await ctx.db.patch(waiting._id, {
+        generatedAt: now,
+        droppedCount: dropped,
+        items,
+      });
+      return waiting._id;
+    }
+
+    return await ctx.db.insert("digests", {
+      userId,
+      labId: args.labId,
+      boundary: "since-away",
+      generatedAt: now,
+      droppedCount: dropped,
+      items,
+    });
   },
 });
 

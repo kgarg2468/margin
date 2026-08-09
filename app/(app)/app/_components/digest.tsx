@@ -9,7 +9,7 @@ import type { FunctionReturnType } from "convex/server";
 import { useMutation, useQuery } from "convex/react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { readableError } from "./errors";
 
 type Digest = FunctionReturnType<typeof api.digests.listMine>[number];
@@ -73,7 +73,7 @@ export function SessionDigest({
       </p>
       <div className="flex flex-col gap-6">
         {mine.map((digest) => (
-          <DigestCard key={digest._id} digest={digest} />
+          <DigestCard key={digest._id} digest={digest} labId={labId} />
         ))}
       </div>
     </section>
@@ -89,10 +89,28 @@ export function SessionDigest({
  */
 export function DigestInbox({ labId }: { labId: Id<"labs"> }) {
   const digests = useQuery(api.digests.listMine, { labId });
+  const catchUp = useMutation(api.digests.catchUp);
   const reduce = useReducedMotion();
   const unread = (digests ?? []).filter(
     (digest) => digest.acknowledgedAt === undefined,
   );
+
+  // Arriving is the boundary. Nothing on the server can know a member was away
+  // until they turn up — Margin keeps no last-active stamp to poll, by
+  // constitution — so the mount is the trigger, and `catchUp` decides. Almost
+  // every call decides nothing: it is idempotent, it never stacks a second
+  // card, and it never moves a cursor. The ref keeps a re-render from asking
+  // twice, and a failure clears it again: a lab's home page must not turn into
+  // an error because a digest could not be built, but nor should one dropped
+  // request cost the member their digest for the whole visit.
+  const asked = useRef<string | null>(null);
+  useEffect(() => {
+    if (asked.current === labId) return;
+    asked.current = labId;
+    void catchUp({ labId }).catch(() => {
+      if (asked.current === labId) asked.current = null;
+    });
+  }, [labId, catchUp]);
 
   // "Caught up" is a put-away, and it should read as one: the acknowledged
   // card folds closed and the page settles, instead of everything below it
@@ -114,8 +132,9 @@ export function DigestInbox({ labId }: { labId: Id<"labs"> }) {
         >
           <h2 className={eyebrowClass}>Since you were away</h2>
           <p className="max-w-prose font-sans text-xs text-ink-faint">
-            Delivered at a boundary — before a session, and as it starts —
-            never on every write. Only you see this.
+            Delivered at a boundary — before a session, as it starts, and when
+            you come back after time away — never on every write. Only you see
+            this.
           </p>
           <div className="flex flex-col gap-6">
             <AnimatePresence initial={false}>
@@ -133,7 +152,7 @@ export function DigestInbox({ labId }: { labId: Id<"labs"> }) {
                         }
                   }
                 >
-                  <DigestCard digest={digest} />
+                  <DigestCard digest={digest} labId={labId} />
                 </motion.div>
               ))}
             </AnimatePresence>
@@ -144,7 +163,13 @@ export function DigestInbox({ labId }: { labId: Id<"labs"> }) {
   );
 }
 
-function DigestCard({ digest }: { digest: Digest }) {
+function DigestCard({
+  digest,
+  labId,
+}: {
+  digest: Digest;
+  labId: Id<"labs">;
+}) {
   const markDigestSeen = useMutation(api.digests.markDigestSeen);
   const markSeen = useMutation(api.digests.markSeen);
   const [error, setError] = useState<string | null>(null);
@@ -208,6 +233,13 @@ function DigestCard({ digest }: { digest: Digest }) {
                   sessionId: digest.sessionId,
                   digestId: digest._id,
                 });
+              }
+              // A "since you were away" digest is about an absence from the
+              // lab, not from a paper, so clearing it is what moves the
+              // lab-wide cursor — and that cursor is the only thing that
+              // decides when the next absence starts.
+              if (digest.boundary === "since-away") {
+                await markSeen({ labId, digestId: digest._id });
               }
             } catch (caught) {
               setError(readableError(caught, "That didn't go through."));
