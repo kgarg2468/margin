@@ -80,6 +80,12 @@ describe("googleIsConfigured", () => {
     expect(googleIsConfigured()).toBe(false);
   });
 
+  it("is false when the id is whitespace only", () => {
+    process.env.AUTH_GOOGLE_ID = "   ";
+    process.env.AUTH_GOOGLE_SECRET = "GOCSPX-shhh";
+    expect(googleIsConfigured()).toBe(false);
+  });
+
   it("is false when the secret is present but blank", () => {
     process.env.AUTH_GOOGLE_ID = "1234.apps.googleusercontent.com";
     process.env.AUTH_GOOGLE_SECRET = "";
@@ -101,6 +107,11 @@ describe("emailIsConfigured", () => {
   // means for Google, it means the same for mail.
   it("is false when the key is present but blank", () => {
     process.env.RESEND_API_KEY = "";
+    expect(emailIsConfigured()).toBe(false);
+  });
+
+  it("is false when the key is whitespace only", () => {
+    process.env.RESEND_API_KEY = "   ";
     expect(emailIsConfigured()).toBe(false);
   });
 });

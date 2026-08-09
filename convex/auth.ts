@@ -33,6 +33,9 @@ const SIGN_IN_LINK_TTL_S = 60 * 60;
 
 const RESEND_ENDPOINT = "https://api.resend.com/emails";
 
+const nonEmpty = (v: string | undefined): boolean =>
+  typeof v === "string" && v.trim().length > 0;
+
 /**
  * Who Margin's mail comes from.
  *
@@ -47,8 +50,7 @@ function emailFrom(): string {
 
 /** Whether this deployment can send mail at all. */
 export function emailIsConfigured(): boolean {
-  const key = process.env.RESEND_API_KEY;
-  return typeof key === "string" && key.length > 0;
+  return nonEmpty(process.env.RESEND_API_KEY);
 }
 
 /**
@@ -64,13 +66,9 @@ export function emailIsConfigured(): boolean {
  * the same reason: a key that is present but blank is not a key.
  */
 export function googleIsConfigured(): boolean {
-  const id = process.env.AUTH_GOOGLE_ID;
-  const secret = process.env.AUTH_GOOGLE_SECRET;
   return (
-    typeof id === "string" &&
-    id.length > 0 &&
-    typeof secret === "string" &&
-    secret.length > 0
+    nonEmpty(process.env.AUTH_GOOGLE_ID) &&
+    nonEmpty(process.env.AUTH_GOOGLE_SECRET)
   );
 }
 
@@ -234,6 +232,8 @@ const SignInLink: EmailConfig<DataModel> = {
  * byline read this field, and neither has anywhere to put a blank.
  */
 const GoogleProvider = Google({
+  clientId: process.env.AUTH_GOOGLE_ID?.trim(),
+  clientSecret: process.env.AUTH_GOOGLE_SECRET?.trim(),
   profile(googleProfile) {
     const email =
       typeof googleProfile.email === "string"
@@ -283,6 +283,7 @@ const providers: AuthProviderConfig[] = [
   }),
 ];
 
+// `convex/auth.providers.test.ts` pins this registration predicate.
 if (googleIsConfigured()) {
   providers.push(GoogleProvider);
 }
