@@ -28,6 +28,7 @@ import type * as notifications from "../notifications.js";
 import type * as papers from "../papers.js";
 import type * as scoutEval from "../scoutEval.js";
 import type * as search from "../search.js";
+import type * as sessionTemplates from "../sessionTemplates.js";
 import type * as sessions from "../sessions.js";
 import type * as synthesis from "../synthesis.js";
 import type * as temporal from "../temporal.js";
@@ -60,6 +61,7 @@ declare const fullApi: ApiFromModules<{
   papers: typeof papers;
   scoutEval: typeof scoutEval;
   search: typeof search;
+  sessionTemplates: typeof sessionTemplates;
   sessions: typeof sessions;
   synthesis: typeof synthesis;
   temporal: typeof temporal;
