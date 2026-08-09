@@ -359,6 +359,39 @@ export const eventDoc = v.union(
     type: v.literal("slack.delivery_changed"),
     connected: v.boolean(),
   }),
+  /**
+   * Slack refused one of this lab's posts outright.
+   *
+   * The counterpart to the fact above, and recorded for the same reason: a lab
+   * that decided its margin should leave the building is owed the record of the
+   * times it did not. Without this, a channel archived in March means every
+   * brief since has quietly gone nowhere, with the settings page still saying a
+   * channel is wired and nothing anywhere saying otherwise.
+   *
+   * Only permanent refusals — a `404` for a channel that is gone, a `403` for a
+   * webhook that was revoked. Slack having a bad minute is not a fact about the
+   * lab and does not belong in the lab's record.
+   *
+   * `statusCode` and `artifact`, and nothing else. Not the URL, which is a
+   * credential these rows would outlive; not Slack's response body, which is
+   * useful in a deployment log and is not ours to keep.
+   *
+   * `actorId` is the session's presenter, for want of anyone truer: a scheduled
+   * delivery has nobody pressing a button, and the same convention is what
+   * `briefs.buildForSession` uses when it files a two-in-the-morning assembly.
+   * The `type` is what keeps it from reading as a person having done something
+   * wrong — nobody did.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("slack.delivery_failed"),
+    artifact: v.union(
+      v.literal("brief"),
+      v.literal("boundary"),
+      v.literal("write-up"),
+    ),
+    statusCode: v.number(),
+  }),
   v.object({
     ...eventBase,
     type: v.literal("paper.added"),
@@ -923,6 +956,31 @@ export default defineSchema({
      * stopped posting and has not.
      */
     slackWebhookUrl: v.optional(v.string()),
+    /**
+     * The last time Slack refused a post outright, if that is where things
+     * stand.
+     *
+     * A webhook can die without anyone touching this row: archive the channel,
+     * or remove the app from the workspace, and Slack starts answering `404
+     * no_service` forever. The lab has no way to notice — the setting still
+     * says a channel is wired, because it is, and the posts simply stop. This
+     * field is what lets the settings page say the true thing instead.
+     *
+     * Present only while the last attempt was refused permanently: a post that
+     * lands clears it, and so does pasting a new URL, because both are the
+     * problem being fixed. Transient trouble — a `5xx`, a rate limit that
+     * outlasted the retries — is deliberately not recorded, since a banner
+     * about a channel that might be gone is worse than silence when the channel
+     * is fine.
+     *
+     * A derived, self-healing summary of facts the ledger holds permanently,
+     * not a second source of truth: it exists so that reading it costs one
+     * document get on a page every member loads, rather than a scan back
+     * through `events`.
+     */
+    slackLastFailure: v.optional(
+      v.object({ at: v.number(), statusCode: v.number() }),
+    ),
   }).index("by_creator", ["createdBy"]),
 
   /** Join table between users and labs; the single source of truth for authorization. */

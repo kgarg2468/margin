@@ -34,6 +34,17 @@ import type { LabSummary } from "./lab-provider";
  * because there is nothing anybody needs to read back: a wrong paste is
  * refused at the moment it is made, with the reason.
  */
+
+/**
+ * The statuses that mean the channel itself is the problem.
+ *
+ * Slack answers an archived channel, or one Margin's webhook was removed from,
+ * with a `404`; a revoked webhook with a `403`. Those earn the sentence about
+ * the channel possibly being gone. A `400` does not — it would be Margin's
+ * fault, and guessing at the lab's Slack workspace on the strength of our own
+ * bug is how a settings page starts lying.
+ */
+const CHANNEL_IS_GONE = new Set([403, 404, 410]);
 export function SlackDelivery({ lab }: { lab: LabSummary }) {
   const status = useQuery(api.slack.status, { labId: lab._id });
   const connect = useMutation(api.slack.connect);
@@ -81,6 +92,29 @@ export function SlackDelivery({ lab }: { lab: LabSummary }) {
         )}
       </p>
 
+      {/*
+        Said to everyone, not only the PI. A member was told their lab-visible
+        notes reach a channel; if they have stopped reaching it, that is a
+        change to the thing they were told, and they should not have to be the
+        PI to find out. The status code is quoted rather than paraphrased —
+        whoever ends up in Slack's own settings looking for the cause is
+        looking for that number.
+      */}
+      {status.connected && status.lastDeliveryFailed !== null && (
+        <p role="status" className={`${errorClass} max-w-prose`}>
+          The last post didn&rsquo;t arrive &mdash; Slack answered{" "}
+          {status.lastDeliveryFailed.statusCode}.{" "}
+          {CHANNEL_IS_GONE.has(status.lastDeliveryFailed.statusCode)
+            ? "The channel may have been archived, or Margin’s webhook removed from it."
+            : "Slack wouldn’t take the message."}{" "}
+          Nothing has reached Slack since.{" "}
+          {status.canManage
+            ? "Disconnect and paste a new webhook URL to start posting again."
+            : "Your PI can reconnect it."}{" "}
+          Every brief, line-up and write-up is still in Margin.
+        </p>
+      )}
+
       {!status.canManage ? (
         <p className="font-sans text-sm text-ink-faint">
           {status.connected
@@ -90,7 +124,9 @@ export function SlackDelivery({ lab }: { lab: LabSummary }) {
       ) : status.connected ? (
         <div className="flex flex-wrap items-baseline gap-4">
           <span className="font-sans text-sm text-ink">
-            Connected to a channel.
+            {status.lastDeliveryFailed === null
+              ? "Connected to a channel."
+              : "Connected to a channel, but posts aren’t arriving."}
           </span>
           <ConfirmAction
             label="Disconnect"

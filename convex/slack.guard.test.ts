@@ -4,6 +4,7 @@ import { v, type ValidatorJSON } from "convex/values";
 import { describe, expect, it } from "vitest";
 import schema from "./schema";
 import { normalizeWebhookUrl, slackIsConfigured } from "./lib/slack";
+import { permanentStatus, SlackRefusal } from "./slack";
 import {
   composeBoundaryMessage,
   composeBriefMessage,
@@ -152,6 +153,42 @@ function wireForm(validator: unknown): ValidatorJSON {
     );
   }
   return json as ValidatorJSON;
+}
+
+/**
+ * One variant of the `events` union, as its field names and their types.
+ *
+ * Pulled out by the `type` literal rather than by position, so reordering the
+ * union — or adding a variant above it — cannot quietly point an assertion at
+ * somebody else's row shape.
+ */
+function eventVariant(typeName: string): Record<string, Json> {
+  const events: Json = wireForm(schema.tables.events.validator);
+  const members =
+    isRecord(events) && Array.isArray(events.value) ? events.value : [];
+
+  for (const member of members) {
+    if (!isRecord(member) || !isRecord(member.value)) continue;
+    const declared = member.value.type;
+    if (!isRecord(declared)) continue;
+    const literal = declared.fieldType;
+    if (
+      isRecord(literal) &&
+      literal.type === "literal" &&
+      literal.value === typeName
+    ) {
+      return Object.fromEntries(
+        Object.entries(member.value).map(([name, entry]) => [
+          name,
+          isRecord(entry) ? ((entry.fieldType ?? null) as Json) : null,
+        ]),
+      );
+    }
+  }
+
+  throw new Error(
+    `No \`${typeName}\` variant in the events validator, so this guard is asserting about a shape that no longer exists.`,
+  );
 }
 
 /**
@@ -372,7 +409,13 @@ describe("the webhook URL never reaches a client", () => {
     expect(fieldPaths(status?.returns).sort()).toEqual([
       "canManage",
       "connected",
+      "lastDeliveryFailed",
+      "lastDeliveryFailed.at",
+      "lastDeliveryFailed.statusCode",
     ]);
+    // The failure signal is a status code and a timestamp. Not Slack's response
+    // body, which is a string this query has no reason to be able to carry.
+    expect(webhookShaped(status?.returns ?? null)).toEqual([]);
   });
 });
 
@@ -404,6 +447,30 @@ describe("where the credential is stored", () => {
     // *because* the credential leaked.
     const events = wireForm(schema.tables.events.validator);
     expect(webhookShaped(events)).toEqual([]);
+
+    // Named directly for the variant that records a dead channel, because it
+    // is the one written from a delivery path — the only place in the codebase
+    // where a ledger write happens with the URL in scope.
+    const failure = eventVariant("slack.delivery_failed");
+    expect(
+      Object.keys(failure).sort(),
+      "the ledger row for a failed post carries a status code and which artifact it was, and nothing else",
+    ).toEqual([
+      "actorId",
+      "artifact",
+      "at",
+      "labId",
+      "paperId",
+      "sessionId",
+      "statusCode",
+      "type",
+    ]);
+    // Nothing in it is a string, so there is no field a URL could be put in
+    // without changing this schema and failing here.
+    const stringy = Object.entries(failure)
+      .filter(([, fieldType]) => admitsText(fieldType))
+      .map(([name]) => name);
+    expect(stringy).toEqual([]);
     // And prove the ledger does record the fact itself, so members can see in
     // the record when their margin started leaving the building.
     expect(fieldPaths(events)).toContain("connected");
@@ -702,5 +769,34 @@ describe("slackIsConfigured", () => {
     // The same reasoning `emailIsConfigured` applies to a deployment variable
     // saved empty: a value that is present but blank is not a value.
     expect(slackIsConfigured({ slackWebhookUrl: "" })).toBe(false);
+  });
+});
+
+describe("which refusals a lab is told about", () => {
+  // The rule that decides whether a settings page says "your channel may be
+  // gone". Getting it wrong in either direction is a product failure: too
+  // eager and the banner cries wolf every time Slack has a bad minute, too shy
+  // and an archived channel swallows a lab's posts in silence forever.
+  it("reports the refusals only the lab can fix", () => {
+    expect(permanentStatus(new SlackRefusal("404 no_service", 404))).toBe(404);
+    expect(permanentStatus(new SlackRefusal("403 invalid_token", 403))).toBe(403);
+    expect(permanentStatus(new SlackRefusal("400 invalid_payload", 400))).toBe(400);
+  });
+
+  it("stays quiet about a bad minute", () => {
+    // Slack overloaded, Slack rate-limiting past the retries, and a request
+    // that never got an answer are all facts about a Tuesday.
+    expect(permanentStatus(new SlackRefusal("503", 503))).toBeNull();
+    expect(permanentStatus(new SlackRefusal("500", 500))).toBeNull();
+    expect(permanentStatus(new SlackRefusal("429 rate limited", 429))).toBeNull();
+    expect(permanentStatus(new SlackRefusal("unreachable", null))).toBeNull();
+  });
+
+  it("stays quiet about a failure that was ours", () => {
+    // Anything that is not a refusal never reached Slack to be refused, so it
+    // says nothing about the lab's channel.
+    expect(permanentStatus(new TypeError("undefined is not a function"))).toBeNull();
+    expect(permanentStatus("404")).toBeNull();
+    expect(permanentStatus(null)).toBeNull();
   });
 });

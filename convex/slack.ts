@@ -3,9 +3,11 @@ import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import {
   internalAction,
+  internalMutation,
   internalQuery,
   mutation,
   query,
+  type ActionCtx,
   type QueryCtx,
 } from "./_generated/server";
 import { pause, retryAfterMs, siteUrl } from "./auth";
@@ -99,6 +101,52 @@ import {
 const POST_ATTEMPTS = 3;
 
 /**
+ * Slack declining to take a message.
+ *
+ * Carries the HTTP status separately from the message, because the two have
+ * different audiences: the message goes to the deployment log and is for
+ * whoever is debugging, while the status is the only part fit to show a lab —
+ * it is the difference between "Slack was busy" and "that channel is gone".
+ * `null` means the request never got an answer at all.
+ *
+ * The response body is deliberately in the message and not in a field, so that
+ * nothing can idly forward it to a client: Slack's bodies are short and
+ * secret-free today, but that is a property of Slack's choices, not ours.
+ */
+export class SlackRefusal extends Error {
+  readonly status: number | null;
+
+  constructor(why: string, status: number | null) {
+    super(`Slack refused a message: ${why}`);
+    this.name = "SlackRefusal";
+    this.status = status;
+  }
+}
+
+/**
+ * The status codes that mean *this webhook will not work again*, as opposed to
+ * *not just now*.
+ *
+ * Slack answers a webhook whose channel was archived, or whose app was removed
+ * from the workspace, with a `404` and `no_service`; a revoked one with `403`.
+ * Those are facts about the lab's configuration and the lab is the only one who
+ * can fix them, which is what earns them a place on a settings page. A `5xx`, a
+ * `429` that outlasted the retries, and a request that never got an answer are
+ * all facts about a Tuesday, and telling a lab their channel might be gone
+ * because Slack had a bad minute would be a worse lie than saying nothing.
+ *
+ * `null` for everything that does not qualify — including a failure that is not
+ * a `SlackRefusal` at all, which would be a bug in this module rather than
+ * anything the lab did.
+ */
+export function permanentStatus(caught: unknown): number | null {
+  if (!(caught instanceof SlackRefusal)) return null;
+  const { status } = caught;
+  if (status === null || status === 429) return null;
+  return status >= 400 && status < 500 ? status : null;
+}
+
+/**
  * Hand one message to a Slack incoming webhook.
  *
  * Shaped after `sendEmail` in `convex/auth.ts` — bounded attempts, `retry-after`
@@ -139,9 +187,6 @@ export async function postToSlack(
 ): Promise<void> {
   const body = JSON.stringify(message);
 
-  const failed = (why: string) =>
-    new Error(`Slack refused a message: ${why}`);
-
   for (let attempt = 0; attempt < POST_ATTEMPTS; attempt++) {
     const lastAttempt = attempt === POST_ATTEMPTS - 1;
 
@@ -156,7 +201,7 @@ export async function postToSlack(
       // Not retried, unlike the mail path: a `fetch` that threw may have
       // delivered before the connection went, and there is no idempotency key
       // to make a second ask safe.
-      throw failed(`unreachable (${String(caught)})`);
+      throw new SlackRefusal(`unreachable (${String(caught)})`, null);
     }
 
     if (response.ok) {
@@ -178,7 +223,10 @@ export async function postToSlack(
     // useful thing in the log, and carries no secret. The URL does, so it is
     // never logged and never put in an error.
     const detail = await response.text().catch(() => "");
-    throw failed(`${response.status} ${detail}`.trim());
+    throw new SlackRefusal(
+      `${response.status} ${detail}`.trim(),
+      response.status,
+    );
   }
 }
 
@@ -212,17 +260,32 @@ export const status = query({
     connected: v.boolean(),
     /** Whether the caller is the PI, and so may change it. */
     canManage: v.boolean(),
+    /**
+     * The last refusal, if the channel is currently refusing.
+     *
+     * `connected` alone would have the settings page saying "posting to a
+     * channel" forever after a channel is archived, which is true about the
+     * configuration and false about the world. This is what lets the page say
+     * both halves. Every member sees it, not only the PI, for the same reason
+     * every member sees `connected`: if a member's writing has stopped leaving
+     * the building, that is a change to what they were told.
+     */
+    lastDeliveryFailed: v.union(
+      v.null(),
+      v.object({ at: v.number(), statusCode: v.number() }),
+    ),
   }),
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
     const membership = await getMembership(ctx, args.labId, userId);
     if (membership === null) {
-      return { connected: false, canManage: false };
+      return { connected: false, canManage: false, lastDeliveryFailed: null };
     }
     const lab = await ctx.db.get(args.labId);
     return {
       connected: slackIsConfigured(lab),
       canManage: membership.role === "pi",
+      lastDeliveryFailed: lab?.slackLastFailure ?? null,
     };
   },
 });
@@ -236,10 +299,17 @@ export const status = query({
  * Saying which part is wrong is the difference between fixing it now and
  * discovering at the T−2h boundary that nothing was ever going to arrive.
  *
- * Replacing an existing webhook is ordinary — a lab that moves channels pastes
- * the new one — and writes the same ledger fact as connecting for the first
- * time, because from the lab's side the fact is the same: their margin leaves
- * the building, by this person's decision, as of now.
+ * Replacing an existing webhook is accepted here — the patch does not care what
+ * was there — and writes the same ledger fact as connecting for the first time,
+ * because from the lab's side the fact is the same: their margin leaves the
+ * building, by this person's decision, as of now.
+ *
+ * The settings page does not offer that as a single step, though. It shows the
+ * field only while the lab is disconnected, so a PI changing channels presses
+ * Disconnect and then pastes — two steps, and one visible state at a time, with
+ * no box on screen whose being empty means "unchanged" and whose being full
+ * means "replace". That is a deliberate choice about the surface rather than a
+ * limitation of this function, and the copy on the failure banner says so.
  */
 export const connect = mutation({
   args: { labId: v.id("labs"), webhookUrl: v.string() },
@@ -254,7 +324,13 @@ export const connect = mutation({
       );
     }
 
-    await ctx.db.patch(args.labId, { slackWebhookUrl: webhookUrl });
+    // The failure marker is cleared here because pasting a URL is what fixing
+    // a dead channel looks like. Leaving it would have the settings page still
+    // reporting a `404` against a webhook that has since been replaced.
+    await ctx.db.patch(args.labId, {
+      slackWebhookUrl: webhookUrl,
+      slackLastFailure: undefined,
+    });
     await recordEvent(ctx, {
       labId: args.labId,
       actorId: actor.userId,
@@ -282,7 +358,10 @@ export const disconnect = mutation({
     if (!slackIsConfigured(lab)) {
       return null;
     }
-    await ctx.db.patch(args.labId, { slackWebhookUrl: undefined });
+    await ctx.db.patch(args.labId, {
+      slackWebhookUrl: undefined,
+      slackLastFailure: undefined,
+    });
     await recordEvent(ctx, {
       labId: args.labId,
       actorId: actor.userId,
@@ -292,6 +371,86 @@ export const disconnect = mutation({
     return null;
   },
 });
+
+/**
+ * What became of one post.
+ *
+ * Scheduled by each delivery action rather than called inline, because an
+ * action cannot write and a post that arrived should not be held up by the
+ * bookkeeping about it. Runs after every attempt, including the ones that
+ * worked: clearing a stale failure is as much the point as recording a fresh
+ * one, and a lab that fixes its channel should see the banner go on its own.
+ *
+ * Takes the session rather than the lab so the caller has nothing to look up
+ * and nothing to get wrong; the lab, and the presenter this is filed under,
+ * both hang off it.
+ */
+export const recordDeliveryOutcome = internalMutation({
+  args: {
+    sessionId: v.id("sessions"),
+    artifact: v.union(
+      v.literal("brief"),
+      v.literal("boundary"),
+      v.literal("write-up"),
+    ),
+    /** The refusal's status, or `null` for a post that landed. */
+    statusCode: v.union(v.number(), v.null()),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const session = await ctx.db.get(args.sessionId);
+    if (session === null) return null;
+    const lab = await ctx.db.get(session.labId);
+    if (lab === null) return null;
+
+    if (args.statusCode === null) {
+      // It arrived. Only touch the row if there was something to take back.
+      if (lab.slackLastFailure !== undefined) {
+        await ctx.db.patch(lab._id, { slackLastFailure: undefined });
+      }
+      return null;
+    }
+
+    await ctx.db.patch(lab._id, {
+      slackLastFailure: { at: Date.now(), statusCode: args.statusCode },
+    });
+    await recordEvent(ctx, {
+      labId: lab._id,
+      actorId: session.presenterId,
+      sessionId: session._id,
+      type: "slack.delivery_failed",
+      artifact: args.artifact,
+      statusCode: args.statusCode,
+    });
+    return null;
+  },
+});
+
+/** Which of the three this was, for the ledger and for nothing else. */
+type Artifact = "brief" | "boundary" | "write-up";
+
+/**
+ * Hand the outcome of a post to the mutation that records it.
+ *
+ * `caught` is `null` when the post landed. Anything else is inspected by
+ * `permanentStatus`, and a failure that is merely a bad Tuesday leaves no trace
+ * anywhere but the deployment log — saying nothing is the correct amount to say
+ * about a `503`.
+ */
+async function noteOutcome(
+  ctx: ActionCtx,
+  sessionId: Id<"sessions">,
+  artifact: Artifact,
+  caught: unknown,
+): Promise<void> {
+  const statusCode = caught === null ? null : permanentStatus(caught);
+  if (caught !== null && statusCode === null) return;
+  await ctx.scheduler.runAfter(0, internal.slack.recordDeliveryOutcome, {
+    sessionId,
+    artifact,
+    statusCode,
+  });
+}
 
 /* -------------------------------------------------------------------------
  * Shared payload plumbing
@@ -499,8 +658,10 @@ export const deliverBrief = internalAction({
           url: `${site}/app/sessions/${payload.sessionId}`,
         }),
       );
+      await noteOutcome(ctx, args.sessionId, "brief", null);
     } catch (caught) {
       console.error(`Could not post a brief to Slack: ${String(caught)}`);
+      await noteOutcome(ctx, args.sessionId, "brief", caught);
     }
     return null;
   },
@@ -672,10 +833,12 @@ export const deliverBoundary = internalAction({
           url: `${site}/app/library/${payload.paperId}/read`,
         }),
       );
+      await noteOutcome(ctx, args.sessionId, "boundary", null);
     } catch (caught) {
       console.error(
         `Could not post a session boundary to Slack: ${String(caught)}`,
       );
+      await noteOutcome(ctx, args.sessionId, "boundary", caught);
     }
     return null;
   },
@@ -804,8 +967,10 @@ export const deliverSynthesis = internalAction({
           url: `${site}/app/sessions/${payload.sessionId}`,
         }),
       );
+      await noteOutcome(ctx, args.sessionId, "write-up", null);
     } catch (caught) {
       console.error(`Could not post a write-up to Slack: ${String(caught)}`);
+      await noteOutcome(ctx, args.sessionId, "write-up", caught);
     }
     return null;
   },
