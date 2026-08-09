@@ -18,6 +18,7 @@ import type {
 } from "pdfjs-dist/types/src/display/api";
 import type { CSSProperties, KeyboardEvent, MouseEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { suppressNextClick } from "./click-suppressor";
 import { unionOfRects } from "./draft-box";
 import { ruleOpacity, washOpacity } from "./mark-alpha";
 import { typeStyle } from "./ontology";
@@ -585,14 +586,30 @@ export function PdfPage({
   }, []);
 
   const captureSelection = useCallback(
-    (fromKeyboard: boolean) => {
+    (fromKeyboard: boolean): boolean => {
       const draft = draftFromSelection();
-      if (draft !== null) {
-        onDraft({ ...draft, fromKeyboard });
-        setPending(null);
+      if (draft === null) {
+        return false;
       }
+      onDraft({ ...draft, fromKeyboard });
+      setPending(null);
+      return true;
     },
     [draftFromSelection, onDraft],
+  );
+
+  /**
+   * The suppressor armed by the last drag that produced a note, held so the
+   * page can take it with it if it unmounts before the click lands. See
+   * `click-suppressor.ts` for why the click has to be swallowed at all.
+   */
+  const swallowing = useRef<(() => void) | null>(null);
+  useEffect(
+    () => () => {
+      swallowing.current?.();
+      swallowing.current = null;
+    },
+    [],
   );
 
   // The keyboard path. Shift-arrow through the text layer moves the selection
@@ -709,7 +726,16 @@ export function PdfPage({
       // radius and a soft drop shadow instead of the old hard 1px ledge.
       className={`${styles.page} shrink-0 rounded-[3px] border border-rule bg-surface shadow-[var(--shadow-card)] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-accent`}
       style={pageStyle}
-      onMouseUp={() => captureSelection(false)}
+      onMouseUp={() => {
+        if (!captureSelection(false)) {
+          return;
+        }
+        // A note has just opened over this page and the gesture that opened it
+        // still has a `click` to fire. Base UI would read that click as an
+        // outside press and close the sheet before the reader saw it.
+        swallowing.current?.();
+        swallowing.current = suppressNextClick(document);
+      }}
       onKeyDown={(event: KeyboardEvent<HTMLDivElement>) => {
         // Held down, and these keys are not navigation any more: Shift+End
         // extends the selection to the end of the line, which is the gesture
