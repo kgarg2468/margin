@@ -18,6 +18,10 @@ describe("startWindow", () => {
     const { msUntilOpen } = startWindow(now + 25 * HOUR, now);
     expect(msUntilOpen).toBe(HOUR);
   });
+  it("has nothing left to wait for once the window is open", () => {
+    const now = 1_000_000_000_000;
+    expect(startWindow(now - HOUR, now).msUntilOpen).toBe(0);
+  });
 });
 
 describe("awayProse", () => {
@@ -26,5 +30,8 @@ describe("awayProse", () => {
   });
   it("speaks days from two days up", () => {
     expect(awayProse(72 * HOUR)).toBe("about 3 days away");
+  });
+  it("counts one hour singular", () => {
+    expect(awayProse(HOUR)).toBe("about 1 hour away");
   });
 });
