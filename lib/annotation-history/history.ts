@@ -27,12 +27,14 @@
 import type { AnnotationType } from "../digest/engine";
 
 /**
- * How many prior states a note keeps, mirroring `MAX_VERSIONS_KEPT` in
- * `convex/annotationVersions.ts`.
+ * How many prior states a note keeps.
  *
- * Not imported from there because this module is ctx-free by construction and
- * `convex/` is not; it is here so a caller with no database in hand can still
- * reason about what a truncated history means.
+ * Declared here rather than in `convex/annotationVersions.ts`, which imports
+ * it: this module is ctx-free and the backend is not, so the dependency only
+ * runs one way. Fifty is roughly two years of a note somebody keeps sharpening
+ * — far past what any real margin reaches, and near enough to make the
+ * truncation path a thing that gets written and tested rather than a comment
+ * about what would happen.
  */
 export const MAX_VERSIONS_KEPT = 50;
 
@@ -195,10 +197,11 @@ export function versionSummary(total: number): string {
  * "Retyped", "Rewritten and retyped" — or nothing at all when the predecessor
  * is gone and the honest answer is that we do not know.
  *
- * A save that changed neither is possible (the composer does not stop you
- * pressing Save twice) and is reported as an edit that changed nothing, rather
- * than hidden. The row exists; a panel that silently dropped it would leave a
- * gap in the ordinals with no explanation.
+ * A state that differs from its predecessor in neither is not something the
+ * shipped write path can produce — `updateBody` and `setType` both file a
+ * version only when the note actually moved — but it is reported rather than
+ * hidden if one ever arrives. The row would exist; a panel that silently
+ * dropped it would leave a gap in the ordinals with no explanation.
  */
 export function changeSummary(
   changed: HistoryEntry["changed"],
