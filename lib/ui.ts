@@ -143,12 +143,21 @@ export type AnchorBox = {
  * Returned as a plain object rather than a `new DOMRect` so this can be
  * reasoned about (and tested) without a browser; the shape is the whole
  * contract a positioner uses.
+ *
+ * `contextElement` matters when the box lives inside an inner scroll
+ * container: the positioner only attaches scroll listeners to the ancestors
+ * of the element it is handed, and a virtual anchor without one gets only
+ * window scroll. The reader's pages scroll in their own container, so the
+ * composer must pass it — otherwise the sheet holds still while the passage
+ * slides away.
  */
 export function boxAnchor(
   box: AnchorBox,
   origin: () => { left: number; top: number } | null,
-): { getBoundingClientRect: () => DOMRect } {
+  contextElement?: Element | null,
+): { getBoundingClientRect: () => DOMRect; contextElement?: Element } {
   return {
+    ...(contextElement ? { contextElement } : {}),
     getBoundingClientRect: () => {
       const at = origin() ?? { left: 0, top: 0 };
       const left = at.left + box.left;

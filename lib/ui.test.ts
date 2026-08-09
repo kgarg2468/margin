@@ -33,6 +33,15 @@ describe("boxAnchor", () => {
       height: 18,
     });
   });
+
+  it("carries a contextElement through when given one, and omits it otherwise", () => {
+    const context = { tag: "scroll-container" } as unknown as Element;
+    const anchored = boxAnchor(box, () => null, context);
+    expect(anchored.contextElement).toBe(context);
+    // floating-ui probes with `in` before unwrapping, so the property must be
+    // absent entirely when there is no container — not present-but-undefined.
+    expect("contextElement" in boxAnchor(box, () => null)).toBe(false);
+  });
 });
 
 describe("openedFromKeyboard", () => {
@@ -40,3 +49,4 @@ describe("openedFromKeyboard", () => {
     expect(openedFromKeyboard(undefined)).toBe(false);
   });
 });
+
