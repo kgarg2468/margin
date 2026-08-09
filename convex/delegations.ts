@@ -161,6 +161,15 @@ export const REDACTED_ITEM_TEXT =
 /** Statuses a delegation can still be working in. */
 const ACTIVE_STATUSES = ["queued", "running"] as const;
 
+/**
+ * How far to read when separating live runs from abandoned ones.
+ *
+ * A generation and a half of the cap: the cap itself bounds how many rows can
+ * be holding slots, so anything past this is a row that was already counted
+ * against a ceiling nobody could exceed.
+ */
+const STALE_SCAN_LIMIT = MAX_ACTIVE_PER_LAB * 2 + 1;
+
 /* -------------------------------------------------------------------------
  * The lease
  * ---------------------------------------------------------------------- */
@@ -231,8 +240,24 @@ export function capVerdict(counts: {
   return { ok: true };
 }
 
-/** How many runs this lab is holding open, through the index that exists for it. */
-async function activeCount(ctx: QueryCtx, labId: Id<"labs">): Promise<number> {
+/**
+ * How many runs this lab is holding open, through the index that exists for it.
+ *
+ * Status alone is not occupancy. A run whose process died never wrote a
+ * terminal status, so the row sits at `running` forever — and a cap counted by
+ * status would let eight crashes take the scout away from a lab permanently,
+ * with no message and nothing to press. What holds a slot is a *live lease*:
+ * queued rows, plus running rows whose three minutes have not run out.
+ *
+ * Callers that can write sweep first (`sweepStaleLeases`), so the dead rows
+ * also get the terminal status their audit trail deserves. This filter is what
+ * makes the cap correct even when nobody has swept yet.
+ */
+async function activeCount(
+  ctx: QueryCtx,
+  labId: Id<"labs">,
+  now: number,
+): Promise<number> {
   let total = 0;
   for (const status of ACTIVE_STATUSES) {
     const rows = await ctx.db
@@ -240,10 +265,41 @@ async function activeCount(ctx: QueryCtx, labId: Id<"labs">): Promise<number> {
       .withIndex("by_lab_and_status", (q) =>
         q.eq("labId", labId).eq("status", status),
       )
-      .take(MAX_ACTIVE_PER_LAB + 1);
-    total += rows.length;
+      .take(STALE_SCAN_LIMIT);
+    total += rows.filter(
+      (row) => row.status !== "running" || !leaseExpired(row, now),
+    ).length;
   }
   return total;
+}
+
+/**
+ * Terminalize the runs nobody is coming back for, before counting the slots.
+ *
+ * Bounded: the cap means a lab can never hold more than
+ * `MAX_ACTIVE_PER_LAB` runs at once, so it can never have more than that many
+ * go stale between one sweep and the next. `STALE_SCAN_LIMIT` leaves room for
+ * a generation and a half of them anyway.
+ */
+async function sweepStaleLeases(
+  ctx: MutationCtx,
+  labId: Id<"labs">,
+  now: number,
+): Promise<number> {
+  const running = await ctx.db
+    .query("delegations")
+    .withIndex("by_lab_and_status", (q) =>
+      q.eq("labId", labId).eq("status", "running"),
+    )
+    .take(STALE_SCAN_LIMIT);
+  let reclaimed = 0;
+  for (const delegation of running) {
+    if (leaseExpired(delegation, now)) {
+      await markFailed(ctx, delegation, "lease-expired");
+      reclaimed += 1;
+    }
+  }
+  return reclaimed;
 }
 
 /**
@@ -315,9 +371,17 @@ export function subjectOf(
  * through retrieval. `isStillShared` is the same test every citation in this
  * product is re-checked with.
  *
- * Then: it is a question, and it is a top-level one. Both are the brief's own
- * criteria (`lib/brief/assemble.ts`), so what the scout will work on is
- * exactly what the presenter is looking at.
+ * Then: it is a question, and it is a top-level one — two of the three tests
+ * `lib/brief/assemble.ts` applies to build the carried-forward section.
+ *
+ * The third, "has no replies", is deliberately not repeated here. That is a
+ * fact about what the *brief* was worth surfacing, and the brief has already
+ * applied it by the time `enqueueForBrief` is handed a list. Re-deriving it
+ * would mean a reply landing between the brief and the run silently cancelling
+ * a scout the presenter can see queued — and a lab answering its own question
+ * in the margin is not a reason to throw away work already paid for. What this
+ * function owns is the fence that must hold at every instant: still shared,
+ * still a question.
  */
 export function annotationSubjectIsOpen(
   annotation: Doc<"annotations"> | null,
@@ -389,6 +453,31 @@ export async function resolveSubject(
     paperId: action.paperId,
     sessionId: action.sessionId,
   };
+}
+
+/**
+ * Where a run belongs on the timelines, whatever became of its subject.
+ *
+ * `resolveSubject` answers "may the scout work on this", and returns nothing
+ * once the subject is settled or private — which is precisely the state a run
+ * is in when it fails or gets cancelled. Placing those events needs the weaker
+ * question: which paper and which session was this about. Nothing here is
+ * content; a delegation event carries an id and a reason. Without it, a lab
+ * sees the runs that worked and none of the runs that did not, which is the
+ * one shape of record that flatters the feature.
+ */
+async function subjectPlacement(
+  ctx: QueryCtx,
+  delegation: Pick<Doc<"delegations">, "annotationId" | "actionId">,
+): Promise<{ paperId?: Id<"papers">; sessionId?: Id<"sessions"> }> {
+  const ref = subjectOf(delegation);
+  if (ref === null) return {};
+  const row =
+    ref.kind === "annotation"
+      ? await ctx.db.get(ref.annotationId)
+      : await ctx.db.get(ref.actionId);
+  if (row === null) return {};
+  return { paperId: row.paperId, sessionId: row.sessionId };
 }
 
 /**
@@ -740,7 +829,17 @@ export function sanitizeFindingItems(
 
     const cited: Id<"annotations">[] = [];
     const papers: Id<"papers">[] = [];
-    for (const label of parseLabels(record.citations ?? record.text)) {
+    // Both sources, never one or the other. A model that writes
+    // `{text: "…[A2] extends [A1]", citations: ["A1"]}` is claiming to rest
+    // on A2 in the sentence a scientist reads, and an item whose stored
+    // citations omit A2 is an item A2's withdrawal cannot redact — the
+    // paraphrase leak, one layer up from where §3.7 closes it. Reading the
+    // list only would also throw away every legitimate item from a model
+    // that cites inline and sends `citations: []`.
+    for (const label of [
+      ...parseLabels(record.citations),
+      ...parseLabels(record.text),
+    ]) {
       const candidate = byLabel.get(label);
       if (candidate === undefined || cited.includes(candidate._id)) continue;
       cited.push(candidate._id);
@@ -909,8 +1008,13 @@ export const request = mutation({
     }
 
     const now = Date.now();
+    // Before counting the slots, close the runs that died holding one. There
+    // is no cron in this codebase, so the sweep rides the act that cares about
+    // the answer — and pressing the button is exactly when a lab would
+    // discover its scout had been taken away by eight old crashes.
+    await sweepStaleLeases(ctx, owner.labId, now);
     const verdict = capVerdict({
-      active: await activeCount(ctx, owner.labId),
+      active: await activeCount(ctx, owner.labId, now),
       labDay: await dayCount(ctx, owner.labId, now),
     });
     if (!verdict.ok) {
@@ -970,6 +1074,7 @@ export const enqueueForBrief = internalMutation({
     }
 
     const now = Date.now();
+    await sweepStaleLeases(ctx, brief.labId, now);
     const queued: Id<"delegations">[] = [];
     for (const annotationId of args.annotationIds) {
       const ref: SubjectRef = { kind: "annotation", annotationId };
@@ -978,7 +1083,7 @@ export const enqueueForBrief = internalMutation({
       if ((await activeForSubject(ctx, ref)) !== null) continue;
 
       const verdict = capVerdict({
-        active: await activeCount(ctx, brief.labId),
+        active: await activeCount(ctx, brief.labId, now),
         labDay: await dayCount(ctx, brief.labId, now),
       });
       // Silently, and on purpose: nobody asked for this run, so nobody is
@@ -1423,6 +1528,21 @@ export const storeEmpty = internalMutation({
     ) {
       return null;
     }
+    // The subject re-check `store` runs, for the same reason: a question
+    // withdrawn while the scout was reading should leave a row that says
+    // cancelled, not one that says the lab has never written about a question
+    // nobody can find. An audit trail that is subtly wrong about why a run
+    // stopped is worse than no audit trail, because it will be believed.
+    const ref = subjectOf(delegation);
+    if (
+      ref === null ||
+      (await resolveSubject(ctx, ref, delegation.labId)) === null
+    ) {
+      await cancelRow(ctx, delegation, "subject-withdrawn");
+      return null;
+    }
+
+    const placement = await subjectPlacement(ctx, delegation);
     await ctx.db.patch(delegation._id, {
       status: "empty",
       settledAt: now,
@@ -1433,6 +1553,7 @@ export const storeEmpty = internalMutation({
       labId: delegation.labId,
       type: "delegation.empty",
       actorId: delegation.requestedBy,
+      ...placement,
       delegationId: delegation._id,
       trigger: delegation.trigger,
     });
@@ -1482,6 +1603,7 @@ async function markFailed(
     labId: delegation.labId,
     type: "delegation.failed",
     actorId: delegation.requestedBy,
+    ...(await subjectPlacement(ctx, delegation)),
     delegationId: delegation._id,
     reason: failure,
   });
@@ -1502,31 +1624,16 @@ export const FAILURE_SENTENCES: Record<
 /**
  * Reclaim slots nobody is coming back for.
  *
- * The "permanently occupied slot" fix, and it is a sweep rather than a
- * per-row timer because a process that died did not get to schedule its own
- * cleanup. Bounded by the concurrency cap, which is the only number of rows
- * that can be in this state.
+ * A sweep rather than a per-row timer, because a process that died did not get
+ * to schedule its own cleanup. The same sweep runs inline before every cap
+ * check — this entry point exists so an operator, or a cron this codebase does
+ * not yet have, can also run it on its own.
  */
 export const expireStale = internalMutation({
   args: { labId: v.id("labs") },
   returns: v.number(),
-  handler: async (ctx, args) => {
-    const now = Date.now();
-    const running = await ctx.db
-      .query("delegations")
-      .withIndex("by_lab_and_status", (q) =>
-        q.eq("labId", args.labId).eq("status", "running"),
-      )
-      .take(MAX_ACTIVE_PER_LAB + 1);
-    let reclaimed = 0;
-    for (const delegation of running) {
-      if (leaseExpired(delegation, now)) {
-        await markFailed(ctx, delegation, "lease-expired");
-        reclaimed += 1;
-      }
-    }
-    return reclaimed;
-  },
+  handler: async (ctx, args) =>
+    await sweepStaleLeases(ctx, args.labId, Date.now()),
 });
 
 /* -------------------------------------------------------------------------
@@ -1602,6 +1709,9 @@ async function cancelRow(
   reason: Doc<"delegations">["cancellation"] & string,
   actorId?: Id<"users">,
 ): Promise<void> {
+  // Read before the patch, and before `actions.remove` deletes the row it
+  // resolves — the cascade runs first for exactly this reason.
+  const placement = await subjectPlacement(ctx, delegation);
   await ctx.db.patch(delegation._id, {
     status: "cancelled",
     settledAt: Date.now(),
@@ -1613,6 +1723,7 @@ async function cancelRow(
     labId: delegation.labId,
     type: "delegation.cancelled",
     actorId: actorId ?? delegation.requestedBy,
+    ...placement,
     delegationId: delegation._id,
     reason,
   });
@@ -1751,7 +1862,10 @@ export async function cascadeForAnnotation(
     cancelled: await cancelActiveFor(
       ctx,
       { kind: "annotation", annotationId },
-      "citation-withdrawn",
+      // These runs are *about* this note, not merely resting on it.
+      // `citation-withdrawn` is the reason for a run whose material moved;
+      // this is the subject itself going.
+      "subject-withdrawn",
       actorId,
     ),
     findingsAffected: await findingsCiting(ctx, annotationId),
