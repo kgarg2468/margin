@@ -129,10 +129,8 @@ export function Reactions({
             }
             onClick={() => void toggle(mark.kind)}
             className={
-              "tap-target inline-flex items-center rounded-full border px-2 py-1 font-sans " +
+              "tap-target pressable inline-flex items-center rounded-full border px-2 py-1 font-sans " +
               "text-[9px] uppercase tracking-[0.12em] disabled:cursor-not-allowed disabled:opacity-50 " +
-              "motion-safe:transition-[color,background-color,border-color,transform] " +
-              "motion-safe:duration-200 motion-safe:active:scale-[0.96] " +
               (mine
                 ? // Yours reads as a mark pressed into the page: the passage
                   // wash behind it and the accent on its edge, the same pair

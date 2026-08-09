@@ -1145,8 +1145,7 @@ export function Reader({
                           : undefined
                       }
                       className={
-                        "shrink-0 whitespace-nowrap rounded-full border px-2.5 py-1 font-sans text-[10px] uppercase tracking-[0.1em] " +
-                        "motion-safe:transition-[color,background-color,border-color,transform] motion-safe:duration-200 active:scale-[0.96] " +
+                        "pressable shrink-0 whitespace-nowrap rounded-full border px-2.5 py-1 font-sans text-[10px] uppercase tracking-[0.1em] " +
                         (on
                           ? "border-transparent"
                           : "border-rule text-ink-faint hover:border-ink-faint hover:text-ink-muted")

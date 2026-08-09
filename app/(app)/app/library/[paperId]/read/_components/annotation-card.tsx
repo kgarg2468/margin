@@ -179,7 +179,7 @@ export function AnnotationCard({
       // the left rule; activation lifts the card rather than boxing it.
       className={
         "rounded-md border border-rule border-l-2 bg-surface py-2.5 pl-3 pr-2.5 " +
-        "motion-safe:transition-[box-shadow,translate] motion-safe:duration-200 " +
+        "motion-safe:transition-[box-shadow,translate] motion-safe:duration-[var(--dur-hover)] " +
         (active
           ? "shadow-[0_0_0_1px_var(--rule),var(--shadow-lift)] motion-safe:-translate-y-px"
           : "shadow-[var(--shadow-card)]")
