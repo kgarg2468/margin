@@ -9,6 +9,7 @@ import { errorClass } from "@/lib/ui";
 import { useMutation } from "convex/react";
 import { useState } from "react";
 import { AnnotationHistory } from "./annotation-history";
+import { StatusControl, StatusLine } from "./epistemic-status";
 import type { PickedMention } from "./mention-field";
 import { MentionedBody, MentionField } from "./mention-field";
 import type { AnnotationType } from "./ontology";
@@ -337,6 +338,13 @@ export function AnnotationCard({
         <AnnotationHistory annotation={annotation} open={showHistory} />
       )}
 
+      {/* Under the note and above the marks, which is the order the three
+          things happened in: somebody wrote this, then the lab ruled on it,
+          then people said what they thought of it. A verdict placed down in
+          the action row would read as another control; placed here it reads as
+          what it is — a sentence about the sentence above it. */}
+      <StatusLine annotation={annotation} />
+
       {/* Sits with the note rather than down in the action row, because a mark
           is a thing said *about the note* — and above the thread, because a
           reply answers the note too and the two should read in that order. A
@@ -455,6 +463,13 @@ export function AnnotationCard({
               Edit
             </button>
           )}
+          {/* Last in the row, and only for the two people who may use it. It
+              is the one control here that is not about the caller's own
+              writing — Reply and Edit are things you do to a margin, this is
+              the lab ruling on one — so it goes at the end of the sentence
+              rather than in among them. The panel it opens takes the line
+              below, which is what the row's `flex-wrap` is for. */}
+          <StatusControl annotation={annotation} onError={setError} />
         </div>
       )}
 
