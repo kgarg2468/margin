@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   MAX_SCALE,
   MIN_SCALE,
+  holdFraction,
   parsePageJump,
+  restoreDelta,
   stepZoom,
   zoomLabel,
   zoomScale,
@@ -71,6 +73,68 @@ describe("what the control says", () => {
 
   it("says what fit width actually came out as", () => {
     expect(zoomLabel("fit-width", COLUMN)).toBe("147%");
+  });
+});
+
+describe("holding the reader's place", () => {
+  it("is zero when the page starts exactly at the top of the viewport", () => {
+    expect(holdFraction(100, 100, 800)).toBe(0);
+  });
+
+  it("is how much of the page is above the viewport, as a fraction of it", () => {
+    // Viewport top 400px into an 800px page.
+    expect(holdFraction(500, 100, 800)).toBe(0.5);
+    expect(holdFraction(300, 100, 800)).toBeCloseTo(0.25, 10);
+  });
+
+  it("goes negative for a page that has not reached the top yet", () => {
+    // Routine, not an edge case: `currentPage` comes from an observer with
+    // -45%/-50% root margins, so the page it names usually starts below the
+    // top of the viewport.
+    expect(holdFraction(100, 300, 800)).toBeCloseTo(-0.25, 10);
+  });
+
+  it("does not divide by a page that has not been measured yet", () => {
+    expect(Number.isFinite(holdFraction(100, 50, 0))).toBe(true);
+    expect(holdFraction(100, 50, 0)).toBe(50);
+  });
+});
+
+describe("putting the reader back", () => {
+  it("does nothing when nothing moved", () => {
+    const fraction = holdFraction(500, 100, 800);
+    expect(restoreDelta(fraction, 500, 100, 800)).toBe(0);
+  });
+
+  it("lands the same fraction into a page that changed height", () => {
+    const fraction = holdFraction(500, 100, 800);
+    // The page is now half again as tall, and the reader was halfway down it.
+    const delta = restoreDelta(fraction, 500, 100, 1200);
+    // Raising scrollTop by the delta moves the box up by the same amount.
+    expect(100 - delta).toBe(500 - 0.5 * 1200);
+  });
+
+  it("puts the viewport back however far the page itself moved", () => {
+    // The two things a zoom changes at once: the page's own height, and where
+    // it now sits after every page above it also changed height. The second is
+    // why a scroll offset could not have been held — by the time it is spent,
+    // the page is thousands of pixels from where the offset was recorded.
+    for (const fraction of [-0.3, 0, 0.25, 0.5, 0.99]) {
+      for (const height of [600, 800, 1200]) {
+        for (const boxTopNow of [-4000, -12, 900]) {
+          const delta = restoreDelta(fraction, 500, boxTopNow, height);
+          // Raising scrollTop by the delta moves the box up by the delta.
+          expect(boxTopNow - delta).toBeCloseTo(500 - fraction * height, 10);
+        }
+      }
+    }
+  });
+
+  it("round-trips a hold taken and spent at the same size", () => {
+    for (const boxTop of [-2000, 100, 640]) {
+      const held = holdFraction(500, boxTop, 900);
+      expect(restoreDelta(held, 500, boxTop, 900)).toBeCloseTo(0, 10);
+    }
   });
 });
 

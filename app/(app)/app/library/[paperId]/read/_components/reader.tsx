@@ -41,7 +41,9 @@ import type {
 import {
   MAX_SCALE,
   MIN_SCALE,
+  holdFraction,
   parsePageJump,
+  restoreDelta,
   stepZoom,
   zoomLabel,
   zoomScale,
@@ -352,27 +354,33 @@ export function Reader({
 
   const changeZoom = useCallback(
     (next: ZoomMode) => {
-      // A press that does not change the size must not leave a place held.
-      // Clicking the fit-width button while already at fit width bails React
-      // out of the re-render, so the layout effect below never runs to spend
-      // what was just recorded — and the next thing that *does* change the
-      // page height, a window resize an hour later, would restore to it.
-      if (next === zoom) {
-        return;
-      }
       const root = scrollRef.current;
       const element = pageElements.current.get(currentPage);
-      if (root !== null && element !== undefined) {
+      // A press that does not change the *size* must not leave a place held.
+      // The restore below is keyed on `pageHeight`, so a mode change that
+      // computes to the scale already on screen — pressing fit width while a
+      // numeric zoom happens to produce the same number, two presses away on
+      // a wide monitor — would record a hold nothing ever spends. It would
+      // then sit there until the next unrelated height change, a window
+      // resize an hour later, and yank the reader to a place recorded then.
+      //
+      // `setZoom` stays unconditional either side of this: the modes really
+      // are different even when the scales agree, and the fit-width button's
+      // `aria-pressed` is the one thing that has to say so.
+      const changesSize =
+        zoomScale(next, { columnWidth, baseWidth: baseSize?.width ?? 0 }) !==
+        scale;
+      if (changesSize && root !== null && element !== undefined) {
         const box = element.getBoundingClientRect();
         const rootBox = root.getBoundingClientRect();
         holding.current = {
           page: currentPage,
-          fraction: (rootBox.top - box.top) / Math.max(1, box.height),
+          fraction: holdFraction(rootBox.top, box.top, box.height),
         };
       }
       setZoom(next);
     },
-    [currentPage, zoom],
+    [currentPage, scale, columnWidth, baseSize],
   );
 
   useLayoutEffect(() => {
@@ -388,7 +396,12 @@ export function Reader({
     holding.current = null;
     const box = element.getBoundingClientRect();
     const rootBox = root.getBoundingClientRect();
-    root.scrollTop += box.top - rootBox.top + held.fraction * box.height;
+    root.scrollTop += restoreDelta(
+      held.fraction,
+      rootBox.top,
+      box.top,
+      box.height,
+    );
   }, [pageHeight]);
 
   const goToPage = useCallback((index: number) => {

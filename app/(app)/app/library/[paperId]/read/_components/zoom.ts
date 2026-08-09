@@ -82,3 +82,51 @@ export function parsePageJump(input: string, pageCount: number): number | null {
 function clamp(value: number): number {
   return Math.min(MAX_SCALE, Math.max(MIN_SCALE, value));
 }
+
+/**
+ * Keeping the reader's place across a scale change.
+ *
+ * These two live out here rather than inline in the reader for the reason
+ * `draft-box.ts` gives about its own pair: they are the only decisions in that
+ * path that can be wrong in a way a browser would not show you. A zoom that
+ * restores to the wrong place does not look broken — it looks like the paper
+ * jumped, which is what it does *without* a restore, so a sign error here
+ * would read as the feature simply not working and nobody would find it.
+ *
+ * The place is held as a fraction of the current page rather than as a scroll
+ * offset, because the offset is exactly the thing about to be invalidated: a
+ * zoom changes the height of every page above the viewport as well as the one
+ * in it, so by the time the hold is spent the page has moved thousands of
+ * pixels from wherever it was measured.
+ */
+
+/**
+ * How far into the page the top of the viewport sits, as a fraction of the
+ * page's height.
+ *
+ * Negative for a page that has not reached the top of the viewport yet, which
+ * is the ordinary case rather than an edge one: the page this is asked about
+ * is the one the reader is *looking at*, named by an observer with -45%/-50%
+ * root margins, so it usually begins below the viewport's top edge.
+ */
+export function holdFraction(
+  rootTop: number,
+  boxTop: number,
+  boxHeight: number,
+): number {
+  return (rootTop - boxTop) / Math.max(1, boxHeight);
+}
+
+/**
+ * What to add to `scrollTop` to put that fraction of the page back under the
+ * top of the viewport, given where the page has ended up and how tall it now
+ * is. Raising `scrollTop` by the delta moves the box up by the same amount.
+ */
+export function restoreDelta(
+  fraction: number,
+  rootTop: number,
+  boxTop: number,
+  boxHeight: number,
+): number {
+  return boxTop - rootTop + fraction * boxHeight;
+}
