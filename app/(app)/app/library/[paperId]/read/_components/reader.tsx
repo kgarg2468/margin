@@ -184,6 +184,10 @@ export function Reader({
    * which is the stop that reader left from. The stop itself moves there too,
    * or the paper would have its ring in one place and its tab order pointing
    * at another.
+   *
+   * It is an offer, not a claim — see the restore below. Every dismissal comes
+   * through here, including the ones where the reader has already said where
+   * they are going.
    */
   const closeDraft = useCallback((pageIndex: number) => {
     returningTo.current = pageIndex;
@@ -207,12 +211,29 @@ export function Reader({
     }
     // A frame late, and it has to be: the sheet's own teardown moves focus
     // after this commit paints, and a `focus()` called before that is the one
-    // that loses. `preventScroll` because the passage is already on screen —
-    // the reader has been looking at it — and a scroll here would only take
-    // them somewhere they did not ask to go.
-    const frame = requestAnimationFrame(() =>
-      element.focus({ preventScroll: true }),
-    );
+    // that loses.
+    const frame = requestAnimationFrame(() => {
+      const root = element.ownerDocument;
+      const active = root.activeElement;
+      // Only when focus has nowhere better to be. Save, Discard and Escape all
+      // leave it on `<body>` — nobody chose that, and it is the case this
+      // restore was written for. But a dismissal can also *be* somebody
+      // choosing: click the zoom control with an empty note open and the note
+      // closes and that button takes focus, which is a real destination and
+      // the reader's own. Taking it back a frame later would move the ring off
+      // the thing they just pressed, which is worse than the bug being fixed.
+      // A detached element is the sheet that has just gone, and counts as
+      // nowhere.
+      const nowhere =
+        active === null || active === root.body || !root.contains(active);
+      if (!nowhere) {
+        return;
+      }
+      // `preventScroll` because the passage is already on screen — the reader
+      // has been looking at it — and a scroll here would only take them
+      // somewhere they did not ask to go.
+      element.focus({ preventScroll: true });
+    });
     return () => cancelAnimationFrame(frame);
   }, [draft]);
 
