@@ -3,6 +3,7 @@ import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { internalMutation, mutation, query } from "./_generated/server";
+import { recordVersion, sweepVersions } from "./annotationVersions";
 import { getMembership, requireMembership, requireUserId } from "./lib/authz";
 import { recordEvent } from "./lib/ledger";
 import { clearNotificationsFor, raiseNotification } from "./notifications";
@@ -173,6 +174,17 @@ const annotationView = v.object({
   parentId: v.optional(v.id("annotations")),
   createdAt: v.number(),
   editedAt: v.optional(v.number()),
+  /**
+   * How many states this note has been in, counting the one on screen. Absent
+   * means one — the card offers no history control at all — which is what
+   * keeps an unedited margin exactly as quiet as it is today.
+   *
+   * It rides on the note rather than being counted from `annotationVersions`
+   * because every card in the rail needs it and counting would be a read per
+   * card. See the field's own note in `convex/schema.ts` for why it counts
+   * states rather than surviving rows.
+   */
+  versionCount: v.optional(v.number()),
   /** Withdrawn: the body is gone, the thread it holds up is not. */
   deleted: v.boolean(),
   /** Replies by anyone, which is what freezes visibility and blocks deletion. */
@@ -951,6 +963,7 @@ export const listForPaper = query({
         parentId: annotation.parentId,
         createdAt: annotation._creationTime,
         editedAt: annotation.editedAt,
+        versionCount: annotation.versionCount,
         deleted: annotation.deletedAt !== undefined,
         replyCount: replyCounts.get(annotation._id) ?? 0,
         reactions: reactionsFor(annotation._id),
@@ -1033,7 +1046,20 @@ export const mentionCandidates = query({
   },
 });
 
-/** Rewrite a note's body. Author only; the anchor and the type are untouched. */
+/**
+ * Rewrite a note's body. Author only; the anchor and the type are untouched.
+ *
+ * The sentence that was there is filed rather than lost (`recordVersion`), and
+ * that is the only change of substance here: an edit used to be a destruction
+ * and is now an addition. Nothing about who may do it moved — a note's history
+ * is written by exactly the person who could already overwrite it.
+ *
+ * A save that leaves the body identical files nothing. `editedAt` still moves,
+ * because the member did press Save and the card has always said so; but a
+ * version slot is finite, and spending one on a no-op would eventually push a
+ * real earlier draft off the end of a history to record that somebody
+ * double-clicked.
+ */
 export const updateBody = mutation({
   args: { annotationId: v.id("annotations"), body: v.string() },
   returns: v.null(),
@@ -1043,10 +1069,16 @@ export const updateBody = mutation({
       throw new ConvexError("That note was withdrawn.");
     }
 
-    await ctx.db.patch(annotation._id, {
-      body: cleanBody(args.body),
-      editedAt: Date.now(),
-    });
+    const body = cleanBody(args.body);
+    const at = Date.now();
+    // Before the patch, and from the document as it stands: this is the state
+    // about to be replaced.
+    const version =
+      body === annotation.body
+        ? undefined
+        : await recordVersion(ctx, annotation, at);
+
+    await ctx.db.patch(annotation._id, { body, editedAt: at });
     await recordEvent(ctx, {
       labId: annotation.labId,
       type: "annotation.edited",
@@ -1054,6 +1086,7 @@ export const updateBody = mutation({
       paperId: annotation.paperId,
       sessionId: annotation.sessionId,
       annotationId: annotation._id,
+      ...(version !== undefined ? { version } : {}),
     });
     return null;
   },
@@ -1066,6 +1099,14 @@ export const updateBody = mutation({
  * passage, reads on, and realises the thing they wrote is a critique rather
  * than a note — so it is a separate mutation from `updateBody` and does not
  * count as an edit of the prose.
+ *
+ * It does count as a version, though, and that is not a contradiction.
+ * `editedAt` answers "has this prose been rewritten", which is what the card's
+ * "· edited" mark means and why retyping still leaves it alone. The history
+ * answers a different question — what has this note been — and a note that was
+ * filed as a hypothesis in March and a critique in June has been two things.
+ * Losing that would lose exactly the transition the epistemic-status work is
+ * built to read.
  */
 export const setType = mutation({
   args: { annotationId: v.id("annotations"), type: annotationType },
@@ -1075,10 +1116,13 @@ export const setType = mutation({
     if (annotation.deletedAt !== undefined) {
       throw new ConvexError("That note was withdrawn.");
     }
+    // The no-op guard that was already here is also what keeps a version slot
+    // from being spent on a chip somebody tapped twice.
     if (annotation.type === args.type) {
       return null;
     }
 
+    const version = await recordVersion(ctx, annotation, Date.now());
     await ctx.db.patch(annotation._id, { type: args.type });
     await recordEvent(ctx, {
       labId: annotation.labId,
@@ -1087,6 +1131,7 @@ export const setType = mutation({
       paperId: annotation.paperId,
       sessionId: annotation.sessionId,
       annotationId: annotation._id,
+      version,
     });
     return null;
   },
@@ -1269,6 +1314,14 @@ export const sweepAnnotationMarks = internalMutation({
  *
  * Either way the passage stops being highlighted, because the annotation no
  * longer says anything about it.
+ *
+ * And either way the note's history goes. That is load-bearing on the
+ * withdrawn branch in a way it is not on the other: a deleted row's versions
+ * are merely garbage, but a *tombstone* that still offered its earlier drafts
+ * would be a withdrawal that withdrew nothing — the author would have taken
+ * back one sentence and left standing every sentence it was a revision of.
+ * Withdrawal has to reach the whole note, not the copy of it that is currently
+ * on top.
  */
 export const remove = mutation({
   args: { annotationId: v.id("annotations") },
@@ -1279,6 +1332,13 @@ export const remove = mutation({
       return "withdrawn";
     }
     const replies = await repliesTo(ctx, annotation._id);
+
+    // Attempted inline, where the retention cap guarantees it finishes in one
+    // pass, and scheduled otherwise — the same bargain the marks get, for the
+    // same reason: the note goes either way. Taking a note back is the one
+    // part of this that is the author's by right, and cleanup does not get a
+    // veto over it.
+    const versionsSwept = await sweepVersions(ctx, annotation._id);
 
     if (replies.length === 0) {
       // The marks go with the row they were put on — but the note goes either
@@ -1301,7 +1361,22 @@ export const remove = mutation({
       // something real. They are simply never returned again (see
       // `listForPaper`): a tombstone says one thing, and "four people agreed
       // with a sentence you can no longer read" is not it.
-      await ctx.db.patch(annotation._id, { body: "", deletedAt: Date.now() });
+      // `versionCount` goes with the rows. A tombstone reading "3 versions"
+      // over a history that has been swept would offer a control that opens
+      // onto nothing.
+      await ctx.db.patch(annotation._id, {
+        body: "",
+        deletedAt: Date.now(),
+        versionCount: undefined,
+      });
+    }
+
+    if (!versionsSwept) {
+      await ctx.scheduler.runAfter(
+        0,
+        internal.annotationVersions.sweepAnnotationVersions,
+        { annotationId: annotation._id },
+      );
     }
 
     // Withdrawing a note withdraws the mail it sent. Either ending leaves

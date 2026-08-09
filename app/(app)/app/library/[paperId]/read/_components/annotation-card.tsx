@@ -3,10 +3,12 @@
 import { ConfirmAction } from "@/app/(app)/app/_components/confirm-action";
 import { readableError } from "@/app/(app)/app/_components/errors";
 import { api } from "@/convex/_generated/api";
+import { versionSummary } from "@/lib/annotation-history/history";
 import { collectMentionedIds } from "@/lib/mentions";
 import { errorClass } from "@/lib/ui";
 import { useMutation } from "convex/react";
 import { useState } from "react";
+import { AnnotationHistory } from "./annotation-history";
 import type { PickedMention } from "./mention-field";
 import { MentionedBody, MentionField } from "./mention-field";
 import type { AnnotationType } from "./ontology";
@@ -98,6 +100,7 @@ export function AnnotationCard({
   const [editing, setEditing] = useState(false);
   const [replying, setReplying] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
   const [draftBody, setDraftBody] = useState(annotation.body);
   const [replyBody, setReplyBody] = useState("");
   const [replyPicked, setReplyPicked] = useState<PickedMention[]>([]);
@@ -127,6 +130,17 @@ export function AnnotationCard({
     annotation.visibility === "lab" &&
     annotation.replyCount > 0 &&
     annotation.parentId === undefined;
+
+  // How many states this note has been in, counting the one on screen. A note
+  // nobody has edited sends nothing, and the card grows no control — which is
+  // the point: history is a thing you can go and find, never a thing that
+  // announces on every card that somebody changed their mind.
+  //
+  // The count comes with the note, so knowing a history exists costs no query;
+  // reading it costs one, and only once somebody asks (see `AnnotationHistory`).
+  // A withdrawn note has no count, because withdrawal takes the drafts too.
+  const versionCount = annotation.versionCount ?? 1;
+  const hasHistory = versionCount > 1 && !annotation.deleted;
 
   // Three replies is a conversation, not a pile: collapsing at that point costs
   // a click to read something that would have fitted anyway.
@@ -165,6 +179,21 @@ export function AnnotationCard({
           {when(annotation.createdAt)}
           {annotation.editedAt !== undefined ? " · edited" : ""}
         </span>
+        {/* Sits in the header rather than down in the action row because it is
+            a fact about the note's provenance, in the line that already holds
+            the other two — when it was written, and whether it has been
+            rewritten. "· 3 versions" reads as the continuation of that
+            sentence, and as a button it is the quietest one on the card. */}
+        {hasHistory && (
+          <button
+            type="button"
+            aria-expanded={showHistory}
+            onClick={() => setShowHistory((was) => !was)}
+            className="tap-target font-sans text-[11px] text-ink-faint underline-offset-4 transition-colors hover:text-accent hover:underline"
+          >
+            · {versionSummary(versionCount)}
+          </button>
+        )}
         {annotation.mine && annotation.visibility === "private" && (
           <span className="rounded-sm border border-rule px-1 font-sans text-[9px] uppercase tracking-[0.12em] text-ink-faint">
             Private
@@ -298,6 +327,14 @@ export function AnnotationCard({
             className="mt-1.5 whitespace-pre-wrap font-serif text-sm leading-relaxed text-ink"
           />
         )
+      )}
+
+      {/* Directly under the body, because it is the same body earlier: the
+          panel unrolls beneath what the note says now and lists what it said
+          before, in the same serif and the same column. Above the marks and
+          the thread, which are what other people said *about* it. */}
+      {hasHistory && (
+        <AnnotationHistory annotation={annotation} open={showHistory} />
       )}
 
       {/* Sits with the note rather than down in the action row, because a mark
