@@ -1,6 +1,6 @@
 # Margin — Execution Timeline
 
-**Updated:** 2026-08-09 · against `origin/main` @ `87c9ca4`
+**Updated:** 2026-08-09 (Wave 1 lands) · against `origin/main` @ `ad2a9b1`
 **This is the single source of truth for execution order.** The other docs stay as rationale and design — when sequencing here disagrees with a roadmap section elsewhere, this file wins and the other doc should be corrected.
 
 | Source doc | Role |
@@ -35,8 +35,8 @@ Sequential; each PR polishes a screen *and* closes that screen's README-fidelity
 
 Independent of each other; parallelizable. All small-to-medium.
 
-- [ ] **B1 — Google OAuth** (magic links shipped in #45; OAuth is the remaining sign-in path).
-- [ ] **B2 — Verify + finish email delivery for mentions/notifications** (Resend path exists behind `emailIsConfigured()`; confirm production config, add the missing templates, no tracking pixels — constitution).
+- [x] **B1 — Google OAuth** (#64) (magic links shipped in #45).
+- [x] **B2 — Email delivery finished** (#65) (retry with idempotency key, paced fan-out, guard tests enforcing the constitution; operator steps in the PR body).
 - [ ] **B3 — Slack delivery** for briefs, digests, synthesis write-ups (webhook-level, not an app; the write-up is the distribution artifact — treat formatting as first-class).
 - [ ] **B4 — Session-agenda templates.**
 - [ ] **B5 — Native Zotero sync** (import shipped via BibTeX/RIS in #47; this is the live-sync upgrade — lower priority than B1–B3).
@@ -45,7 +45,7 @@ Independent of each other; parallelizable. All small-to-medium.
 
 Design: `docs/design/agent-delegation.md` (v2). Sequential; C2 blocks C3's *launch*, not its development.
 
-- [ ] **C1 — Substrate.** `delegations` + `findings` tables, ledger events, lifecycle cascade (settle/remove/withdraw cancels active delegations; correct the now-false `actions.ts` "nothing builds on outcomes" comment), atomic claim + lease expiry, caps (`by_lab_and_status`, daily budget), stub-agent run path, **CI privacy invariants** (no private row can reach a prompt/finding; whole-item redaction; label gates).
+- [x] **C1 — Substrate.** (#66) `delegations` + `findings` tables, ledger events, lifecycle cascade (settle/remove/withdraw cancels active delegations; correct the now-false `actions.ts` "nothing builds on outcomes" comment), atomic claim + lease expiry, caps (`by_lab_and_status`, daily budget), stub-agent run path, **CI privacy invariants** (no private row can reach a prompt/finding; whole-item redaction; label gates).
 - [ ] **C2 — Eval harness.** Ledger-ground-truth: for historically settled questions, the annotations humans cited in settlement are the relevance labels; score scout output vs `search.everything` top-6. Reported per-question; candidate-count asymmetry disclosed. *(This is also the last open box of strategy Phase 2 — one item, not two.)*
 - [ ] **C3 — Scout run.** Extract citation gates from synthesis into `lib/citations/` (synthesis refactored to consume it), scheduled-reader gather + guard test, model call (JSON-serialized untrusted context, strict schema, no-retry-of-model-call), sanitizer, failure states.
 - [ ] **C4 — Surfaces.** Brief section (findings under carried-forward questions, reactive, never blocking the brief), outcomes-panel status chips, finding card (*Settle with this* + citations-only adopt), `findingId` provenance on settlement.
@@ -82,4 +82,4 @@ Non-engineering, founder-owned, runs alongside everything: recruit 5–10 design
 
 ## 6. Done (context for agents — don't rebuild these)
 
-The bulk of strategy Phases 0–2 shipped as PRs #41–#62 (Track B above is what remains), including: magic links (#45), gated PDFs (#42), ⌘K search (#44), synthesis sign-off (#43), export (#48), BibTeX/RIS import (#47), mentions (#52), reactions (#51), tags/collections (#54), calendar (#50), since-you-were-away (#49), presenter brief (#53), outcomes (#55), cross-paper digest collisions (#56), annotation edit history (#57), cross-page anchoring (#58), temporal memory (#59), epistemic status (#60), interaction layer (#61), auth/deploy fixes (#62). Rationale: `docs/STRATEGY.md` §9 (its §2 capability table is a pre-#41 snapshot — read §9 for current state).
+The bulk of strategy Phases 0–2 shipped as PRs #41–#62 (Track B above is what remains), including: magic links (#45), gated PDFs (#42), ⌘K search (#44), synthesis sign-off (#43), export (#48), BibTeX/RIS import (#47), mentions (#52), reactions (#51), tags/collections (#54), calendar (#50), since-you-were-away (#49), presenter brief (#53), outcomes (#55), cross-paper digest collisions (#56), annotation edit history (#57), cross-page anchoring (#58), temporal memory (#59), epistemic status (#60), interaction layer (#61), auth/deploy fixes (#62), this timeline (#63), Google OAuth (#64), email delivery (#65), scout substrate (#66). Rationale: `docs/STRATEGY.md` §9 (its §2 capability table is a pre-#41 snapshot — read §9 for current state).
