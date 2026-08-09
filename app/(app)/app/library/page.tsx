@@ -97,8 +97,8 @@ function Library({ lab }: { lab: LabSummary }) {
         ) : papers.length === 0 ? (
           <p className="max-w-prose font-serif text-base leading-relaxed text-ink-muted">
             Nothing on the shelf yet. A library starts with one paper: paste a
-            DOI and Margin fetches the record, or drop in a PDF and it reads the
-            text so the margins have something to hold on to.
+            DOI and Margin fetches the record, drop in a PDF, or import a
+            reference-manager export in bulk.
           </p>
         ) : (
           <ul className="flex flex-col divide-y divide-rule border-y border-rule">

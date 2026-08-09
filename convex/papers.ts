@@ -330,6 +330,53 @@ export const createFromUpload = mutation({
 });
 
 /**
+ * Put a citation export's metadata-only record on the shelf.
+ *
+ * DOI-bearing entries do not come through here: `createFromDoi` owns those,
+ * including normalization, dedupe, and the search for a legal copy. This is
+ * the deliberately narrower door for BibTeX and RIS records with no DOI at
+ * all. They still become the same paper, with the same membership gate and
+ * ledger fact, but wait in `needs-pdf` until a lab member supplies the file.
+ */
+export const createFromMetadata = mutation({
+  args: {
+    labId: v.id("labs"),
+    title: v.string(),
+    authors: v.optional(v.array(v.string())),
+    year: v.optional(v.number()),
+    venue: v.optional(v.string()),
+    abstract: v.optional(v.string()),
+    sourceUrl: v.optional(v.string()),
+  },
+  returns: v.object({ paperId: v.id("papers"), title: v.string() }),
+  handler: async (ctx, args) => {
+    const membership = await requireMembership(ctx, args.labId);
+    const title = cleanTitle(args.title);
+    const paperId = await ctx.db.insert("papers", {
+      labId: args.labId,
+      title,
+      authors: cleanAuthors(args.authors),
+      year: args.year,
+      venue: args.venue,
+      abstract: args.abstract,
+      sourceUrl: args.sourceUrl,
+      ingestStatus: "needs-pdf",
+      addedBy: membership.userId,
+    });
+
+    await recordEvent(ctx, {
+      labId: args.labId,
+      type: "paper.added",
+      actorId: membership.userId,
+      paperId,
+      title,
+    });
+
+    return { paperId, title };
+  },
+});
+
+/**
  * Give a metadata-only paper its PDF — the second half of a DOI ingest that
  * found no open-access copy. Also the way to replace a preprint with the
  * published file, in which case the old blob and the old text layer go with
