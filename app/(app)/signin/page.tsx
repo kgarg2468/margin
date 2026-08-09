@@ -156,20 +156,29 @@ export default function SignInPage() {
   // Arriving from the error boundary, this page is handed the very session it
   // was navigated here to escape: a failed `auth:signOut` never got its
   // clearing `Set-Cookie` written, so the server provider read the surviving
-  // cookie and the client rehydrated the dead token from it. The flag in the
-  // URL is what says this arrival is the one allowed to sign itself out —
-  // `clearRehydratedSession` ignores every other way in. The ref is what makes
-  // it once, not once per effect run: this is a request rather than a
+  // cookie and the client rehydrated the dead token from it. Signing that back
+  // out takes two agreeing signals: the flag in the URL, and the one-shot
+  // marker the boundary left in this tab's `sessionStorage` a navigation ago.
+  // The flag by itself would be an invitation — it rides on a public URL any
+  // outside page can link to, and `/signin?reauth=1` is admitted by the
+  // middleware on purpose — so a reader with a live session sent here by
+  // somebody else spends no marker and keeps their session. The ref is what
+  // makes it once, not once per effect run: this is a request rather than a
   // subscription, and Strict Mode would otherwise fire two of them. Recovery
   // starts pending on the first render so no new sign-in can get ahead of this
-  // cleanup and then be erased by its late sign-out.
+  // cleanup and then be erased by its late sign-out — and it settles either
+  // way, so a visit with no marker leaves the form usable rather than stuck.
   const clearedRehydratedSession = useRef(false);
   useEffect(() => {
     if (clearedRehydratedSession.current) {
       return;
     }
     clearedRehydratedSession.current = true;
-    void clearRehydratedSession({ searchParams, signOut }).finally(() => {
+    void clearRehydratedSession({
+      searchParams,
+      storage: () => window.sessionStorage,
+      signOut,
+    }).finally(() => {
       setRecoveryPending(false);
     });
   }, [searchParams, signOut]);

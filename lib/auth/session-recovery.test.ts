@@ -3,13 +3,45 @@ import {
   SIGNIN_PATH,
   SIGNIN_RECOVERY_PATH,
   clearRehydratedSession,
+  consumeRecoveryIntent,
   isRecoveryDestination,
+  markRecoveryIntent,
   recoverSession,
 } from "./session-recovery";
 
 /** What the middleware sees when the browser asks for `destination`. */
 function requested(destination: string): URL {
   return new URL(destination, "https://margin.test");
+}
+
+/**
+ * One tab's `sessionStorage`, near enough.
+ *
+ * The property that matters is the one the real thing gets from the browser
+ * and this gets from being a plain object: it is reachable only from this
+ * origin. Nothing a foreign page can do writes into it.
+ */
+function storage(entries: Record<string, string> = {}) {
+  const items = new Map(Object.entries(entries));
+  return {
+    getItem: (key: string) => items.get(key) ?? null,
+    setItem: (key: string, value: string) => void items.set(key, value),
+    removeItem: (key: string) => void items.delete(key),
+    size: () => items.size,
+  };
+}
+
+/**
+ * A tab the error boundary's recovery has just left, marker and all.
+ *
+ * Marked through the production helper rather than by writing a key here: a
+ * test that spelled the marker out itself would keep passing if the two halves
+ * of the handshake stopped agreeing on what it is.
+ */
+function recoveringTab() {
+  const tab = storage();
+  markRecoveryIntent(() => tab);
+  return tab;
 }
 
 describe("session recovery", () => {
@@ -23,11 +55,12 @@ describe("session recovery", () => {
           resolve();
         };
       });
+    const tab = storage();
     const navigate = vi.fn(() => {
       order.push("navigated");
     });
 
-    const recovered = recoverSession({ signOut, navigate });
+    const recovered = recoverSession({ signOut, storage: () => tab, navigate });
     await Promise.resolve();
     // The whole point of the helper: navigating while sign-out is still in
     // flight loads the sign-in page against tokens the client is about to
@@ -38,6 +71,51 @@ describe("session recovery", () => {
     await recovered;
     expect(order).toEqual(["signed out", "navigated"]);
     expect(navigate).toHaveBeenCalledWith(SIGNIN_RECOVERY_PATH);
+    // And the tab is carrying the one thing the far side will accept as proof
+    // the reader asked for this. Written before the navigation, because after
+    // it there is no `this` left to write from.
+    expect(consumeRecoveryIntent(() => tab)).toBe(true);
+  });
+
+  it("marks the tab even when the injected sign-out rejects", async () => {
+    // The failing sign-out is the case the far side exists for: the cookie
+    // survives, the page rehydrates the dead session from it, and the arrival
+    // has to clear it again. Skipping the marker here would leave that arrival
+    // unauthorized and the reader holding the corpse.
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const tab = storage();
+
+    await recoverSession({
+      signOut: async () => {
+        throw new Error("network down");
+      },
+      storage: () => tab,
+      navigate: vi.fn(),
+    });
+
+    expect(consumeRecoveryIntent(() => tab)).toBe(true);
+    logged.mockRestore();
+  });
+
+  it("navigates even when the tab has no storage to mark", async () => {
+    // A tab that cannot hold the marker still has to get out of the error
+    // boundary — the navigation is what throws the poisoned query store away,
+    // and that half works regardless. The far side simply will not sign out,
+    // which is the right way to be wrong about a session.
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const navigate = vi.fn();
+
+    await recoverSession({
+      signOut: async () => {},
+      storage: () => {
+        throw new Error("storage disabled");
+      },
+      navigate,
+    });
+
+    expect(navigate).toHaveBeenCalledWith(SIGNIN_RECOVERY_PATH);
+    expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
   });
 
   it("asks for a page the stale cookie cannot bounce it off", () => {
@@ -102,6 +180,7 @@ describe("session recovery", () => {
       signOut: async () => {
         throw new Error("network down");
       },
+      storage: () => storage(),
       navigate,
     });
 
@@ -111,7 +190,92 @@ describe("session recovery", () => {
   });
 });
 
+describe("the recovery intent the marker is", () => {
+  it("is spendable once and then gone", async () => {
+    // One-time on purpose. The marker is the whole authorization, so a marker
+    // that survived being read would sit in the tab waiting for any later
+    // arrival at `/signin?reauth=1` to spend it — and the arrival after the
+    // reader's own is the one somebody else can arrange.
+    const marked = storage();
+    expect(markRecoveryIntent(() => marked)).toBe(true);
+
+    expect(consumeRecoveryIntent(() => marked)).toBe(true);
+    expect(consumeRecoveryIntent(() => marked)).toBe(false);
+    expect(marked.size()).toBe(0);
+  });
+
+  it("is not something an unmarked or forged tab can spend", () => {
+    expect(consumeRecoveryIntent(() => storage())).toBe(false);
+    // A guessed key or a stale value is not the marker. Only the exact pair
+    // `markRecoveryIntent` writes counts, so a leftover from something else
+    // cannot stand in for a reader pressing the button.
+    expect(consumeRecoveryIntent(() => storage({ reauth: "1" }))).toBe(false);
+    expect(
+      consumeRecoveryIntent(() =>
+        storage({ "margin.auth.recovery-intent": "0" }),
+      ),
+    ).toBe(false);
+  });
+
+  it("reports failure rather than throwing when the tab has no storage", () => {
+    // Safari in private browsing, a locked-down profile, an embedded webview:
+    // reading `sessionStorage` can throw on access. Neither page has anything
+    // above it to catch that, and both have to keep rendering — so the marker
+    // is reported unwritable and unspent, never assumed.
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const denied = () => {
+      throw new Error("storage disabled");
+    };
+
+    expect(markRecoveryIntent(denied)).toBe(false);
+    expect(consumeRecoveryIntent(denied)).toBe(false);
+    expect(logged).toHaveBeenCalledTimes(2);
+    logged.mockRestore();
+  });
+});
+
 describe("clearing the session the recovery page was rehydrated with", () => {
+  it("does not sign out an arrival no recovery on this origin marked", async () => {
+    // The forced-logout break: `/signin?reauth=1` is a public URL, and the
+    // middleware admits it. Any outside page can put a reader on it — a link,
+    // a redirect, an iframe — so if the flag alone authorized the sign-out,
+    // someone else's site could end a live session on demand. The flag says
+    // where the reader is; only the marker says they asked to be here.
+    const signOut = vi.fn(async () => {});
+    const unmarked = storage();
+
+    await clearRehydratedSession({
+      searchParams: requested(SIGNIN_RECOVERY_PATH).searchParams,
+      storage: () => unmarked,
+      signOut,
+    });
+
+    expect(signOut).not.toHaveBeenCalled();
+  });
+
+  it("keeps the form usable when the tab has no storage to read", async () => {
+    // Nothing above this to catch a throwing `sessionStorage`, and the form is
+    // the only thing on screen that still works. So it resolves, and it
+    // resolves without signing anyone out: an unreadable marker is not a
+    // spent one.
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const signOut = vi.fn(async () => {});
+
+    await expect(
+      clearRehydratedSession({
+        searchParams: requested(SIGNIN_RECOVERY_PATH).searchParams,
+        storage: () => {
+          throw new Error("storage disabled");
+        },
+        signOut,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(signOut).not.toHaveBeenCalled();
+    expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
+  });
+
   it("does not settle before the recovery sign-out settles", async () => {
     let releaseSignOut = () => {};
     let cleanupSettled = false;
@@ -120,8 +284,10 @@ describe("clearing the session the recovery page was rehydrated with", () => {
         releaseSignOut = resolve;
       });
 
+    const tab = recoveringTab();
     const clearing = clearRehydratedSession({
       searchParams: requested(SIGNIN_RECOVERY_PATH).searchParams,
+      storage: () => tab,
       signOut,
     });
     void clearing.then(() => {
@@ -145,13 +311,23 @@ describe("clearing the session the recovery page was rehydrated with", () => {
     // session — so arriving at the recovery destination has to clear it again,
     // this time from a page that is not being torn down mid-request.
     const signOut = vi.fn(async () => {});
+    const tab = recoveringTab();
+    const arrive = () =>
+      clearRehydratedSession({
+        searchParams: requested(SIGNIN_RECOVERY_PATH).searchParams,
+        storage: () => tab,
+        signOut,
+      });
 
-    await clearRehydratedSession({
-      searchParams: requested(SIGNIN_RECOVERY_PATH).searchParams,
-      signOut,
-    });
-
+    await arrive();
     expect(signOut).toHaveBeenCalledTimes(1);
+
+    // And once only. The marker went with the first arrival, so a reader who
+    // stays on this page and reloads it — or is sent back to the same URL by
+    // anything else — gets the form, not another sign-out.
+    await arrive();
+    expect(signOut).toHaveBeenCalledTimes(1);
+    expect(tab.size()).toBe(0);
   });
 
   it("leaves every other way of reaching /signin signed in", async () => {
@@ -169,13 +345,21 @@ describe("clearing the session the recovery page was rehydrated with", () => {
       "/signin?reauth=true",
     ]) {
       const signOut = vi.fn(async () => {});
+      // Marked, deliberately: the marker alone is not permission either. A
+      // reader who started a recovery and then navigated somewhere else on
+      // this page is not asking to be signed out by whatever brought them
+      // back — both halves have to agree, or neither counts.
+      const tab = recoveringTab();
 
       await clearRehydratedSession({
         searchParams: requested(destination).searchParams,
+        storage: () => tab,
         signOut,
       });
 
       expect(signOut, destination).not.toHaveBeenCalled();
+      // Spent anyway, so it cannot be waiting for the next arrival.
+      expect(tab.size(), destination).toBe(0);
     }
   });
 
@@ -186,10 +370,12 @@ describe("clearing the session the recovery page was rehydrated with", () => {
     // is the one thing on screen that still works. Log it and leave the reader
     // their form; the credentials they type next mint a new token regardless.
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const tab = recoveringTab();
 
     await expect(
       clearRehydratedSession({
         searchParams: requested(SIGNIN_RECOVERY_PATH).searchParams,
+        storage: () => tab,
         signOut: async () => {
           throw new Error("network still down");
         },

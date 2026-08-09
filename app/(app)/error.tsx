@@ -74,6 +74,13 @@ export default function AuthedError({
           in order — and sends them to a `/signin` carrying the flag that tells
           the middleware not to bounce them off an auth cookie a failed
           sign-out request left behind.
+
+          That flag is public, though, and the page it lands on will finish
+          the job by signing out again. So the press also leaves a marker in
+          this tab's `sessionStorage` on the way out, and the far side wants
+          both. Origin-scoped storage is the point: a link from anywhere else
+          can put a reader on that URL, but only this button can leave the
+          note that makes it mean anything.
         */}
         <button
           type="button"
@@ -82,6 +89,7 @@ export default function AuthedError({
             setRecovering(true);
             void recoverSession({
               signOut,
+              storage: () => window.sessionStorage,
               navigate: (destination) => window.location.assign(destination),
             });
           }}
