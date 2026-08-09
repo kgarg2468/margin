@@ -3,8 +3,9 @@
 import { useAuthActions } from "@convex-dev/auth/react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { PageSurface } from "@/app/(marketing)/_components/hero-surface";
+import { clearRehydratedSession } from "@/lib/auth/session-recovery";
 import {
   cardClass,
   errorClass,
@@ -125,7 +126,7 @@ function OrRule() {
 }
 
 export default function SignInPage() {
-  const { signIn } = useAuthActions();
+  const { signIn, signOut } = useAuthActions();
   const router = useRouter();
   const searchParams = useSearchParams();
   // The landing CTAs promise an account, so they arrive at `?flow=signup` and
@@ -145,6 +146,23 @@ export default function SignInPage() {
   // the app shell — this page only has to not lose it.
   const invite = inviteFromParam(searchParams.get("invite"));
   const destination = invite === null ? "/app" : `/app?invite=${invite}`;
+
+  // Arriving from the error boundary, this page is handed the very session it
+  // was navigated here to escape: a failed `auth:signOut` never got its
+  // clearing `Set-Cookie` written, so the server provider read the surviving
+  // cookie and the client rehydrated the dead token from it. The flag in the
+  // URL is what says this arrival is the one allowed to sign itself out —
+  // `clearRehydratedSession` ignores every other way in. The ref is what makes
+  // it once, not once per effect run: this is a request rather than a
+  // subscription, and Strict Mode would otherwise fire two of them.
+  const clearedRehydratedSession = useRef(false);
+  useEffect(() => {
+    if (clearedRehydratedSession.current) {
+      return;
+    }
+    clearedRehydratedSession.current = true;
+    void clearRehydratedSession({ searchParams, signOut });
+  }, [searchParams, signOut]);
 
   function switchFlow(next: Flow) {
     setFlow(next);

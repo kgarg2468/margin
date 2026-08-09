@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   SIGNIN_PATH,
   SIGNIN_RECOVERY_PATH,
+  clearRehydratedSession,
   isRecoveryDestination,
   recoverSession,
 } from "./session-recovery";
@@ -105,6 +106,72 @@ describe("session recovery", () => {
     });
 
     expect(navigate).toHaveBeenCalledWith(SIGNIN_RECOVERY_PATH);
+    expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
+  });
+});
+
+describe("clearing the session the recovery page was rehydrated with", () => {
+  it("signs out once when the sign-in page was reached by recovery", async () => {
+    // The half the navigation cannot do. `/signin?reauth=1` is a fresh
+    // document, so `ConvexAuthNextjsServerProvider` reads the cookie a failed
+    // `auth:signOut` left on the wire and hands the token to `AuthProvider`,
+    // which writes it back into storage on mount. The client the recovery
+    // navigation was supposed to have emptied comes up holding the same dead
+    // session — so arriving at the recovery destination has to clear it again,
+    // this time from a page that is not being torn down mid-request.
+    const signOut = vi.fn(async () => {});
+
+    await clearRehydratedSession({
+      searchParams: requested(SIGNIN_RECOVERY_PATH).searchParams,
+      signOut,
+    });
+
+    expect(signOut).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves every other way of reaching /signin signed in", async () => {
+    // Mount cleanup is scoped to the one destination that admits its session
+    // may be a corpse. The front door, an invite bouncing through, the sign-up
+    // flow and the Google round trip all reach this page with tokens that are
+    // either absent or good, and signing those out would be a way of logging
+    // people out of the session they just created.
+    for (const destination of [
+      "/signin",
+      "/signin?invite=ABC12345",
+      "/signin?flow=signup",
+      "/signin?flow=signup&invite=ABC12345",
+      "/signin?reauth=0",
+      "/signin?reauth=true",
+    ]) {
+      const signOut = vi.fn(async () => {});
+
+      await clearRehydratedSession({
+        searchParams: requested(destination).searchParams,
+        signOut,
+      });
+
+      expect(signOut, destination).not.toHaveBeenCalled();
+    }
+  });
+
+  it("keeps the form usable when the clearing sign-out rejects", async () => {
+    // There is no boundary above this one to catch it and nowhere left to
+    // navigate to — the reader is already on the page they were sent to. An
+    // unhandled rejection here would take out the sign-in form itself, which
+    // is the one thing on screen that still works. Log it and leave the reader
+    // their form; the credentials they type next mint a new token regardless.
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(
+      clearRehydratedSession({
+        searchParams: requested(SIGNIN_RECOVERY_PATH).searchParams,
+        signOut: async () => {
+          throw new Error("network still down");
+        },
+      }),
+    ).resolves.toBeUndefined();
+
     expect(logged).toHaveBeenCalled();
     logged.mockRestore();
   });

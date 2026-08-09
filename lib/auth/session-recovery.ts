@@ -68,3 +68,52 @@ export async function recoverSession({
   }
   navigate(SIGNIN_RECOVERY_PATH);
 }
+
+/**
+ * The other half of the same failure, on the far side of the navigation.
+ *
+ * `recoverSession` clears the client it is leaving; this clears the one that
+ * arrives. They are not redundant, because the thing that survives between
+ * them is the cookie: when the `auth:signOut` request never reached
+ * `/api/auth`, nothing wrote the clearing `Set-Cookie`, so the browser asks
+ * for `/signin?reauth=1` still carrying it. `ConvexAuthNextjsServerProvider`
+ * reads that cookie on the server and hands the token down as `serverState`,
+ * and `AuthProvider`'s mount effect writes it straight back into
+ * `localStorage`. The reader's fresh page comes up holding the dead session
+ * they just asked to leave.
+ *
+ * So the destination flag is load-bearing twice over: once to get past the
+ * middleware, and once here, to say that this particular arrival is allowed to
+ * sign itself out. Every other way into `/signin` — the front door, an invite,
+ * the sign-up flow, Google's callback — has tokens that are either absent or
+ * good, and clearing those would be a way of signing people out of the session
+ * they came here to make.
+ *
+ * There is no `navigate` in this signature on purpose. The reader is already
+ * where they were being sent; leaving again would be a loop, and the form on
+ * this page is the thing they need. For the same reason a rejection stops
+ * here — the sign-in they are about to attempt mints a new token whatever the
+ * old one's fate, and an unhandled rejection would take the form down with it.
+ *
+ * The caller is expected to run this once per mount. Awaiting `signOut` is
+ * also what keeps this from racing `AuthProvider`: React flushes a child's
+ * effect before its parent's, so this starts first — and the `await` hands
+ * control back before the provider's rehydration runs, which means the clear
+ * lands after the write rather than under it.
+ */
+export async function clearRehydratedSession({
+  searchParams,
+  signOut,
+}: {
+  searchParams: URLSearchParams;
+  signOut: () => Promise<unknown>;
+}): Promise<void> {
+  if (!isRecoveryDestination(searchParams)) {
+    return;
+  }
+  try {
+    await signOut();
+  } catch (error) {
+    console.error(error);
+  }
+}
