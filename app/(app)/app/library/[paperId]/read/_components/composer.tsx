@@ -15,6 +15,7 @@ import {
   composerEscape,
   composerHandlesEscape,
   dismissalAsksFirst,
+  escapeBelongsTo,
 } from "./composer-escape";
 import type { PickedMention } from "./mention-field";
 import { MentionField } from "./mention-field";
@@ -26,28 +27,41 @@ import { VisibilityToggle } from "./visibility-toggle";
 type Visibility = Doc<"annotations">["visibility"];
 
 /**
- * Which surface an Escape was pressed on, read off the event's own target.
+ * How every layer over the page announces itself: Base UI gives its popup the
+ * role, the ⌘K palette sets it by hand, and a confirm dialog is the same thing
+ * with a sharper name.
+ */
+const SURFACES = '[role="dialog"],[role="alertdialog"]';
+
+/**
+ * Which surface an Escape was pressed on, read off the event's own target and
+ * off what else is open at the time.
  *
- * `role="dialog"` is the question asked, because that is how every layer over
- * the page announces itself — Base UI gives its popup the role, and the ⌘K
- * palette sets it by hand. A target under no dialog at all is the page, and the
- * page is the composer's to answer for.
+ * A target under no layer at all is *usually* the page, and the page is the
+ * composer's to answer for. Usually, not always: a click on the palette's own
+ * padding leaves focus on `<body>`, which is under nothing, while the palette
+ * is still the thing on top. So the document is asked as well as the target —
+ * see `escapeBelongsTo`.
  */
 function pressedIn(
   target: EventTarget | null,
   within: Element | null,
 ): EscapePressedIn {
   const element = target instanceof Element ? target : null;
-  if (element === null) {
-    return "page";
-  }
   // Up to the popup itself, not just the content: an Escape can land on Base
   // UI's dialog rather than on anything the composer rendered inside it.
-  const sheet = within?.closest('[role="dialog"]') ?? within;
-  if (sheet !== null && sheet.contains(element)) {
-    return "composer";
-  }
-  return element.closest('[role="dialog"]') === null ? "page" : "surface-above";
+  const sheet = within?.closest(SURFACES) ?? within;
+  const root = within?.ownerDocument ?? null;
+  return escapeBelongsTo({
+    insideComposer:
+      element !== null && sheet !== null && sheet.contains(element),
+    insideSurface: element !== null && element.closest(SURFACES) !== null,
+    otherSurfaceOpen:
+      root !== null &&
+      [...root.querySelectorAll(SURFACES)].some(
+        (surface) => sheet === null || !sheet.contains(surface),
+      ),
+  });
 }
 
 /**

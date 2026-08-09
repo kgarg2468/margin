@@ -39,6 +39,44 @@ export type ComposerEscapeAction =
 export type EscapePressedIn = "composer" | "surface-above" | "page";
 
 /**
+ * What the DOM has to say about where an Escape landed, reduced to the three
+ * facts the answer turns on.
+ */
+export type EscapeSurroundings = {
+  /** The key landed inside the composer's own sheet. */
+  insideComposer: boolean;
+  /** It landed inside some other layer over the page. */
+  insideSurface: boolean;
+  /** A layer other than the composer's sheet is open somewhere in the page. */
+  otherSurfaceOpen: boolean;
+};
+
+/**
+ * Which surface an Escape belongs to.
+ *
+ * `otherSurfaceOpen` is the part a "was it pressed in something?" question
+ * misses. Focus is not always in the thing on top: click the ⌘K palette's own
+ * padding and focus falls to `<body>`, which sits under no layer at all — and
+ * a composer that read that as "the page, therefore mine" would answer the
+ * palette's Escape and leave the palette with no way out but the mouse.
+ *
+ * The composer's own sheet wins first, and deliberately so. Everything below
+ * it is inferred from what happens to be in the document, and a wrong inference
+ * there must not be able to stop Escape working inside the box somebody is
+ * typing in — that failure is silent, and it is the one this whole ordering was
+ * written to prevent.
+ */
+export function escapeBelongsTo(where: EscapeSurroundings): EscapePressedIn {
+  if (where.insideComposer) {
+    return "composer";
+  }
+  if (where.insideSurface || where.otherSurfaceOpen) {
+    return "surface-above";
+  }
+  return "page";
+}
+
+/**
  * Whether this Escape is the composer's to interpret at all.
  *
  * Asked before `composerEscape`, and it exists because Base UI's dismissal is a

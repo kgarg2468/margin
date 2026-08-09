@@ -3,6 +3,7 @@ import {
   composerEscape,
   composerHandlesEscape,
   dismissalAsksFirst,
+  escapeBelongsTo,
 } from "./composer-escape";
 
 /**
@@ -97,6 +98,52 @@ describe("a dismissal that would take the note with it", () => {
  * above only applies when the composer is the thing on top — and "on top" is
  * not the same question as "focused".
  */
+describe("reading the surface off the key press", () => {
+  const NOTHING_ELSE = {
+    insideComposer: false,
+    insideSurface: false,
+    otherSurfaceOpen: false,
+  };
+
+  it("is the composer's when the key landed in its own sheet", () => {
+    expect(escapeBelongsTo({ ...NOTHING_ELSE, insideComposer: true })).toBe(
+      "composer",
+    );
+  });
+
+  it("stays the composer's even with something else open", () => {
+    // Not reachable while the palette holds focus, and stated this way round
+    // on purpose: a false positive on "something else is open" must never be
+    // able to stop Escape working inside the sheet you are typing in.
+    expect(
+      escapeBelongsTo({
+        insideComposer: true,
+        insideSurface: true,
+        otherSurfaceOpen: true,
+      }),
+    ).toBe("composer");
+  });
+
+  it("belongs to the surface the key was pressed in", () => {
+    expect(escapeBelongsTo({ ...NOTHING_ELSE, insideSurface: true })).toBe(
+      "surface-above",
+    );
+  });
+
+  it("belongs to a surface above even when the key landed on nothing", () => {
+    // The row that shipped wrong: click the palette's own padding and focus
+    // goes to <body>, which is under no dialog at all — so the composer read
+    // it as the page, called it its own, and swallowed the palette's Escape.
+    expect(escapeBelongsTo({ ...NOTHING_ELSE, otherSurfaceOpen: true })).toBe(
+      "surface-above",
+    );
+  });
+
+  it("is the page when nothing at all is layered over the composer", () => {
+    expect(escapeBelongsTo(NOTHING_ELSE)).toBe("page");
+  });
+});
+
 describe("Escape and the surface it belongs to", () => {
   it("answers for an Escape pressed inside the composer's own sheet", () => {
     expect(composerHandlesEscape("composer")).toBe(true);
