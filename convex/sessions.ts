@@ -14,6 +14,7 @@ import { mutation, query } from "./_generated/server";
 import { getMembership, requireMembership, requireUserId } from "./lib/authz";
 import { recordEvent } from "./lib/ledger";
 import { annotationType, ingestStatus, sessionStatus } from "./schema";
+import { GENERATION_LEASE_MS } from "./synthesis";
 
 /**
  * Journal-club sessions: the calendar and the lifecycle.
@@ -821,6 +822,14 @@ function withinUndoWindow(at: number | undefined): boolean {
  * to the status, not a rollback of the afternoon. Ending again later writes a
  * fresh `session.ended`, which is the honest record: the second end is when
  * the room actually emptied.
+ *
+ * The one thing it waits for is a synthesis being written *right now*. That
+ * work is somebody's too, and it is the only work in the product that is
+ * already paid for by the time this mutation runs — the model call is in
+ * flight, and `synthesis.store` will only write to a session that has ended.
+ * A reopen inside the lease would therefore not cancel the run; it would let
+ * it finish and then throw its output away, which is the one outcome an undo
+ * has no business causing. So the undo waits the couple of minutes out.
  */
 export const reopenSession = mutation({
   args: { sessionId: v.id("sessions") },
@@ -837,6 +846,17 @@ export const reopenSession = mutation({
     if (!withinUndoWindow(session.endedAt)) {
       throw new ConvexError(
         "That session ended more than ten minutes ago. An End can be taken back for ten minutes — from the toast, or from the session's own page while the window is open. Past that, meeting about this paper again is a new session.",
+      );
+    }
+    // Checked after the window, and the order is the message: a lapsed undo is
+    // a permanent no, and "wait for it to land" would be a lie told to
+    // somebody who has no way back anyway.
+    if (
+      session.synthesisGeneratingAt !== undefined &&
+      Date.now() - session.synthesisGeneratingAt < GENERATION_LEASE_MS
+    ) {
+      throw new ConvexError(
+        "A write-up for this session is being written right now. Wait for it to land before reopening the meeting.",
       );
     }
 

@@ -48,6 +48,9 @@ const HOUR = 60 * MINUTE;
  */
 const UNDO_WINDOW = 10 * 60 * 1000;
 
+/** The synthesis generation lease, restated for the same reason. */
+const GENERATION_LEASE = 3 * 60 * 1000;
+
 /**
  * The at-the-boundary cases stop the clock, because they are a millisecond
  * wide. The handler reads `Date.now()` itself, so a test that seeded
@@ -208,6 +211,51 @@ describe("reopenSession", () => {
       );
     }
     expect((await sessionRow(ctx, sessionId)).status).toBe("ended");
+  });
+
+  it("refuses while a synthesis is being written, and says to wait", async () => {
+    // The hand-off this branch exists to protect. Generate takes the lease and
+    // the model call leaves the transaction; an undo pressed in that window
+    // would move the session off `ended`, and `synthesis.store` only writes to
+    // a session that has ended — so the run comes back to a refusal and a paid
+    // call is thrown away with nothing on screen to say so.
+    const { ctx, seed } = await world();
+    const sessionId = await seedSession(ctx, seed, {
+      status: "ended",
+      endedAt: Date.now() - MINUTE,
+      synthesisGeneratingAt: Date.now() - 10 * 1000,
+      synthesisGeneratingLease: "lease-1",
+    });
+
+    try {
+      await reopen(ctx, sessionId);
+      expect.unreachable("a session mid-generation cannot be reopened");
+    } catch (caught) {
+      expect(caught).toBeInstanceOf(ConvexError);
+      expect((caught as ConvexError<string>).data).toContain(
+        "being written right now",
+      );
+    }
+    expect((await sessionRow(ctx, sessionId)).status).toBe("ended");
+  });
+
+  it("reopens once a stale lease has expired", async () => {
+    // The other side of the same guard, and the reason it is a window rather
+    // than a flag: an action that died without releasing its lease must not
+    // lock the undo out for good. Frozen, because this is a boundary — a
+    // millisecond of drift here reads exactly like an off-by-one in the guard.
+    const { ctx, seed } = await world();
+    freezeClock();
+    const sessionId = await seedSession(ctx, seed, {
+      status: "ended",
+      endedAt: Date.now() - MINUTE,
+      synthesisGeneratingAt: Date.now() - GENERATION_LEASE,
+      synthesisGeneratingLease: "lease-abandoned",
+    });
+
+    await reopen(ctx, sessionId);
+
+    expect((await sessionRow(ctx, sessionId)).status).toBe("live");
   });
 
   it("refuses a session that never ended", async () => {
