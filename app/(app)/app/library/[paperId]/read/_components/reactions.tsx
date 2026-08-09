@@ -101,7 +101,18 @@ export function Reactions({
       aria-label="Marks on this note"
       // gap-y-2 for the same reason the type chips have it: the 44px hit boxes
       // are taller than the chips and would otherwise collide between rows.
-      className="mt-2 flex flex-wrap items-center gap-x-1.5 gap-y-2"
+      //
+      // And the other half of the same argument, because gap alone does not
+      // close it: `tap-target`'s box is centred, so on a 14px control it
+      // reaches 14px past each edge, and the card's action row — Reply, Edit,
+      // Status — sits directly under this one. Measured, "Mark" was
+      // unreachable at its own centre. Capped at 8px past each edge down the
+      // column, which is under half the gap either way; the full 44px stands
+      // across, and everywhere else in the card.
+      className={
+        "mt-2 flex flex-wrap items-center gap-x-1.5 gap-y-2 " +
+        "[&>.tap-target]:after:h-[calc(100%+1rem)] [&>.tap-target]:after:min-h-0"
+      }
     >
       {shown.map((mark) => {
         const entry = byKind.get(mark.kind);
