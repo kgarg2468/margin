@@ -117,6 +117,12 @@ flowchart TD
 | Can delivery avoid notification fatigue? | Yes. Digests are computed at boundaries rather than on write, addressed per recipient from a staleness cursor, and hard-capped at five items — a shape validated by simulation across lab sizes 5 to 25. |
 | Is the privacy stance mechanical rather than editorial? | Yes. The guard reads `convex/schema.ts` back through Convex's own validator introspection, so a `reads` table, a `viewedAt` field, or a read event type is a failing build rather than a broken promise. |
 
+## Deployment
+
+Vercel uses the source-controlled build command in `vercel.json`. Configure `CONVEX_DEPLOY_KEY` only as a secret in Vercel's Production environment; never commit its value or expose it to the browser. The build command deploys Convex first, then runs `npm run build` with `NEXT_PUBLIC_CONVEX_URL` set to that deployment's URL, keeping the frontend artifact and backend deployment matched.
+
+The package-level `npm run build` remains non-deploying for local development, CI, and Playwright.
+
 ## View
 
 | Link | URL |
