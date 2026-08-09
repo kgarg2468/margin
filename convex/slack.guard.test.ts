@@ -3,8 +3,9 @@ import { fileURLToPath } from "node:url";
 import { v, type ValidatorJSON } from "convex/values";
 import { describe, expect, it } from "vitest";
 import schema from "./schema";
+import { FakeCtx, handlerOf, seedLab } from "./delegations.fixtures";
 import { normalizeWebhookUrl, slackIsConfigured } from "./lib/slack";
-import { permanentStatus, SlackRefusal } from "./slack";
+import { permanentStatus, recordDeliveryOutcome, SlackRefusal } from "./slack";
 import {
   composeBoundaryMessage,
   composeBriefMessage,
@@ -459,6 +460,7 @@ describe("where the credential is stored", () => {
       "actorId",
       "artifact",
       "at",
+      "deliveryAt",
       "labId",
       "paperId",
       "sessionId",
@@ -798,5 +800,137 @@ describe("which refusals a lab is told about", () => {
     expect(permanentStatus(new TypeError("undefined is not a function"))).toBeNull();
     expect(permanentStatus("404")).toBeNull();
     expect(permanentStatus(null)).toBeNull();
+  });
+});
+
+/* -------------------------------------------------------------------------
+ * 5. A failure never outlives the thing it describes
+ * ---------------------------------------------------------------------- */
+
+/**
+ * The outcome of a post is recorded by a mutation scheduled from an action,
+ * and nothing orders those against each other or against a PI in the settings
+ * page. So all three of these are reachable: a failure recorded after the
+ * webhook it describes was replaced, a failure recorded after a later post
+ * landed, and the same failure recorded twice.
+ *
+ * The first two would have the settings page telling a lab their channel may
+ * be gone while their posts are arriving in it — a product lie assembled
+ * entirely out of true facts, which is the kind that survives review. The
+ * third would put two rows in an append-only ledger for one event.
+ *
+ * Driven against the real registered handler through the in-memory context in
+ * `delegations.fixtures.ts`, because this is a transactional invariant and no
+ * pure function can see it.
+ */
+describe("an outcome that arrives after the world moved", () => {
+  const record = handlerOf(recordDeliveryOutcome);
+
+  /** A lab with a webhook connected at `1_000`. */
+  async function world() {
+    const ctx = new FakeCtx();
+    const seed = await seedLab(ctx);
+    await ctx.db.patch(seed.labId, {
+      slackWebhookUrl: "https://hooks.slack.com/services/T0/B0/first",
+      slackConnectedAt: 1_000,
+    });
+    return { ctx, seed };
+  }
+
+  /** One failed post, with every coordinate it travels with. */
+  const refusal = (over: Record<string, unknown> = {}) => ({
+    artifact: "brief" as const,
+    deliveryAt: 500,
+    connectedAt: 1_000,
+    attemptAt: 900,
+    statusCode: 404,
+    ...over,
+  });
+
+  const failures = (ctx: FakeCtx) =>
+    ctx.db.all("events").filter((e) => e.type === "slack.delivery_failed");
+
+  it("says nothing about a webhook the lab has already replaced", async () => {
+    const { ctx, seed } = await world();
+    // The PI pasted a new URL while the failure was still in the scheduler.
+    await ctx.db.patch(seed.labId, {
+      slackWebhookUrl: "https://hooks.slack.com/services/T0/B0/second",
+      slackConnectedAt: 2_000,
+    });
+
+    await record(ctx, { sessionId: seed.sessionId, ...refusal() } as never);
+
+    const lab = await ctx.db.get(seed.labId);
+    expect(
+      lab?.slackLastDelivery,
+      "a 404 against the webhook that was thrown away says nothing about the one that replaced it",
+    ).toBeUndefined();
+  });
+
+  it("says nothing once a later post has landed", async () => {
+    const { ctx, seed } = await world();
+    // The success was attempted after the failure, and recorded before it.
+    await record(ctx, {
+      sessionId: seed.sessionId,
+      ...refusal({ deliveryAt: 1_500, attemptAt: 2_000, statusCode: null }),
+    } as never);
+    await record(ctx, { sessionId: seed.sessionId, ...refusal() } as never);
+
+    const lab = await ctx.db.get(seed.labId);
+    expect(
+      lab?.slackLastDelivery?.statusCode,
+      "posts are demonstrably arriving in that channel; the older refusal must not overwrite the proof",
+    ).toBeUndefined();
+  });
+
+  it("clears the mark when a later post lands", async () => {
+    const { ctx, seed } = await world();
+    await record(ctx, { sessionId: seed.sessionId, ...refusal() } as never);
+    expect((await ctx.db.get(seed.labId))?.slackLastDelivery?.statusCode).toBe(
+      404,
+    );
+
+    // The lab fixed the channel; the banner should leave on its own.
+    await record(ctx, {
+      sessionId: seed.sessionId,
+      ...refusal({ deliveryAt: 1_500, attemptAt: 2_000, statusCode: null }),
+    } as never);
+    expect(
+      (await ctx.db.get(seed.labId))?.slackLastDelivery?.statusCode,
+    ).toBeUndefined();
+  });
+
+  it("files one ledger event for one failed delivery, however often it is told", async () => {
+    const { ctx, seed } = await world();
+    // The same delivery, twice — a retried mutation, a re-run action.
+    await record(ctx, { sessionId: seed.sessionId, ...refusal() } as never);
+    await record(ctx, {
+      sessionId: seed.sessionId,
+      ...refusal({ attemptAt: 950 }),
+    } as never);
+
+    expect(failures(ctx)).toHaveLength(1);
+  });
+
+  it("keeps two genuinely distinct failures distinct", async () => {
+    const { ctx, seed } = await world();
+    // Two approvals of the same artifact, both failing. Two things happened,
+    // and a ledger that collapsed them would be under-reporting.
+    await record(ctx, { sessionId: seed.sessionId, ...refusal() } as never);
+    await record(ctx, {
+      sessionId: seed.sessionId,
+      ...refusal({ deliveryAt: 700, attemptAt: 1_100 }),
+    } as never);
+
+    expect(failures(ctx)).toHaveLength(2);
+  });
+
+  it("carries the status code and the artifact into the ledger, and nothing else", async () => {
+    const { ctx, seed } = await world();
+    await record(ctx, { sessionId: seed.sessionId, ...refusal() } as never);
+
+    const row = failures(ctx)[0];
+    expect(row).toBeDefined();
+    expect(JSON.stringify(row)).not.toContain("hooks.slack.com");
   });
 });

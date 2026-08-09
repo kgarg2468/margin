@@ -282,10 +282,22 @@ export const status = query({
       return { connected: false, canManage: false, lastDeliveryFailed: null };
     }
     const lab = await ctx.db.get(args.labId);
+    const last = lab?.slackLastDelivery;
+    // Shown only when the record is a refusal *and* it describes the webhook
+    // the lab has now. The mutation that writes it already refuses to record an
+    // outcome against a replaced credential; this is the same rule applied
+    // again at the read, so that a row which somehow got there anyway — a
+    // restored backup, a hand-edited document — still cannot make this page
+    // tell a lab their live channel is dead.
+    const stale =
+      last === undefined || last.connectedAt !== (lab?.slackConnectedAt ?? 0);
     return {
       connected: slackIsConfigured(lab),
       canManage: membership.role === "pi",
-      lastDeliveryFailed: lab?.slackLastFailure ?? null,
+      lastDeliveryFailed:
+        stale || last.statusCode === undefined
+          ? null
+          : { at: last.at, statusCode: last.statusCode },
     };
   },
 });
@@ -324,12 +336,16 @@ export const connect = mutation({
       );
     }
 
-    // The failure marker is cleared here because pasting a URL is what fixing
-    // a dead channel looks like. Leaving it would have the settings page still
-    // reporting a `404` against a webhook that has since been replaced.
+    // A new identity for a new credential, and the last outcome dropped —
+    // pasting a URL is what fixing a dead channel looks like, and leaving the
+    // record would have the settings page reporting a `404` against a webhook
+    // that no longer exists. The stamp is what lets an outcome still sitting in
+    // the scheduler, describing the webhook being replaced right now, be
+    // recognised and ignored when it lands.
     await ctx.db.patch(args.labId, {
       slackWebhookUrl: webhookUrl,
-      slackLastFailure: undefined,
+      slackConnectedAt: Date.now(),
+      slackLastDelivery: undefined,
     });
     await recordEvent(ctx, {
       labId: args.labId,
@@ -360,7 +376,8 @@ export const disconnect = mutation({
     }
     await ctx.db.patch(args.labId, {
       slackWebhookUrl: undefined,
-      slackLastFailure: undefined,
+      slackConnectedAt: undefined,
+      slackLastDelivery: undefined,
     });
     await recordEvent(ctx, {
       labId: args.labId,
@@ -378,12 +395,41 @@ export const disconnect = mutation({
  * Scheduled by each delivery action rather than called inline, because an
  * action cannot write and a post that arrived should not be held up by the
  * bookkeeping about it. Runs after every attempt, including the ones that
- * worked: clearing a stale failure is as much the point as recording a fresh
- * one, and a lab that fixes its channel should see the banner go on its own.
+ * worked: recording a success is what lets a later-arriving failure know it has
+ * been overtaken, and it is what makes the banner leave on its own when a lab
+ * fixes its channel.
  *
  * Takes the session rather than the lab so the caller has nothing to look up
  * and nothing to get wrong; the lab, and the presenter this is filed under,
  * both hang off it.
+ *
+ * ## Nothing here can assume it is on time
+ *
+ * These mutations are scheduled from actions and race each other, the PI in the
+ * settings page, and themselves. Three coordinates travel with an outcome so
+ * that a late one can recognise itself as late:
+ *
+ *   - `connectedAt` — which webhook posted it. If the lab has replaced the
+ *     credential since, this outcome is about a channel the lab has already
+ *     stopped using, and stamping it would have the settings page reporting a
+ *     `404` against a webhook that never saw one.
+ *   - `attemptAt` — when the attempt finished. An outcome no newer than the one
+ *     already recorded has been overtaken. This is what stops a refusal from
+ *     two o'clock overwriting the proof that a post at two-oh-one landed, which
+ *     is the sequence that would tell a lab their channel may be gone while
+ *     their posts are arriving in it.
+ *   - `deliveryAt` — which version of which artifact this was. Two approvals
+ *     that both failed are two facts and stay two rows; being told twice about
+ *     one failed post is one fact and must stay one row, because the ledger is
+ *     append-only and cannot take a duplicate back.
+ *
+ * The summary and the ledger are guarded separately and on purpose. The mark on
+ * `labs` is a claim about how things *are*, so it must never survive being
+ * contradicted. A ledger row is a claim about what *happened*, which staleness
+ * cannot make untrue — a post that failed at two o'clock failed at two o'clock
+ * whatever the webhook is now. So a late outcome can still file its row while
+ * being refused the mark, and the only thing that suppresses a row is the row
+ * already being there.
  */
 export const recordDeliveryOutcome = internalMutation({
   args: {
@@ -393,6 +439,12 @@ export const recordDeliveryOutcome = internalMutation({
       v.literal("boundary"),
       v.literal("write-up"),
     ),
+    /** The version stamp of the artifact posted; this delivery's identity. */
+    deliveryAt: v.number(),
+    /** The lab's `slackConnectedAt` when the post was made. */
+    connectedAt: v.number(),
+    /** When the attempt finished. */
+    attemptAt: v.number(),
     /** The refusal's status, or `null` for a post that landed. */
     statusCode: v.union(v.number(), v.null()),
   },
@@ -403,17 +455,47 @@ export const recordDeliveryOutcome = internalMutation({
     const lab = await ctx.db.get(session.labId);
     if (lab === null) return null;
 
+    const last = lab.slackLastDelivery;
+    const describesThisWebhook =
+      (lab.slackConnectedAt ?? 0) === args.connectedAt &&
+      lab.slackWebhookUrl !== undefined;
+    const overtaken = last !== undefined && last.at >= args.attemptAt;
+
+    if (describesThisWebhook && !overtaken) {
+      await ctx.db.patch(lab._id, {
+        slackLastDelivery: {
+          at: args.attemptAt,
+          connectedAt: args.connectedAt,
+          // Absent, not zero: absent is how "it arrived" is spelled, and a
+          // status of nothing is not a status.
+          statusCode: args.statusCode ?? undefined,
+        },
+      });
+    }
+
     if (args.statusCode === null) {
-      // It arrived. Only touch the row if there was something to take back.
-      if (lab.slackLastFailure !== undefined) {
-        await ctx.db.patch(lab._id, { slackLastFailure: undefined });
-      }
       return null;
     }
 
-    await ctx.db.patch(lab._id, {
-      slackLastFailure: { at: Date.now(), statusCode: args.statusCode },
-    });
+    // One row per failed delivery. Read off the ledger rather than off the mark
+    // above, because the mark is a moving summary and this question is about
+    // the permanent record: if the row is already there, being told again
+    // changes nothing. The index is narrow — one session's events — and this
+    // only runs when a post was refused.
+    const filed = await ctx.db
+      .query("events")
+      .withIndex("by_session", (q) => q.eq("sessionId", session._id))
+      .collect();
+    const already = filed.some(
+      (event) =>
+        event.type === "slack.delivery_failed" &&
+        event.artifact === args.artifact &&
+        event.deliveryAt === args.deliveryAt,
+    );
+    if (already) {
+      return null;
+    }
+
     await recordEvent(ctx, {
       labId: lab._id,
       actorId: session.presenterId,
@@ -421,6 +503,7 @@ export const recordDeliveryOutcome = internalMutation({
       type: "slack.delivery_failed",
       artifact: args.artifact,
       statusCode: args.statusCode,
+      deliveryAt: args.deliveryAt,
     });
     return null;
   },
@@ -429,6 +512,16 @@ export const recordDeliveryOutcome = internalMutation({
 /** Which of the three this was, for the ledger and for nothing else. */
 type Artifact = "brief" | "boundary" | "write-up";
 
+/** Everything an outcome needs to know about the post it describes. */
+type Delivery = {
+  sessionId: Id<"sessions">;
+  artifact: Artifact;
+  /** The artifact's version stamp — this delivery's identity. */
+  deliveryAt: number;
+  /** Which webhook made the post, per the payload query that read it. */
+  connectedAt: number;
+};
+
 /**
  * Hand the outcome of a post to the mutation that records it.
  *
@@ -436,18 +529,22 @@ type Artifact = "brief" | "boundary" | "write-up";
  * `permanentStatus`, and a failure that is merely a bad Tuesday leaves no trace
  * anywhere but the deployment log — saying nothing is the correct amount to say
  * about a `503`.
+ *
+ * `attemptAt` is stamped here rather than in the mutation, because here is where
+ * the attempt actually finished. Stamping it on the other side would time the
+ * bookkeeping instead of the post, and two outcomes could then be ordered by
+ * how busy the scheduler was rather than by when they happened.
  */
 async function noteOutcome(
   ctx: ActionCtx,
-  sessionId: Id<"sessions">,
-  artifact: Artifact,
+  delivery: Delivery,
   caught: unknown,
 ): Promise<void> {
   const statusCode = caught === null ? null : permanentStatus(caught);
   if (caught !== null && statusCode === null) return;
   await ctx.scheduler.runAfter(0, internal.slack.recordDeliveryOutcome, {
-    sessionId,
-    artifact,
+    ...delivery,
+    attemptAt: Date.now(),
     statusCode,
   });
 }
@@ -475,16 +572,22 @@ function displayName(user: Doc<"users"> | null): string {
  * The lab's webhook, if this lab has one and this session belongs to it.
  *
  * Every payload query starts here, and it is the only place the URL is read.
+ *
+ * `connectedAt` comes back with it: the credential's non-secret identity, which
+ * travels with the post so the outcome can be recognised later as describing
+ * *this* webhook rather than whichever one the lab has by then. Zero for a lab
+ * connected before that field existed — an identity that matches nothing, which
+ * is the safe reading, since the only thing it can cost is a banner not shown.
  */
 async function destinationFor(
   ctx: QueryCtx,
   labId: Id<"labs">,
-): Promise<string | null> {
+): Promise<{ url: string; connectedAt: number } | null> {
   const lab = await ctx.db.get(labId);
-  if (!slackIsConfigured(lab)) {
+  if (!slackIsConfigured(lab) || lab?.slackWebhookUrl === undefined) {
     return null;
   }
-  return lab?.slackWebhookUrl ?? null;
+  return { url: lab.slackWebhookUrl, connectedAt: lab.slackConnectedAt ?? 0 };
 }
 
 /** Which of these citations are still shared with the lab, one read each. */
@@ -508,6 +611,8 @@ async function stillSharedAmong(
 
 const briefPayloadShape = v.object({
   webhookUrl: v.string(),
+  /** Which webhook this is, so a late outcome can be told from a current one. */
+  connectedAt: v.number(),
   sessionId: v.id("sessions"),
   paperTitle: v.string(),
   scheduledAt: v.number(),
@@ -556,8 +661,8 @@ export const briefPayload = internalQuery({
     if (session === null || session.status === "cancelled") {
       return null;
     }
-    const webhookUrl = await destinationFor(ctx, session.labId);
-    if (webhookUrl === null) {
+    const destination = await destinationFor(ctx, session.labId);
+    if (destination === null) {
       return null;
     }
 
@@ -609,7 +714,8 @@ export const briefPayload = internalQuery({
     }
 
     return {
-      webhookUrl,
+      webhookUrl: destination.url,
+      connectedAt: destination.connectedAt,
       sessionId: session._id,
       paperTitle: paper.title,
       scheduledAt: session.scheduledAt,
@@ -656,6 +762,15 @@ export const deliverBrief = internalAction({
       return null;
     }
 
+    // The approval this post is carrying, and the webhook carrying it. Both
+    // travel with the outcome so a late one can be recognised as late.
+    const brief: Delivery = {
+      sessionId: args.sessionId,
+      artifact: "brief",
+      deliveryAt: args.approvedAt,
+      connectedAt: payload.connectedAt,
+    };
+
     try {
       await postToSlack(
         payload.webhookUrl,
@@ -669,10 +784,10 @@ export const deliverBrief = internalAction({
           url: `${site}/app/sessions/${payload.sessionId}`,
         }),
       );
-      await noteOutcome(ctx, args.sessionId, "brief", null);
+      await noteOutcome(ctx, brief, null);
     } catch (caught) {
       console.error(`Could not post a brief to Slack: ${String(caught)}`);
-      await noteOutcome(ctx, args.sessionId, "brief", caught);
+      await noteOutcome(ctx, brief, caught);
     }
     return null;
   },
@@ -684,6 +799,8 @@ export const deliverBrief = internalAction({
 
 const boundaryPayloadShape = v.object({
   webhookUrl: v.string(),
+  /** Which webhook this is, so a late outcome can be told from a current one. */
+  connectedAt: v.number(),
   paperId: v.id("papers"),
   paperTitle: v.string(),
   scheduledAt: v.number(),
@@ -744,8 +861,8 @@ export const boundaryPayload = internalQuery({
     ) {
       return null;
     }
-    const webhookUrl = await destinationFor(ctx, session.labId);
-    if (webhookUrl === null) {
+    const destination = await destinationFor(ctx, session.labId);
+    if (destination === null) {
       return null;
     }
     const paper = await ctx.db.get(session.paperId);
@@ -806,7 +923,8 @@ export const boundaryPayload = internalQuery({
       .map((collision) => collisionLine(collision, "", paper.title));
 
     return {
-      webhookUrl,
+      webhookUrl: destination.url,
+      connectedAt: destination.connectedAt,
       paperId: paper._id,
       paperTitle: paper.title,
       scheduledAt: session.scheduledAt,
@@ -838,6 +956,16 @@ export const deliverBoundary = internalAction({
       return null;
     }
 
+    // A boundary post has no approval to be stamped by, so the session's
+    // scheduled time stands in: it is what the delivery is *about*, and moving
+    // a session makes it a different post about a different meeting.
+    const boundary: Delivery = {
+      sessionId: args.sessionId,
+      artifact: "boundary",
+      deliveryAt: args.expectedScheduledAt,
+      connectedAt: payload.connectedAt,
+    };
+
     try {
       await postToSlack(
         payload.webhookUrl,
@@ -850,12 +978,12 @@ export const deliverBoundary = internalAction({
           url: `${site}/app/library/${payload.paperId}/read`,
         }),
       );
-      await noteOutcome(ctx, args.sessionId, "boundary", null);
+      await noteOutcome(ctx, boundary, null);
     } catch (caught) {
       console.error(
         `Could not post a session boundary to Slack: ${String(caught)}`,
       );
-      await noteOutcome(ctx, args.sessionId, "boundary", caught);
+      await noteOutcome(ctx, boundary, caught);
     }
     return null;
   },
@@ -867,6 +995,8 @@ export const deliverBoundary = internalAction({
 
 const synthesisPayloadShape = v.object({
   webhookUrl: v.string(),
+  /** Which webhook this is, so a late outcome can be told from a current one. */
+  connectedAt: v.number(),
   sessionId: v.id("sessions"),
   paperTitle: v.string(),
   scheduledAt: v.number(),
@@ -915,8 +1045,8 @@ export const synthesisPayload = internalQuery({
     ) {
       return null;
     }
-    const webhookUrl = await destinationFor(ctx, session.labId);
-    if (webhookUrl === null) {
+    const destination = await destinationFor(ctx, session.labId);
+    if (destination === null) {
       return null;
     }
     const paper = await ctx.db.get(session.paperId);
@@ -931,7 +1061,8 @@ export const synthesisPayload = internalQuery({
     );
 
     return {
-      webhookUrl,
+      webhookUrl: destination.url,
+      connectedAt: destination.connectedAt,
       sessionId: session._id,
       paperTitle: paper.title,
       scheduledAt: session.scheduledAt,
@@ -971,6 +1102,13 @@ export const deliverSynthesis = internalAction({
       return null;
     }
 
+    const writeUp: Delivery = {
+      sessionId: args.sessionId,
+      artifact: "write-up",
+      deliveryAt: args.approvedAt,
+      connectedAt: payload.connectedAt,
+    };
+
     try {
       await postToSlack(
         payload.webhookUrl,
@@ -984,10 +1122,10 @@ export const deliverSynthesis = internalAction({
           url: `${site}/app/sessions/${payload.sessionId}`,
         }),
       );
-      await noteOutcome(ctx, args.sessionId, "write-up", null);
+      await noteOutcome(ctx, writeUp, null);
     } catch (caught) {
       console.error(`Could not post a write-up to Slack: ${String(caught)}`);
-      await noteOutcome(ctx, args.sessionId, "write-up", caught);
+      await noteOutcome(ctx, writeUp, caught);
     }
     return null;
   },

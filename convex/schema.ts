@@ -372,9 +372,16 @@ export const eventDoc = v.union(
    * webhook that was revoked. Slack having a bad minute is not a fact about the
    * lab and does not belong in the lab's record.
    *
-   * `statusCode` and `artifact`, and nothing else. Not the URL, which is a
-   * credential these rows would outlive; not Slack's response body, which is
-   * useful in a deployment log and is not ours to keep.
+   * `statusCode`, `artifact` and `deliveryAt`, and nothing else. Not the URL,
+   * which is a credential these rows would outlive; not Slack's response body,
+   * which is useful in a deployment log and is not ours to keep.
+   *
+   * `deliveryAt` is the version stamp of the artifact the post was carrying —
+   * the `approvedAt` of a brief or a write-up, the scheduled time of a session
+   * boundary. It is what makes a row identifiable as being about *one*
+   * delivery, so being told twice about the same failed post files one row,
+   * while two separate approvals that both failed stay two. An append-only
+   * ledger cannot take a duplicate back.
    *
    * `actorId` is the session's presenter, for want of anyone truer: a scheduled
    * delivery has nobody pressing a button, and the same convention is what
@@ -391,6 +398,7 @@ export const eventDoc = v.union(
       v.literal("write-up"),
     ),
     statusCode: v.number(),
+    deliveryAt: v.number(),
   }),
   v.object({
     ...eventBase,
@@ -957,8 +965,23 @@ export default defineSchema({
      */
     slackWebhookUrl: v.optional(v.string()),
     /**
-     * The last time Slack refused a post outright, if that is where things
-     * stand.
+     * When the webhook above was pasted — the credential's non-secret identity.
+     *
+     * A delivery outcome is recorded by a mutation scheduled from an action,
+     * and nothing orders that against a PI in the settings page. So a `404`
+     * from a post made at two o'clock can be handed to a lab that replaced its
+     * webhook at two-oh-one, and without a way to tell the two apart the lab
+     * would be told the new channel is dead on the evidence of the old one.
+     *
+     * This is what travels with a post instead of the URL: replacing the
+     * webhook writes a new timestamp, so an outcome that names the old one can
+     * be recognised as describing a credential the lab no longer has. It is
+     * safe to hand around precisely because it is not the secret — it says
+     * *which* webhook, never what it was.
+     */
+    slackConnectedAt: v.optional(v.number()),
+    /**
+     * How the most recent post to Slack went.
      *
      * A webhook can die without anyone touching this row: archive the channel,
      * or remove the app from the workspace, and Slack starts answering `404
@@ -966,20 +989,35 @@ export default defineSchema({
      * says a channel is wired, because it is, and the posts simply stop. This
      * field is what lets the settings page say the true thing instead.
      *
-     * Present only while the last attempt was refused permanently: a post that
-     * lands clears it, and so does pasting a new URL, because both are the
-     * problem being fixed. Transient trouble — a `5xx`, a rate limit that
-     * outlasted the retries — is deliberately not recorded, since a banner
-     * about a channel that might be gone is worse than silence when the channel
-     * is fine.
+     * It records posts that *landed* as well as ones that were refused, which
+     * is the part that is easy to get wrong. Outcomes are written by mutations
+     * scheduled from actions, so they can arrive in any order; without a record
+     * of the successes, a refusal from two o'clock has no way to know that a
+     * post at two-oh-one went through, and would stamp a lab whose channel is
+     * demonstrably alive. `at` is the attempt's own time and is what makes that
+     * comparison possible — an outcome older than the one recorded here is
+     * stale by definition and is dropped.
+     *
+     * `statusCode` present means refused, absent means it arrived.
+     * `connectedAt` says which webhook did the posting, so an outcome naming a
+     * credential the lab has since replaced can be recognised and dropped too.
+     *
+     * Only permanent refusals are ever recorded as failures. Transient trouble
+     * — a `5xx`, a rate limit that outlasted the retries — writes nothing at
+     * all, since a banner about a channel that might be gone is worse than
+     * silence when the channel is fine.
      *
      * A derived, self-healing summary of facts the ledger holds permanently,
      * not a second source of truth: it exists so that reading it costs one
      * document get on a page every member loads, rather than a scan back
      * through `events`.
      */
-    slackLastFailure: v.optional(
-      v.object({ at: v.number(), statusCode: v.number() }),
+    slackLastDelivery: v.optional(
+      v.object({
+        at: v.number(),
+        connectedAt: v.number(),
+        statusCode: v.optional(v.number()),
+      }),
     ),
   }).index("by_creator", ["createdBy"]),
 
