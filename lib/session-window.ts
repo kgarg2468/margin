@@ -18,13 +18,6 @@ export function startWindow(scheduledAt: number, now: number) {
 }
 
 /**
- * "about 25 hours away" — a distance, readable after "is still".
- *
- * Takes the time until the *session*, `scheduledAt - now`. Not `msUntilOpen`:
- * that is the time until the start button unlocks, a day less, and feeding it
- * here would tell someone a meeting 25 hours out is "about 1 hour away".
- */
-/**
  * How long a forward move stays undoable.
  *
  * An undo is a toast-length regret, not a time machine. Ten minutes is the
@@ -43,6 +36,13 @@ export function startWindow(scheduledAt: number, now: number) {
  */
 export const UNDO_WINDOW_MS = 10 * 60 * 1000;
 
+/**
+ * "about 25 hours away" — a distance, readable after "is still".
+ *
+ * Takes the time until the *session*, `scheduledAt - now`. Not `msUntilOpen`:
+ * that is the time until the start button unlocks, a day less, and feeding it
+ * here would tell someone a meeting 25 hours out is "about 1 hour away".
+ */
 export function awayProse(msUntilSession: number): string {
   const hours = Math.round(msUntilSession / 3_600_000);
   if (hours < 48) {

@@ -414,8 +414,13 @@ function Reschedule({
 
 /**
  * Handing the session to somebody else — the thing that happens when the
- * presenter is off sick on the morning of, which is why it stays available
- * right through the meeting.
+ * presenter is off sick on the morning of.
+ *
+ * The server allows the swap right through the meeting (`updateSession` takes
+ * a new presenter while a session is `scheduled` or `live`), but this control
+ * is only ever on screen before it: a live session routes to the projector
+ * view, and `ManageSession` is not mounted then. Re-casting mid-meeting is a
+ * rule the API keeps, not a button this page offers.
  */
 function PresenterPicker({ session }: { session: SessionDetail }) {
   const members = useQuery(api.labs.listMembers, { labId: session.labId });
