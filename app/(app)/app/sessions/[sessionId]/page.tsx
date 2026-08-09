@@ -15,10 +15,14 @@ import Link from "next/link";
 import { use, useMemo } from "react";
 import { SessionDigest } from "../../_components/digest";
 import { byline } from "../../library/_components/paper-meta";
+import type { AnnotationView } from "../../library/[paperId]/read/_components/types";
 import { SessionStatusChip } from "../_components/session-row";
+import { AddToCalendar } from "./_components/add-to-calendar";
+import { PresenterBrief } from "./_components/brief";
 import { LiveSession } from "./_components/live-session";
 import type { SessionDetail } from "./_components/manage";
 import { ManageSession, PresenterNotes } from "./_components/manage";
+import { SessionOutcomes } from "./_components/outcomes";
 import {
   FloorColumns,
   MarginElsewhere,
@@ -88,6 +92,7 @@ export default function SessionPage({
     <Record
       session={session}
       notes={notes}
+      rows={rows}
       readHref={readHref}
       visibleAnnotationIds={
         new Set(
@@ -114,11 +119,19 @@ function BackLink() {
 function Record({
   session,
   notes,
+  rows,
   readHref,
   visibleAnnotationIds,
 }: {
   session: SessionDetail;
   notes: ReturnType<typeof groupSessionNotes>;
+  /**
+   * The paper's margin, unfiltered. The brief derives two of its sections from
+   * this rather than from the server — including the caller's own private
+   * notes, which is precisely why they come from the caller's own subscription
+   * and never from a stored row.
+   */
+  rows: readonly AnnotationView[];
   readHref: string;
   visibleAnnotationIds: ReadonlySet<Id<"annotations">>;
 }) {
@@ -156,6 +169,10 @@ function Record({
             : ""}
           {ran !== null ? ` · ran ${ran}` : ""}
         </p>
+
+        {session.status === "scheduled" && (
+          <AddToCalendar session={session} />
+        )}
 
         <p className="font-sans text-sm text-ink-muted">
           Presented by {session.presenterName ?? "a member who has left the lab"}
@@ -223,6 +240,13 @@ function Record({
         </p>
       )}
 
+      {/* The agenda leads the personal half of the page: it is the artifact
+          the presenter came here for, and the digest below it is the delta
+          they may have already read in their inbox. Deliberately not on the
+          live view — that screen is a projector, and this one has the
+          presenter's private notes on it. */}
+      <PresenterBrief session={session} rows={rows} />
+
       {!cancelled && (
         <SessionDigest labId={session.labId} sessionId={session._id} />
       )}
@@ -260,6 +284,15 @@ function Record({
           )}
         </section>
       )}
+
+      {/* What the discussion produced, and what earlier meetings on this paper
+          left open. Below the board because the board is what the outcomes are
+          drawn *from* — a reader works down what the lab flagged and then
+          across what it settled — and above the write-up because the write-up
+          is prose about the same hour and this is the part of it that is still
+          owed. Drawn on a cancelled session too, since a meeting that was
+          called off can still be holding somebody else's open question. */}
+      <SessionOutcomes session={session} rows={rows} />
 
       {held && (
         <div className="border-t border-rule pt-8">

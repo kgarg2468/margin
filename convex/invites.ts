@@ -1,7 +1,9 @@
 import { ConvexError, v } from "convex/values";
-import type { Doc } from "./_generated/dataModel";
+import { api } from "./_generated/api";
+import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
-import { mutation, query } from "./_generated/server";
+import { action, mutation, query } from "./_generated/server";
+import { emailIsConfigured, renderEmail, sendEmail } from "./auth";
 import { getMembership, requirePi, requireUserId } from "./lib/authz";
 import { recordEvent } from "./lib/ledger";
 
@@ -18,6 +20,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 /** A lab is a research group, not a mailing list — 25 covers the big ones. */
 const DEFAULT_MAX_USES = 25;
 const MAX_MAX_USES = 200;
+/** One batch of emailed invitations. Same ceiling as a lab, for the same reason. */
+const MAX_EMAIL_RECIPIENTS = 25;
 
 function randomCode(): string {
   const bytes = new Uint8Array(CODE_LENGTH);
@@ -48,6 +52,29 @@ async function generateUniqueCode(ctx: MutationCtx): Promise<string> {
   throw new ConvexError("Could not generate an invite code. Please try again.");
 }
 
+/**
+ * A refusal the client can branch on without reading the prose.
+ *
+ * Redemption fails for two unlike reasons, and only one of them is final. If
+ * the code is revoked, expired, full or simply wrong, it will still be all of
+ * those things in ten seconds, and the caller should stop holding on to it.
+ * If the caller merely isn't authenticated yet — an `authz` helper throwing
+ * past this function — the code is untouched and perfectly good.
+ *
+ * The difference is invisible when both arrive as a bare string, and the
+ * client guessed wrong: it treated every `ConvexError` as final and threw away
+ * live invitations on a lapsed session. So the final ones say so in a field,
+ * and everything else is transient by default — the safe way round, because
+ * mistaking a dead code for a retryable one costs a wasted click, and the
+ * reverse costs the invitation.
+ */
+function refused(message: string): ConvexError<{
+  kind: "invite-refused";
+  message: string;
+}> {
+  return new ConvexError({ kind: "invite-refused" as const, message });
+}
+
 /** A code admits people only while it is unrevoked, unexpired, and unfilled. */
 function isLive(invite: Doc<"invites">, now: number): boolean {
   return (
@@ -65,12 +92,20 @@ export const createInvite = mutation({
     maxUses: v.optional(v.number()),
   },
   returns: v.object({
+    /** So a half-delivered batch can be re-sent on this code instead of a new one. */
+    inviteId: v.id("invites"),
     code: v.string(),
     expiresAt: v.number(),
     maxUses: v.number(),
+    /** For composing the invitation email, which has to name the lab it is for. */
+    labName: v.string(),
   }),
   handler: async (ctx, args) => {
     const membership = await requirePi(ctx, args.labId);
+    const lab = await ctx.db.get(args.labId);
+    if (lab === null) {
+      throw new ConvexError("That lab no longer exists.");
+    }
 
     const ttlDays = args.ttlDays ?? DEFAULT_TTL_DAYS;
     if (!Number.isFinite(ttlDays) || ttlDays <= 0 || ttlDays > MAX_TTL_DAYS) {
@@ -109,7 +144,258 @@ export const createInvite = mutation({
       inviteId,
     });
 
-    return { code, expiresAt, maxUses };
+    return { inviteId, code, expiresAt, maxUses, labName: lab.name };
+  },
+});
+
+/**
+ * One live code the caller already owns, ready to be delivered again.
+ *
+ * This is what makes re-sending a half-delivered batch cost nothing: without
+ * it, every retry minted a fresh code while the first stayed live, so a lab
+ * that retried twice was left with three credentials admitting three times the
+ * people it meant to invite. Delivery is not admission — mailing the same code
+ * a second time must not widen the door.
+ *
+ * PI only, and the invite has to belong to the lab being claimed: an id from
+ * the client is a claim like any other.
+ */
+export const getLiveInvite = query({
+  args: { labId: v.id("labs"), inviteId: v.id("invites") },
+  returns: v.object({
+    inviteId: v.id("invites"),
+    code: v.string(),
+    expiresAt: v.number(),
+    labName: v.string(),
+    /** How many more people this code can still admit. */
+    remainingUses: v.number(),
+  }),
+  handler: async (ctx, args) => {
+    await requirePi(ctx, args.labId);
+
+    const invite = await ctx.db.get(args.inviteId);
+    if (
+      invite === null ||
+      invite.labId !== args.labId ||
+      !isLive(invite, Date.now())
+    ) {
+      throw new ConvexError(
+        "That code is no longer live. Generate a new one to invite anybody else.",
+      );
+    }
+
+    const lab = await ctx.db.get(args.labId);
+    if (lab === null) {
+      throw new ConvexError("That lab no longer exists.");
+    }
+
+    return {
+      inviteId: invite._id,
+      code: invite.code,
+      expiresAt: invite.expiresAt,
+      labName: lab.name,
+      remainingUses: invite.maxUses - invite.useCount,
+    };
+  },
+});
+
+/** Codes are typed by hand as often as they are pasted, so be generous about what an address looks like and strict about what is sent. */
+function normalizeEmail(input: string): string {
+  return input.trim().toLowerCase();
+}
+
+const EMAIL_SHAPE = /^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/;
+
+/**
+ * Split whatever the PI pasted into addresses.
+ *
+ * A roster arrives from a spreadsheet column, a Slack message or a mail
+ * client's "to" line, so commas, semicolons and newlines all mean the same
+ * thing. Duplicates collapse: mailing the same postdoc twice would also spend
+ * two of the code's uses.
+ */
+export function parseRecipients(input: readonly string[]): string[] {
+  const seen = new Set<string>();
+  for (const chunk of input) {
+    for (const piece of chunk.split(/[\s,;]+/)) {
+      const email = normalizeEmail(piece);
+      if (email.length > 0) {
+        seen.add(email);
+      }
+    }
+  }
+  return [...seen];
+}
+
+/**
+ * Mint a code and mail it to people, instead of reading it out in a meeting.
+ *
+ * The code is the credential either way — this is a delivery channel, not a
+ * second kind of invitation. One code covers the batch rather than one per
+ * address: a per-address code would fill the PI's list with rows nobody reads,
+ * and the ledger already records who actually joined. `maxUses` is set to the
+ * number of recipients, so the code cannot outlive the batch it was minted for,
+ * and revoking it calls the whole batch off.
+ *
+ * Nothing about the recipients is stored. Who was invited is not a fact Margin
+ * needs; who joined is, and that is already a `member.joined` event.
+ *
+ * An action rather than a mutation because sending mail is a network call.
+ * `runMutation` carries the caller's identity, so `createInvite` still does the
+ * PI check — this function adds no authorization of its own.
+ */
+export const inviteByEmail = action({
+  args: {
+    labId: v.id("labs"),
+    /** Free text: one address, a comma-separated line, or a pasted column. */
+    emails: v.array(v.string()),
+    /**
+     * Deliver this existing code rather than minting one.
+     *
+     * Set when re-sending the addresses a previous batch could not reach. The
+     * capacity to admit those people was already granted when the batch was
+     * first minted, so spending it again would be counting the same guests
+     * twice — hence a redelivery, not a new invitation.
+     */
+    inviteId: v.optional(v.id("invites")),
+  },
+  returns: v.object({
+    /** Pass back on a retry so the failures ride the same code. */
+    inviteId: v.id("invites"),
+    code: v.string(),
+    sent: v.number(),
+    /**
+     * The addresses Resend would not take, so the PI can see which ones to
+     * fix rather than being told a number and left to guess.
+     *
+     * Handing them back is not a change of privacy stance: they arrived in
+     * this same call, they are returned to the caller who sent them, and
+     * nothing writes them anywhere. There is still no record of who was
+     * invited — only of who joined.
+     */
+    failed: v.array(v.string()),
+  }),
+  // The return type is spelled out because this action calls `createInvite`
+  // through `api.invites`, i.e. through the type of the module it is declared
+  // in. Left to infer, that is a cycle, and TypeScript resolves it by making
+  // the whole generated `api` implicitly `any` — which silently unpicks the
+  // types of every `useQuery` in the app, not just this one function.
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{
+    inviteId: Id<"invites">;
+    code: string;
+    sent: number;
+    failed: string[];
+  }> => {
+    // Checked before anything is minted: a code created for a batch that could
+    // never be delivered is just litter in the PI's list.
+    if (!emailIsConfigured()) {
+      throw new ConvexError(
+        "Email isn't set up on this deployment. Share the code instead.",
+      );
+    }
+
+    const recipients = parseRecipients(args.emails);
+    if (recipients.length === 0) {
+      throw new ConvexError("Enter at least one email address.");
+    }
+    if (recipients.length > MAX_EMAIL_RECIPIENTS) {
+      throw new ConvexError(
+        `You can invite up to ${MAX_EMAIL_RECIPIENTS} people at a time.`,
+      );
+    }
+    const malformed = recipients.find((email) => !EMAIL_SHAPE.test(email));
+    if (malformed !== undefined) {
+      throw new ConvexError(`${malformed} doesn't look like an email address.`);
+    }
+
+    // Minting is for a new batch only. A retry re-delivers the code the batch
+    // already has, so the lab's admission capacity is what it was when the PI
+    // decided who to invite — not that number again for every send that
+    // half-failed.
+    let invite: {
+      inviteId: Id<"invites">;
+      code: string;
+      expiresAt: number;
+      labName: string;
+    };
+    if (args.inviteId === undefined) {
+      invite = await ctx.runMutation(api.invites.createInvite, {
+        labId: args.labId,
+        maxUses: recipients.length,
+      });
+    } else {
+      const existing = await ctx.runQuery(api.invites.getLiveInvite, {
+        labId: args.labId,
+        inviteId: args.inviteId,
+      });
+      // Capacity is never raised here — a code that cannot seat the retry is
+      // refused out loud, so the PI mints one deliberately rather than
+      // discovering later that the last person to click was turned away.
+      if (recipients.length > existing.remainingUses) {
+        throw new ConvexError(
+          `That code can only admit ${existing.remainingUses} more ${existing.remainingUses === 1 ? "person" : "people"}. Generate a new invite code for the rest.`,
+        );
+      }
+      invite = existing;
+    }
+
+    const viewer = await ctx.runQuery(api.users.viewer, {});
+    const inviter = viewer?.name ?? viewer?.email ?? "Someone";
+
+    // `SITE_URL` is the same origin Convex Auth already sends its sign-in
+    // links to, so the invitation and the sign-in it triggers agree about
+    // where Margin lives. `/app` carries the code through the middleware:
+    // signed out it becomes `/signin?invite=…` and comes back after auth.
+    const siteUrl = (process.env.SITE_URL ?? "").replace(/\/$/, "");
+    const url = `${siteUrl}/app?invite=${encodeURIComponent(invite.code)}`;
+    const expires = new Date(invite.expiresAt).toISOString().slice(0, 10);
+
+    const results = await Promise.allSettled(
+      recipients.map((to) =>
+        sendEmail({
+          to,
+          subject: `${inviter} invited you to ${invite.labName} on Margin`,
+          text: [
+            `${inviter} invited you to ${invite.labName} on Margin.`,
+            "",
+            "Margin is where a lab reads papers together: everyone annotates in the same margin, and the journal club runs off what the group flagged.",
+            "",
+            "Open the invitation:",
+            url,
+            "",
+            `Or join with the code ${invite.code}. It expires on ${expires}.`,
+            "",
+            "Margin",
+          ].join("\n"),
+          html: renderEmail({
+            heading: `${inviter} invited you to ${invite.labName}`,
+            paragraphs: [
+              "Margin is where a lab reads papers together: everyone annotates in the same margin, and the journal club runs off what the group flagged.",
+              "The link opens Margin and takes you straight into the lab.",
+            ],
+            action: { label: "Join the lab", url },
+            footnotes: [
+              `Or join with the code ${invite.code}, which expires on ${expires}.`,
+            ],
+          }),
+        }),
+      ),
+    );
+
+    // Paired back up by position — `Promise.allSettled` preserves the order of
+    // what it was given, so index `i` is `recipients[i]`.
+    const failed = recipients.filter(
+      (_, index) => results[index]?.status === "rejected",
+    );
+    return {
+      inviteId: invite.inviteId,
+      code: invite.code,
+      sent: recipients.length - failed.length,
+      failed,
+    };
   },
 });
 
@@ -197,7 +483,7 @@ export const redeemInvite = mutation({
     const code = normalizeCode(args.code);
 
     if (code.length !== CODE_LENGTH) {
-      throw new ConvexError("Invite codes are 8 characters.");
+      throw refused("Invite codes are 8 characters.");
     }
 
     const invite = await ctx.db
@@ -208,12 +494,12 @@ export const redeemInvite = mutation({
     // Same message for "wrong code", "expired", "revoked", and "full" — an
     // invite code should not be an oracle for which labs exist.
     if (invite === null || !isLive(invite, Date.now())) {
-      throw new ConvexError("That invite code is not valid.");
+      throw refused("That invite code is not valid.");
     }
 
     const lab = await ctx.db.get(invite.labId);
     if (lab === null) {
-      throw new ConvexError("That invite code is not valid.");
+      throw refused("That invite code is not valid.");
     }
 
     const existing = await getMembership(ctx, invite.labId, userId);

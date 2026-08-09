@@ -3,9 +3,19 @@
 import { readableError } from "@/app/(app)/app/_components/errors";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import { PdfAuthError, fetchPdfBytes } from "@/lib/pdf/delivery";
 import { describePdfOpenError, extractPdf } from "@/lib/pdf/extract";
-import { useConvex, useMutation } from "convex/react";
-import { useCallback, useRef, useState } from "react";
+import type { Attempts } from "@/lib/pdf/text-layer-attempts";
+import {
+  NO_ATTEMPTS,
+  decide,
+  markAuthFailed,
+  markRunning,
+  markSettled,
+} from "@/lib/pdf/text-layer-attempts";
+import { useAuthToken } from "@convex-dev/auth/react";
+import { useMutation } from "convex/react";
+import { useCallback, useState } from "react";
 
 /**
  * Read the text layer out of a PDF that Margin already has.
@@ -16,9 +26,17 @@ import { useCallback, useRef, useState } from "react";
  * it can happen: straight after a DOI lookup, while the reader is still
  * standing there, and on the paper record for a paper that got past the first.
  *
- * The URL is fetched imperatively rather than through `useQuery` because this
- * runs in response to an event, and the paper it runs for is not known until
- * that event happens.
+ * The bytes are pulled down imperatively rather than through `useQuery`
+ * because this runs in response to an event, and the paper it runs for is not
+ * known until that event happens. They come from the membership-checked
+ * endpoint in `convex/http.ts` — the same one the reader renders from — so
+ * this hook needs the member's auth token to ask for them.
+ *
+ * Deciding *whether* to read a given paper is not here. It is in
+ * `lib/pdf/text-layer-attempts.ts`, as a pure function, because three
+ * production bugs came out of that decision being tangled up with React's
+ * effect wiring — and because the test suite covers `lib/` and cannot reach a
+ * hook. What is left in this file is the doing: ask, act, report back.
  */
 export type TextLayerPhase =
   | { kind: "idle" }
@@ -29,9 +47,10 @@ export type TextLayerPhase =
 const IDLE: TextLayerPhase = { kind: "idle" };
 
 export function useTextLayer() {
-  const convex = useConvex();
   const saveExtractedText = useMutation(api.papers.saveExtractedText);
   const markIngestFailed = useMutation(api.papers.markIngestFailed);
+
+  const token = useAuthToken();
 
   /**
    * A phase per paper, not one for the hook.
@@ -52,39 +71,67 @@ export function useTextLayer() {
     [phases],
   );
 
-  // Stable, so `read` is too — `PdfPanel` starts extraction from an effect and
-  // a `read` that changed identity every render would be a loop.
+  // Stable, so that a phase update is not by itself a reason for `read` to
+  // change identity — `PdfPanel` starts extraction from an effect that
+  // depends on `read`, and progress reports arrive once per page.
   const setPhase = useCallback((paperId: Id<"papers">, phase: TextLayerPhase) => {
     setPhases((previous) => new Map(previous).set(paperId, phase));
   }, []);
 
-  // Extraction is idempotent but not cheap — eighteen pages of pdf.js — and
-  // the callers below are reactive, so they will ask more than once for the
-  // same paper. One attempt each.
-  const attempted = useRef<Set<string>>(new Set());
+  /**
+   * Who has had a go, in React state rather than a ref — see
+   * `lib/pdf/text-layer-attempts.ts` for the rules and the invariant.
+   *
+   * State, specifically, is the mechanism. Every transition is a new map, so
+   * every transition changes `read`'s identity, so every transition re-fires
+   * the caller's effect and asks `decide` again. That is what makes a paper
+   * released by an auth failure get picked up: the release *is* the signal.
+   * Three bugs came out of the previous arrangement, where the retry rode on
+   * some dependency happening to change at the right moment and the third
+   * case was one where none did.
+   */
+  const [attempts, setAttempts] = useState<Attempts>(NO_ATTEMPTS);
 
   const read = useCallback(
-    /** `force` is somebody pressing the button again; the guard is for the
-     *  callers that ask automatically. */
+    /**
+     * Ask whether this paper may be read, and if so read it.
+     *
+     * Callers ask freely and often — an effect re-runs on every attempt
+     * transition — so most calls end at `decide`. `force` is somebody
+     * pressing the button, which overrides "already had its turn" but not
+     * "already running".
+     */
     async (paperId: Id<"papers">, force = false): Promise<boolean> => {
-      if (!force && attempted.current.has(paperId)) {
+      const decision = decide({ paperId, token, forced: force }, attempts);
+
+      if (decision.kind === "skip") {
         return false;
       }
-      attempted.current.add(paperId);
+      if (decision.kind === "wait") {
+        // Nothing is recorded about a paper we never looked at — that is the
+        // whole point of `wait`, and `decide` will say `fetch` for it the
+        // moment a session exists.
+        if (force) {
+          // Except that silence in answer to a press reads as a dead control.
+          // A phase, deliberately: it says so in the panel without touching
+          // the paper's stored ingest state, because there is still nothing
+          // wrong with the file.
+          setPhase(paperId, {
+            kind: "failed",
+            message: "Still signing you in. Try that again in a moment.",
+          });
+        }
+        return false;
+      }
+
+      // Claim the paper before the first await, so the asks that arrive while
+      // this runs are answered `skip` rather than starting a second pdf.js
+      // over the same file.
+      setAttempts((current) => markRunning(current, paperId));
 
       try {
         setPhase(paperId, { kind: "working", message: "Fetching the PDF…" });
-        const url = await convex.query(api.papers.getPdfUrl, { paperId });
-        if (url === null || url === undefined) {
-          throw new Error("The stored file has gone missing.");
-        }
-        const response = await fetch(url);
-        if (!response.ok) {
-          // Without this, a 404 body goes to pdf.js and comes back as
-          // "couldn't read that PDF" — which blames the file for the fetch.
-          throw new Error(`The stored file came back ${response.status}.`);
-        }
-        const data = await response.arrayBuffer();
+        const data = await fetchPdfBytes(paperId, decision.token);
         const extraction = await extractPdf(data, {
           onProgress: (pagesDone, pages) =>
             setPhase(paperId, {
@@ -93,9 +140,29 @@ export function useTextLayer() {
             }),
         });
         await saveExtractedText({ paperId, pages: extraction.pages });
+        setAttempts((current) => markSettled(current, paperId));
         setPhase(paperId, { kind: "done" });
         return true;
       } catch (caught) {
+        // A session that died under this attempt is not a verdict on the
+        // file, so the paper goes back to `auth-failed` rather than `settled`
+        // — recorded against the token that failed, which is what lets a
+        // refreshed session try again and an unchanged one not spin. It
+        // carries its own sentence too: the generic classifiers below would
+        // flatten "your session has expired" into "that PDF wouldn't open",
+        // the one reading that sends a member off to re-upload a good file.
+        if (caught instanceof PdfAuthError) {
+          setAttempts((current) =>
+            markAuthFailed(current, paperId, decision.token),
+          );
+          setPhase(paperId, { kind: "failed", message: caught.message });
+          return false;
+        }
+
+        // Everything else *is* a verdict on the file, and the paper has had
+        // its turn.
+        setAttempts((current) => markSettled(current, paperId));
+
         // A stored file can be password-protected or damaged too — every
         // open-access copy fetched by DOI lands here unread. Same order as the
         // attach flows: the pdf.js classifier speaks for the failures it
@@ -104,6 +171,7 @@ export function useTextLayer() {
           describePdfOpenError(caught) ??
           readableError(caught, "That PDF wouldn't open.");
         setPhase(paperId, { kind: "failed", message });
+
         try {
           // Otherwise it sits at "text pending" forever, indistinguishable
           // from a paper nobody has opened yet.
@@ -115,7 +183,10 @@ export function useTextLayer() {
         return false;
       }
     },
-    [convex, saveExtractedText, markIngestFailed, setPhase],
+    // Every input `decide` reads is a dependency here, which is the property
+    // the whole arrangement rests on: there is no change to the token or to
+    // the attempts map that fails to re-ask the question.
+    [attempts, token, saveExtractedText, markIngestFailed, setPhase],
   );
 
   return { phaseFor, read };

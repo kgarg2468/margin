@@ -1,0 +1,227 @@
+import { normalizeTags } from "./tags";
+
+/**
+ * What a member is currently looking at, on a shelf of a few hundred papers.
+ *
+ * Three axes, and deliberately only three: the tags a paper wears, the
+ * collection it sits in, and whether it can actually be read yet. Everything
+ * here is a property of the paper as the lab filed it, which is what makes a
+ * filter worth *saving* — the same three questions are the ones a member asks
+ * again next week.
+ *
+ * The typed-into box is not part of it (see `matchesText`). Text is how you
+ * find one paper you have in mind right now; a saved filter is a shelf you keep
+ * coming back to, and saving "the letters I typed at 4pm on Tuesday" under a
+ * name would be filing the question rather than the answer.
+ */
+
+export type IngestStatusFilter =
+  | "needs-pdf"
+  | "pending"
+  | "extracting"
+  | "ready"
+  | "failed";
+
+export type LibraryFilter = {
+  /** ANDed: a paper must wear every one of them. A filter narrows. */
+  tags: string[];
+  /** Ids are opaque here — this module never resolves one, it is handed the members. */
+  collectionId: string | null;
+  ingestStatus: IngestStatusFilter | null;
+};
+
+export const emptyFilter: LibraryFilter = {
+  tags: [],
+  collectionId: null,
+  ingestStatus: null,
+};
+
+/** The shape this module needs of a paper, and nothing more. */
+export type FilterablePaper = {
+  _id: string;
+  title: string;
+  authors?: readonly string[];
+  year?: number;
+  venue?: string;
+  ingestStatus: IngestStatusFilter;
+  tags?: readonly string[];
+};
+
+export function normalizeFilter(filter: LibraryFilter): LibraryFilter {
+  return {
+    tags: normalizeTags(filter.tags),
+    collectionId: filter.collectionId,
+    ingestStatus: filter.ingestStatus,
+  };
+}
+
+/** Nothing selected: the whole shelf, which is the state that needs no chrome. */
+export function isEmptyFilter(filter: LibraryFilter): boolean {
+  return (
+    filter.tags.length === 0 &&
+    filter.collectionId === null &&
+    filter.ingestStatus === null
+  );
+}
+
+/**
+ * Whether two filters ask the same question — tag order is not part of the
+ * question, so it is not part of the comparison. Used to mark which saved
+ * filter, if any, is the one currently applied.
+ */
+export function filtersEqual(a: LibraryFilter, b: LibraryFilter): boolean {
+  const left = normalizeFilter(a);
+  const right = normalizeFilter(b);
+  return (
+    left.collectionId === right.collectionId &&
+    left.ingestStatus === right.ingestStatus &&
+    left.tags.length === right.tags.length &&
+    [...left.tags].sort().join("\u0000") ===
+      [...right.tags].sort().join("\u0000")
+  );
+}
+
+export function toggleTag(filter: LibraryFilter, tag: string): LibraryFilter {
+  const [normalized] = normalizeTags([tag]);
+  if (normalized === undefined) {
+    return filter;
+  }
+  return {
+    ...filter,
+    tags: filter.tags.includes(normalized)
+      ? filter.tags.filter((existing) => existing !== normalized)
+      : [...filter.tags, normalized],
+  };
+}
+
+/**
+ * Free text against the parts of a record a person would recognize on sight:
+ * title, authors, venue, year.
+ *
+ * Every word has to land somewhere, but they need not land in the same field —
+ * "franklin 1953" is a perfectly good way to mean one paper. Not a search: the
+ * text inside PDFs is ⌘K's business, and this only ever narrows rows that are
+ * already on the page.
+ */
+export function matchesText(paper: FilterablePaper, text: string): boolean {
+  const words = text.toLowerCase().split(/\s+/).filter((word) => word.length > 0);
+  if (words.length === 0) {
+    return true;
+  }
+  const haystack = [
+    paper.title,
+    ...(paper.authors ?? []),
+    paper.venue ?? "",
+    paper.year?.toString() ?? "",
+    ...(paper.tags ?? []),
+  ]
+    .join(" ")
+    .toLowerCase();
+  return words.every((word) => haystack.includes(word));
+}
+
+/**
+ * `collectionMembers` is the set of paper ids in the selected collection, or
+ * `null` when no collection is selected — passed in rather than looked up
+ * because this module holds no data and a filter that had to fetch would stop
+ * being testable in a unit test.
+ *
+ * A selected collection that has been deleted out from under the filter matches
+ * nothing, which is the honest answer: the shelf it named is gone.
+ */
+export function matchesFilter(
+  paper: FilterablePaper,
+  filter: LibraryFilter,
+  collectionMembers: ReadonlySet<string> | null,
+): boolean {
+  if (filter.ingestStatus !== null && paper.ingestStatus !== filter.ingestStatus) {
+    return false;
+  }
+  if (filter.collectionId !== null) {
+    if (collectionMembers === null || !collectionMembers.has(paper._id)) {
+      return false;
+    }
+  }
+  if (filter.tags.length > 0) {
+    const worn = new Set(normalizeTags(paper.tags ?? []));
+    if (!normalizeTags(filter.tags).every((tag) => worn.has(tag))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * The shelf as it should currently be drawn.
+ *
+ * When a collection is selected the collection's own order wins: a collection
+ * is an *ordered* list — "Foundational" reads first paper first — and handing
+ * that back in library order (newest first) would throw away the only thing
+ * that makes it different from a tag.
+ */
+export function applyLibraryFilter<P extends FilterablePaper>(
+  papers: readonly P[],
+  options: {
+    filter: LibraryFilter;
+    text?: string;
+    /** The selected collection's `paperIds`, in its order. */
+    collectionPaperIds?: readonly string[] | null;
+  },
+): P[] {
+  const { filter, text = "" } = options;
+  const collectionPaperIds = options.collectionPaperIds ?? null;
+  const members =
+    filter.collectionId === null || collectionPaperIds === null
+      ? null
+      : new Set(collectionPaperIds);
+
+  const matched = papers.filter(
+    (paper) => matchesFilter(paper, filter, members) && matchesText(paper, text),
+  );
+
+  if (filter.collectionId === null || collectionPaperIds === null) {
+    return matched;
+  }
+
+  const rank = new Map(collectionPaperIds.map((id, index) => [id, index]));
+  return matched
+    .slice()
+    .sort(
+      (a, b) =>
+        (rank.get(a._id) ?? Number.MAX_SAFE_INTEGER) -
+        (rank.get(b._id) ?? Number.MAX_SAFE_INTEGER),
+    );
+}
+
+const statusWords: Record<IngestStatusFilter, string> = {
+  "needs-pdf": "needs a PDF",
+  pending: "text pending",
+  extracting: "being read",
+  ready: "ready to read",
+  failed: "ingest failed",
+};
+
+/**
+ * The filter as a sentence, for the line above the list and for the name a
+ * saved filter suggests for itself. Written the way a person would say it out
+ * loud, because it is read in a place where a row of chips would just be the
+ * controls again.
+ */
+export function describeFilter(
+  filter: LibraryFilter,
+  context: { collectionName?: string | null } = {},
+): string {
+  const parts: string[] = [];
+  const collectionName = context.collectionName ?? null;
+  if (filter.collectionId !== null) {
+    parts.push(collectionName === null ? "a deleted collection" : collectionName);
+  }
+  const tags = normalizeTags(filter.tags);
+  if (tags.length > 0) {
+    parts.push(tags.map((tag) => `#${tag}`).join(" + "));
+  }
+  if (filter.ingestStatus !== null) {
+    parts.push(statusWords[filter.ingestStatus]);
+  }
+  return parts.length === 0 ? "Everything" : parts.join(" · ");
+}

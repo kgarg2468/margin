@@ -121,3 +121,17 @@ export function openedFromKeyboard(event: Event | undefined): boolean {
     event.detail === 0
   );
 }
+
+/**
+ * A key, drawn as a key: the brass label on a catalogue drawer rather than a
+ * badge. Used for the ⌘K affordance in the rail and for the legend along the
+ * bottom of the palette, which is why it lives here and not in either of them.
+ *
+ * Not `chipClass`: a chip states a fact about a thing on the page, a keycap
+ * names something you can press. Tabular figures and a hair of extra tracking
+ * so `⌘K` and `esc` sit at the same optical weight.
+ */
+export const keycapClass =
+  "inline-flex min-w-5 items-center justify-center rounded-[3px] border border-rule " +
+  "bg-surface-sunken px-1.5 py-0.5 font-sans text-[10px] tabular-nums " +
+  "tracking-[0.06em] text-ink-faint";

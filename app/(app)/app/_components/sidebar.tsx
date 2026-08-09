@@ -1,19 +1,15 @@
 "use client";
 
 import { api } from "@/convex/_generated/api";
-import { shortcutLabel } from "@/lib/command";
-import {
-  chipClass,
-  eyebrowClass,
-  linkButtonClass,
-  skeletonClass,
-} from "@/lib/ui";
+import { eyebrowClass, linkButtonClass, skeletonClass } from "@/lib/ui";
 import { useAuthActions } from "@convex-dev/auth/react";
 import { useQuery } from "convex-helpers/react/cache/hooks";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
+import { SearchAffordance } from "./command-palette";
+import type { LabSummary } from "./lab-provider";
 import { useLabs } from "./lab-provider";
+import { NotificationRail } from "./notifications";
 import { Select } from "./select";
 
 /** The product, in two rooms: what the lab is reading, and when it meets. */
@@ -27,7 +23,6 @@ export function Sidebar() {
   const viewer = useQuery(api.users.viewer);
   const { signOut } = useAuthActions();
   const pathname = usePathname();
-  const shortcut = useShortcut();
 
   return (
     <aside className="flex shrink-0 flex-col gap-8 border-b border-rule bg-surface-sunken px-6 py-6 md:sticky md:top-0 md:h-screen md:w-64 md:self-start md:overflow-y-auto md:border-b-0 md:border-r md:py-8">
@@ -57,6 +52,17 @@ export function Sidebar() {
           />
         )}
       </div>
+
+      {/* The catalogue drawer, where a catalogue drawer belongs: under the
+          lab it searches and above the rooms it searches through. Only once
+          there is a lab — there is nothing to look for before that. */}
+      {currentLab !== null && <SearchAffordance />}
+
+      {/* Your pigeonhole, between the drawer and the rooms: the two things
+          addressed to you in particular — somebody named you, somebody
+          answered you — and nothing ambient. Everything ambient is the
+          digest's job, and it keeps to its boundaries. */}
+      {currentLab !== null && <NotificationRail labId={currentLab._id} />}
 
       <nav className="flex flex-col gap-4">
         <span className={eyebrowClass}>Sections</span>
@@ -96,33 +102,14 @@ export function Sidebar() {
         </ul>
       </nav>
 
+      {currentLab !== null && <Collections labId={currentLab._id} />}
+
       <div className="mt-auto flex flex-col gap-2 border-t border-rule pt-5">
         {viewer !== undefined && viewer !== null && (
           <span className="truncate font-sans text-sm text-ink-muted">
             {viewer.name ?? viewer.email}
           </span>
         )}
-        {/* The palette is invisible until it is summoned, so the rail carries
-            the only thing that says it exists. It is text, not a button: the
-            shortcut is the affordance, and a second control that opens the
-            same sheet would teach the slower of the two ways.
-
-            Rendered from the first paint and merely hidden until the modifier
-            is known, rather than mounted when the answer arrives: the row is
-            the same height either way, so the footer's geometry is settled
-            before hydration and nothing below it moves. An element that
-            appeared a commit later would push the sign-out down after the eye
-            had already found it. `invisible` also takes it out of the
-            accessibility tree, so nothing announces an empty chip. */}
-        <span
-          className={
-            "flex items-center gap-2 font-sans text-xs text-ink-faint " +
-            (shortcut === null ? "invisible" : "")
-          }
-        >
-          <kbd className={chipClass}>{shortcut ?? "⌘K"}</kbd>
-          Commands
-        </span>
         {/*
           A document navigation, not `router.push` — the one place in the app
           where throwing the JS context away is the point.
@@ -156,20 +143,47 @@ export function Sidebar() {
 }
 
 /**
- * How the ⌘K shortcut is written on *this* machine, or `null` until it is
- * known.
+ * The lab's shelves, under the rooms they are shelves in.
  *
- * The server cannot know which modifier the reader's keyboard has, so it
- * cannot render either answer without risking a hydration mismatch — and
- * guessing the common one would leave Mac users reading "Ctrl K", trying it,
- * and getting a kill-line for their trouble. So the chip is absent for one
- * commit and then correct, rather than wrong for a frame. `shortcutLabel` is
- * the pure half, tested in `lib/command.test.ts`.
+ * A collection is not a room of its own — it is the library with a filter on,
+ * so each of these is a link into `/app/library?collection=…` rather than a
+ * route. They are set a size down from the sections and carry no note: a
+ * section needs explaining once, a shelf explains itself by its name.
+ *
+ * No active mark, deliberately. Which collection is showing is a question about
+ * the query string, and the shell reads the URL only on mount (see
+ * `lab-provider.tsx` on why `useSearchParams` is not used here) — a mark that
+ * went stale the moment you picked a second shelf would be worse than none.
+ * The library's own heading takes the collection's name, which is where the
+ * answer belongs.
  */
-function useShortcut(): string | null {
-  const [shortcut, setShortcut] = useState<string | null>(null);
-  useEffect(() => {
-    setShortcut(shortcutLabel(navigator.platform));
-  }, []);
-  return shortcut;
+function Collections({ labId }: { labId: LabSummary["_id"] }) {
+  const collections = useQuery(api.collections.listCollections, { labId });
+
+  if (collections === undefined || collections.length === 0) {
+    return null;
+  }
+
+  return (
+    <nav className="flex flex-col gap-3">
+      <span className={eyebrowClass}>Collections</span>
+      <ul className="flex flex-col gap-0.5">
+        {collections.map((collection) => (
+          <li key={collection._id}>
+            <Link
+              href={`/app/library?collection=${collection._id}`}
+              className="-mx-3 flex items-baseline justify-between gap-2 rounded-r-sm border-l-2 border-transparent px-3 py-1 transition-colors hover:border-accent hover:bg-surface/70"
+            >
+              <span className="truncate font-sans text-sm text-ink-muted">
+                {collection.name}
+              </span>
+              <span className="shrink-0 font-sans text-xs tabular-nums text-ink-faint">
+                {collection.paperCount}
+              </span>
+            </Link>
+          </li>
+        ))}
+      </ul>
+    </nav>
+  );
 }

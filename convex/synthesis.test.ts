@@ -4,9 +4,15 @@ import {
   WITHDRAWN_ITEM_TEXT,
   annotationRefs,
   applyWithdrawals,
+  approvalSnapshot,
+  assembleMarkdown,
   buildUserPrompt,
+  collectCitations,
+  countWithdrawn,
   extractJson,
   fence,
+  isSameApproval,
+  isSameDraft,
   isStillShared,
   nameIndex,
   sanitizeSections,
@@ -23,6 +29,11 @@ import {
  * keeps moving, so `isStillShared` and `applyWithdrawals` decide what a
  * synthesis is still allowed to say once the notes behind it have been
  * withdrawn or made private.
+ *
+ * Then the handover to a person: `assembleMarkdown` is the one-way door from
+ * checkable sections to editable prose, and `countWithdrawn` is what tells a
+ * lab its approved copy has stopped being current — the two halves of a
+ * write-up that is a human artifact without pretending to be a live one.
  */
 
 const id = (n: number) => `annotation_${n}` as Id<"annotations">;
@@ -408,6 +419,250 @@ describe("applyWithdrawals", () => {
       "open-questions",
       "summary",
     ]);
+  });
+});
+
+describe("collectCitations", () => {
+  it("reads every citation once, however many items repeat it", () => {
+    const cited = collectCitations([
+      {
+        key: "summary" as const,
+        heading: "What the discussion covered",
+        items: [
+          { text: "One.", attribution: ["Ana Ruiz"], annotationIds: [id(1), id(2)] },
+          { text: "Two.", attribution: ["Ana Ruiz"], annotationIds: [id(2)] },
+        ],
+      },
+      {
+        key: "open-questions" as const,
+        heading: "Open questions",
+        items: [
+          { text: "Three.", attribution: ["Ben Okafor"], annotationIds: [id(2), id(3)] },
+        ],
+      },
+    ]);
+    expect([...cited]).toEqual([id(1), id(2), id(3)]);
+  });
+
+  it("is empty for a write-up with no items", () => {
+    expect(
+      collectCitations([
+        { key: "summary" as const, heading: "What the discussion covered", items: [] },
+      ]).size,
+    ).toBe(0);
+  });
+});
+
+describe("assembleMarkdown", () => {
+  const covered = {
+    key: "summary" as const,
+    heading: "What the discussion covered",
+    items: [
+      {
+        text: "The ablation is the whole result.",
+        attribution: ["Ana Ruiz"],
+        annotationIds: [id(1)],
+      },
+      {
+        text: "Nobody could reproduce table 3.",
+        attribution: ["Ana Ruiz", "Ben Okafor"],
+        annotationIds: [id(2), id(3)],
+      },
+    ],
+  };
+  const empty = {
+    key: "open-questions" as const,
+    heading: "Open questions",
+    items: [],
+  };
+
+  it("writes a heading and a bullet an item, attribution kept as text", () => {
+    // Once this is prose, attribution is only what the prose says. A draft
+    // that dropped the names would hand the approver the lab's thinking with
+    // nobody's name on it, which is the one thing the whole feature refuses.
+    expect(assembleMarkdown([covered])).toBe(
+      [
+        "## What the discussion covered",
+        "",
+        "- The ablation is the whole result. — Ana Ruiz",
+        "- Nobody could reproduce table 3. — Ana Ruiz, Ben Okafor",
+      ].join("\n"),
+    );
+  });
+
+  it("leaves an empty section out rather than heading nothing", () => {
+    const markdown = assembleMarkdown([covered, empty]);
+    expect(markdown).not.toContain("Open questions");
+  });
+
+  it("separates the sections it does write with a blank line", () => {
+    const markdown = assembleMarkdown([
+      covered,
+      { ...empty, items: [{ text: "Does it hold at scale?", attribution: [], annotationIds: [id(1)] }] },
+    ]);
+    expect(markdown).toContain("— Ana Ruiz, Ben Okafor\n\n## Open questions");
+  });
+
+  it("drops the dash entirely when an item is attributed to nobody", () => {
+    // The partial-withdrawal case: the sentence stands, the names don't.
+    const markdown = assembleMarkdown([
+      { ...covered, items: [{ text: "Still true.", attribution: [], annotationIds: [id(1)] }] },
+    ]);
+    expect(markdown).toContain("- Still true.");
+    expect(markdown).not.toContain("—");
+  });
+
+  it("flattens an item that arrived with line breaks in it", () => {
+    // A newline inside a bullet ends the bullet, and the rest of the sentence
+    // would read as a paragraph somebody typed.
+    const markdown = assembleMarkdown([
+      {
+        ...covered,
+        items: [
+          {
+            text: "A claim,\nand   its qualifier.",
+            attribution: ["Ana Ruiz"],
+            annotationIds: [id(1)],
+          },
+        ],
+      },
+    ]);
+    expect(markdown).toContain("- A claim, and its qualifier. — Ana Ruiz");
+  });
+
+  it("hands the approver the redaction, never the sentence it replaced", () => {
+    // The draft is assembled from the redacted sections. Assembling from the
+    // stored ones would put a withdrawn member's writing into a textarea and
+    // then into the lab's official record — the neatest imaginable way around
+    // `visibility: "private"`.
+    const markdown = assembleMarkdown(applyWithdrawals([covered], new Set()));
+    expect(markdown).toContain(`- ${WITHDRAWN_ITEM_TEXT}`);
+    expect(markdown).not.toContain("ablation");
+  });
+
+  it("is empty for a write-up with nothing in any section", () => {
+    expect(assembleMarkdown([empty])).toBe("");
+  });
+});
+
+describe("isSameDraft", () => {
+  /**
+   * The pairing this protects: an approved copy and the citation snapshot it
+   * is measured against have to describe the *same* draft. The approval form
+   * is open for as long as it takes to rewrite a page, and a generation run
+   * finishing in that window replaces the draft underneath it — so approving
+   * against "whatever is current" would measure one person's prose against
+   * another draft's notes, and every staleness verdict afterwards would be
+   * quietly wrong.
+   */
+  it("accepts the draft the text was actually edited from", () => {
+    expect(isSameDraft({ generatedAt: 1_000 }, 1_000)).toBe(true);
+  });
+
+  it("refuses a draft that was written again while the form was open", () => {
+    expect(isSameDraft({ generatedAt: 2_000 }, 1_000)).toBe(false);
+  });
+
+  it("refuses a stored draft older than the one claimed", () => {
+    // Not reachable through the UI, and refused all the same: the check is
+    // that the two are the same draft, not that one is newer than the other.
+    expect(isSameDraft({ generatedAt: 1_000 }, 2_000)).toBe(false);
+  });
+
+  it("refuses when there is no draft at all", () => {
+    expect(isSameDraft(null, 1_000)).toBe(false);
+  });
+
+  it("does not treat a missing draft as matching a zero timestamp", () => {
+    expect(isSameDraft(null, 0)).toBe(false);
+  });
+});
+
+describe("isSameApproval", () => {
+  it("accepts the copy the revision was opened on", () => {
+    expect(isSameApproval({ synthesisApprovedAt: 1_000 }, 1_000)).toBe(true);
+  });
+
+  it("refuses when somebody else approved a new version meanwhile", () => {
+    expect(isSameApproval({ synthesisApprovedAt: 2_000 }, 1_000)).toBe(false);
+  });
+
+  it("refuses when there is no approved copy at all", () => {
+    expect(isSameApproval({}, 1_000)).toBe(false);
+    expect(isSameApproval({ synthesisApprovedAt: undefined }, 0)).toBe(false);
+  });
+});
+
+describe("approvalSnapshot", () => {
+  const live = (...ns: number[]) => new Set(ns.map(id));
+
+  it("keeps the cited notes that are still shared and drops the rest", () => {
+    expect(approvalSnapshot([id(1), id(2), id(3)], live(1, 3))).toEqual([
+      id(1),
+      id(3),
+    ]);
+  });
+
+  it("does not adopt a shared note the prose never cited", () => {
+    expect(approvalSnapshot([id(1)], live(1, 2, 3))).toEqual([id(1)]);
+  });
+
+  it("takes a stale copy's count back to zero when it is approved again", () => {
+    // The remedy the banner asks for has to actually work. A withdrawn note
+    // left in the snapshot would keep the warning up through every
+    // re-approval, and a warning that cannot be discharged is one people
+    // learn to scroll past.
+    const cited = [id(1), id(2), id(3)];
+    const shared = live(2, 3);
+    expect(countWithdrawn(cited, shared)).toBe(1);
+    expect(countWithdrawn(approvalSnapshot(cited, shared), shared)).toBe(0);
+  });
+
+  it("carries a revision forward on its own citations, not the new draft's", () => {
+    // The reapproval bug, as a property. Prose seeded from the approved copy
+    // rests on the notes *that copy* was approved against; a draft generated
+    // since cites whatever the margin says today. Binding the revision to the
+    // draft would count withdrawals against notes this text never came from —
+    // wrong in both directions, silent either way.
+    const approvedAgainst = [id(1), id(2)];
+    const theNewDraftCites = [id(7), id(8)];
+    const shared = live(1, 2, 7, 8);
+
+    const carried = approvalSnapshot(approvedAgainst, shared);
+    expect(carried).toEqual(approvedAgainst);
+    expect(carried.some((one) => theNewDraftCites.includes(one))).toBe(false);
+
+    // And the verdict that follows from it: withdrawing a note the new draft
+    // cites says nothing about a copy written before that draft existed.
+    expect(countWithdrawn(carried, live(1, 2))).toBe(0);
+    // Withdrawing one the copy actually rests on does.
+    expect(countWithdrawn(carried, live(2, 7, 8))).toBe(1);
+  });
+
+  it("carries nothing forward from a copy that rested on nothing", () => {
+    expect(approvalSnapshot([], live(1))).toEqual([]);
+  });
+});
+
+describe("countWithdrawn", () => {
+  const live = (...ns: number[]) => new Set(ns.map(id));
+
+  it("is zero while every note the copy was checked against is still shared", () => {
+    expect(countWithdrawn([id(1), id(2)], live(1, 2))).toBe(0);
+  });
+
+  it("counts the notes that have gone since approval", () => {
+    expect(countWithdrawn([id(1), id(2), id(3)], live(2))).toBe(2);
+  });
+
+  it("ignores notes that are shared but were never in the snapshot", () => {
+    // The snapshot is the question. A note written after the approval has
+    // nothing to say about whether the approved copy is still current.
+    expect(countWithdrawn([id(1)], live(1, 2, 3))).toBe(0);
+  });
+
+  it("is zero for a copy approved against nothing at all", () => {
+    expect(countWithdrawn([], live())).toBe(0);
   });
 });
 

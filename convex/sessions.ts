@@ -131,6 +131,12 @@ const sessionDetail = v.object({
    * whoever scheduled it, or the PI.
    */
   canManage: v.boolean(),
+  /**
+   * Whether the caller may approve the write-up — the presenter or the PI
+   * only. A narrower rule than `canManage`, and sent separately so the client
+   * never has to re-derive it (see `canApprove`).
+   */
+  canApprove: v.boolean(),
 });
 
 function toSummary(
@@ -172,6 +178,7 @@ function toDetail(
     synthesisApprovedAt: session.synthesisApprovedAt,
     createdAt: session._creationTime,
     canManage: canManage(session, membership),
+    canApprove: canApprove(session, membership),
   };
 }
 
@@ -228,6 +235,30 @@ function canManage(
     membership.role === "pi" ||
     session.presenterId === membership.userId ||
     session.createdBy === membership.userId
+  );
+}
+
+/**
+ * Who may sign the write-up off: the presenter, or the PI. Deliberately
+ * narrower than `canManage`.
+ *
+ * Whoever put the session on the calendar can move it, start it, and generate
+ * a draft — that is clerical work, and making the PI a bottleneck for it helps
+ * nobody. Approving is not clerical. The approved copy is the lab's account of
+ * what it worked out, published under the name of the person who presented it,
+ * and an organiser who booked the room has no standing to put words in that
+ * person's mouth. The two people who do are the one who ran the discussion and
+ * the one who answers for the lab.
+ *
+ * Exported because `convex/synthesis.ts` enforces the same rule on the way in
+ * and a duplicated permission check is a permission check that drifts.
+ */
+export function canApprove(
+  session: Doc<"sessions">,
+  membership: Doc<"memberships">,
+): boolean {
+  return (
+    membership.role === "pi" || session.presenterId === membership.userId
   );
 }
 

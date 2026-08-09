@@ -12,11 +12,13 @@ import {
 import { useMutation } from "convex/react";
 import { useState } from "react";
 import { readableError } from "./errors";
-import { useLabs } from "./lab-provider";
+import { InviteNotice, useLabs } from "./lab-provider";
 
 export function Onboarding() {
   return (
     <div className="flex flex-col gap-10">
+      <InviteNotice />
+
       <header className="flex flex-col gap-3 border-l border-rule pl-6">
         <h1 className="font-serif text-4xl tracking-tight text-ink-strong">
           Two ways in

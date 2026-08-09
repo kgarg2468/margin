@@ -21,6 +21,8 @@ import {
   nextRedirectHop,
 } from "./lib/scholarly";
 import { ingestStatus } from "./schema";
+import { MAX_TAGS_PER_PAPER, normalizeTags } from "../lib/library/tags";
+import { referenceIdentity } from "../lib/reference-import/normalize";
 
 /**
  * Paper ingest and the library.
@@ -81,6 +83,8 @@ const paperSummary = v.object({
   hasPdf: v.boolean(),
   pageCount: v.optional(v.number()),
   addedAt: v.number(),
+  /** Always an array to the client, empty where the field is absent — see `toSummary`. */
+  tags: v.array(v.string()),
 });
 
 const paperDetail = v.object({
@@ -100,6 +104,7 @@ const paperDetail = v.object({
   pageCount: v.optional(v.number()),
   addedAt: v.number(),
   addedByName: v.optional(v.string()),
+  tags: v.array(v.string()),
 });
 
 function toSummary(paper: Doc<"papers">) {
@@ -114,6 +119,9 @@ function toSummary(paper: Doc<"papers">) {
     hasPdf: paper.storageId !== undefined,
     pageCount: paper.pageCount,
     addedAt: paper._creationTime,
+    // An absent field and an empty list mean the same thing to a reader, and
+    // one of the two makes every call site check. The client gets the array.
+    tags: paper.tags ?? [],
   };
 }
 
@@ -326,6 +334,74 @@ export const createFromUpload = mutation({
     });
 
     return paperId;
+  },
+});
+
+/**
+ * Put a citation export's metadata-only record on the shelf.
+ *
+ * DOI-bearing entries do not come through here: `createFromDoi` owns those,
+ * including normalization, dedupe, and the search for a legal copy. This is
+ * the deliberately narrower door for BibTeX and RIS records with no DOI at
+ * all. They still become the same paper, with the same membership gate and
+ * ledger fact, but wait in `needs-pdf` until a lab member supplies the file.
+ */
+export const createFromMetadata = mutation({
+  args: {
+    labId: v.id("labs"),
+    title: v.string(),
+    authors: v.optional(v.array(v.string())),
+    year: v.optional(v.number()),
+    venue: v.optional(v.string()),
+    abstract: v.optional(v.string()),
+    sourceUrl: v.optional(v.string()),
+  },
+  returns: v.object({
+    paperId: v.id("papers"),
+    title: v.string(),
+    /** True when the title and year were already in this lab's library. */
+    alreadyInLibrary: v.boolean(),
+  }),
+  handler: async (ctx, args) => {
+    const membership = await requireMembership(ctx, args.labId);
+    const title = cleanTitle(args.title);
+    const identity = referenceIdentity(title, args.year);
+    const existing = (
+      await ctx.db
+        .query("papers")
+        .withIndex("by_lab", (q) => q.eq("labId", args.labId))
+        .collect()
+    ).find(
+      (paper) => referenceIdentity(paper.title, paper.year) === identity,
+    );
+    if (existing !== undefined) {
+      return {
+        paperId: existing._id,
+        title: existing.title,
+        alreadyInLibrary: true,
+      };
+    }
+    const paperId = await ctx.db.insert("papers", {
+      labId: args.labId,
+      title,
+      authors: cleanAuthors(args.authors),
+      year: args.year,
+      venue: args.venue,
+      abstract: args.abstract,
+      sourceUrl: args.sourceUrl,
+      ingestStatus: "needs-pdf",
+      addedBy: membership.userId,
+    });
+
+    await recordEvent(ctx, {
+      labId: args.labId,
+      type: "paper.added",
+      actorId: membership.userId,
+      paperId,
+      title,
+    });
+
+    return { paperId, title, alreadyInLibrary: false };
   },
 });
 
@@ -545,30 +621,158 @@ export const getPaper = query({
       pageCount: paper.pageCount,
       addedAt: paper._creationTime,
       addedByName: addedBy?.name ?? addedBy?.email,
+      tags: paper.tags ?? [],
     };
   },
 });
 
+/* -------------------------------------------------------------------------
+ * Tags
+ * ---------------------------------------------------------------------- */
+
 /**
- * A URL for the stored PDF, mintable by members of the paper's lab only.
+ * Put a label on a paper.
  *
- * Read that precisely: the membership check gates the *minting*, not the URL.
- * `storage.getUrl` returns a permanent, unauthenticated link — anyone it is
- * forwarded to can fetch the file, for as long as the file exists, whether or
- * not they are in the lab. For a library that will hold paywalled PDFs that
- * gap has to close, and closing it means serving the bytes through a
- * membership-checked HTTP action instead of handing out a storage URL.
- * Tracked in https://github.com/kgarg2468/margin/issues/9.
+ * Lab-shared by construction: any member can tag, any member can untag, and
+ * there is no per-member view of the result. A tag is the lab's word for a pile
+ * of papers — "methods", "for the grant", "we disagree with this" — and its
+ * whole value is that everyone reads the same one. A personal version of this
+ * would be a saved filter, which is exactly why that other thing exists.
+ *
+ * Idempotent, and quietly so. The autocomplete makes re-adding a label that is
+ * already there a normal thing to do by accident, and neither an error nor a
+ * second ledger row is the right answer to it.
  */
-export const getPdfUrl = query({
+export const tagPaper = mutation({
+  args: { paperId: v.id("papers"), tag: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const { paper, membership } = await requirePaperAccess(ctx, args.paperId);
+
+    const [tag] = normalizeTags([args.tag]);
+    if (tag === undefined) {
+      throw new ConvexError("A tag needs at least one character.");
+    }
+
+    const existing = paper.tags ?? [];
+    if (existing.includes(tag)) {
+      return null;
+    }
+    if (existing.length >= MAX_TAGS_PER_PAPER) {
+      throw new ConvexError(
+        `A paper carries up to ${MAX_TAGS_PER_PAPER} tags. Take one off before adding another.`,
+      );
+    }
+
+    // Re-normalized as a set rather than appended blind: rows written before
+    // this field existed, or by an older client, are not guaranteed canonical,
+    // and a duplicate that differs only in case would be invisible in the UI
+    // and unremovable through it.
+    await ctx.db.patch(paper._id, { tags: normalizeTags([...existing, tag]) });
+
+    await recordEvent(ctx, {
+      labId: paper.labId,
+      type: "paper.tagged",
+      actorId: membership.userId,
+      paperId: paper._id,
+      tag,
+    });
+    return null;
+  },
+});
+
+/** Take a label off. Removing one that isn't there is a no-op, for the reason adding a duplicate is. */
+export const untagPaper = mutation({
+  args: { paperId: v.id("papers"), tag: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const { paper, membership } = await requirePaperAccess(ctx, args.paperId);
+
+    const [tag] = normalizeTags([args.tag]);
+    if (tag === undefined) {
+      return null;
+    }
+
+    const existing = normalizeTags(paper.tags ?? []);
+    if (!existing.includes(tag)) {
+      return null;
+    }
+
+    await ctx.db.patch(paper._id, {
+      tags: existing.filter((existingTag) => existingTag !== tag),
+    });
+
+    await recordEvent(ctx, {
+      labId: paper.labId,
+      type: "paper.untagged",
+      actorId: membership.userId,
+      paperId: paper._id,
+      tag,
+    });
+    return null;
+  },
+});
+
+/**
+ * The lab's vocabulary, commonest first — what the tag input autocompletes
+ * against.
+ *
+ * Counted here rather than in the browser even though `listPapers` already
+ * carries every tag, because the two have different jobs: the library's list is
+ * capped at 200 rows and the vocabulary should not quietly become "the tags on
+ * the most recent 200 papers". This reads the same index without the ceiling,
+ * and returns tags rather than papers.
+ */
+export const listTags = query({
+  args: { labId: v.id("labs") },
+  returns: v.array(v.object({ tag: v.string(), count: v.number() })),
+  handler: async (ctx, args) => {
+    await requireMembership(ctx, args.labId);
+
+    const counts = new Map<string, number>();
+    for await (const paper of ctx.db
+      .query("papers")
+      .withIndex("by_lab", (q) => q.eq("labId", args.labId))) {
+      for (const tag of normalizeTags(paper.tags ?? [])) {
+        counts.set(tag, (counts.get(tag) ?? 0) + 1);
+      }
+    }
+
+    return [...counts.entries()]
+      .map(([tag, count]) => ({ tag, count }))
+      .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
+  },
+});
+
+/**
+ * The membership check behind `GET /pdf`, run on the caller's behalf.
+ *
+ * There used to be a `getPdfUrl` query here that handed back
+ * `storage.getUrl(...)`, and the membership check gated the *minting* rather
+ * than the URL: what came back was a permanent, unauthenticated link that
+ * anybody it was forwarded to could fetch, for as long as the file existed,
+ * whether or not they were in the lab. For a library that will hold paywalled
+ * PDFs that gap had to close, and closing it means the bytes leave through a
+ * membership-checked HTTP action instead (`convex/http.ts`).
+ *
+ * An HTTP action has no database, so it cannot ask this question itself. It
+ * runs this instead, which inherits the caller's identity from the request's
+ * bearer token and so refuses exactly where `getPaper` would. Note what comes
+ * back: a storage id, which is meaningless outside the deployment. No URL for
+ * a PDF is ever handed to a client again.
+ */
+export const pdfForDelivery = internalQuery({
   args: { paperId: v.id("papers") },
-  returns: v.union(v.null(), v.string()),
+  returns: v.union(
+    v.null(),
+    v.object({ storageId: v.id("_storage"), title: v.string() }),
+  ),
   handler: async (ctx, args) => {
     const { paper } = await requirePaperAccess(ctx, args.paperId);
     if (paper.storageId === undefined) {
       return null;
     }
-    return await ctx.storage.getUrl(paper.storageId);
+    return { storageId: paper.storageId, title: paper.title };
   },
 });
 

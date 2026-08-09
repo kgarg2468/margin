@@ -10,7 +10,7 @@ import { useMutation } from "convex/react";
 import { useQuery } from "convex-helpers/react/cache/hooks";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { readableError } from "./errors";
 
 type Digest = FunctionReturnType<typeof api.digests.listMine>[number];
@@ -35,6 +35,9 @@ type DigestItem = Digest["items"][number];
  * summed into a sentence. The first is the reason the digest exists; the second
  * is context. They are drawn to say that: a collision carries a rule and the
  * name of the pair, a coalesced line is a quiet bullet.
+ *
+ * A collision can span two papers (`otherPaperId`), which is the same shape
+ * with a second way in rather than a third kind of line.
  */
 const BOUNDARY_LABEL: Record<Digest["boundary"], string> = {
   "session-prep": "Before the session",
@@ -74,7 +77,7 @@ export function SessionDigest({
       </p>
       <div className="flex flex-col gap-6">
         {mine.map((digest) => (
-          <DigestCard key={digest._id} digest={digest} />
+          <DigestCard key={digest._id} digest={digest} labId={labId} />
         ))}
       </div>
     </section>
@@ -90,10 +93,28 @@ export function SessionDigest({
  */
 export function DigestInbox({ labId }: { labId: Id<"labs"> }) {
   const digests = useQuery(api.digests.listMine, { labId });
+  const catchUp = useMutation(api.digests.catchUp);
   const reduce = useReducedMotion();
   const unread = (digests ?? []).filter(
     (digest) => digest.acknowledgedAt === undefined,
   );
+
+  // Arriving is the boundary. Nothing on the server can know a member was away
+  // until they turn up — Margin keeps no last-active stamp to poll, by
+  // constitution — so the mount is the trigger, and `catchUp` decides. Almost
+  // every call decides nothing: it is idempotent, it never stacks a second
+  // card, and it never moves a cursor. The ref keeps a re-render from asking
+  // twice, and a failure clears it again: a lab's home page must not turn into
+  // an error because a digest could not be built, but nor should one dropped
+  // request cost the member their digest for the whole visit.
+  const asked = useRef<string | null>(null);
+  useEffect(() => {
+    if (asked.current === labId) return;
+    asked.current = labId;
+    void catchUp({ labId }).catch(() => {
+      if (asked.current === labId) asked.current = null;
+    });
+  }, [labId, catchUp]);
 
   // "Caught up" is a put-away, and it should read as one: the acknowledged
   // card folds closed and the page settles, instead of everything below it
@@ -115,8 +136,9 @@ export function DigestInbox({ labId }: { labId: Id<"labs"> }) {
         >
           <h2 className={eyebrowClass}>Since you were away</h2>
           <p className="max-w-prose font-sans text-xs text-ink-faint">
-            Delivered at a boundary — before a session, and as it starts —
-            never on every write. Only you see this.
+            Delivered at a boundary — before a session, as it starts, and when
+            you come back after time away — never on every write. Only you see
+            this.
           </p>
           <div className="flex flex-col gap-6">
             <AnimatePresence initial={false}>
@@ -134,7 +156,7 @@ export function DigestInbox({ labId }: { labId: Id<"labs"> }) {
                         }
                   }
                 >
-                  <DigestCard digest={digest} />
+                  <DigestCard digest={digest} labId={labId} />
                 </motion.div>
               ))}
             </AnimatePresence>
@@ -145,7 +167,13 @@ export function DigestInbox({ labId }: { labId: Id<"labs"> }) {
   );
 }
 
-function DigestCard({ digest }: { digest: Digest }) {
+function DigestCard({
+  digest,
+  labId,
+}: {
+  digest: Digest;
+  labId: Id<"labs">;
+}) {
   const markDigestSeen = useMutation(api.digests.markDigestSeen);
   const markSeen = useMutation(api.digests.markSeen);
   const [error, setError] = useState<string | null>(null);
@@ -210,6 +238,13 @@ function DigestCard({ digest }: { digest: Digest }) {
                   digestId: digest._id,
                 });
               }
+              // A "since you were away" digest is about an absence from the
+              // lab, not from a paper, so clearing it is what moves the
+              // lab-wide cursor — and that cursor is the only thing that
+              // decides when the next absence starts.
+              if (digest.boundary === "since-away") {
+                await markSeen({ labId, digestId: digest._id });
+              }
             } catch (caught) {
               setError(readableError(caught, "That didn't go through."));
             } finally {
@@ -250,12 +285,32 @@ function DigestLine({ item }: { item: DigestItem }) {
         <p className="font-serif text-base leading-relaxed text-ink">
           {item.line}
         </p>
-        <Link
-          href={href}
-          className="font-sans text-xs text-accent underline-offset-4 hover:underline"
-        >
-          Read the passage
-        </Link>
+        {/*
+         * A cross-paper collision has two sides, so it gets two ways in — and
+         * they are not equals. `item.paperId` is the paper the reader
+         * annotated themselves, which is why it keeps the accent link and why
+         * it is the only one "I'm caught up" advances a cursor on. The far
+         * paper is somewhere they may never have been, so it gets the quiet
+         * register: available, not urged. Its title is not a stored field on
+         * the item, but it does not need to be — the line directly above names
+         * both papers, so the label only has to say which of the two this is.
+         */}
+        <span className="flex flex-wrap items-baseline gap-x-4">
+          <Link
+            href={href}
+            className="font-sans text-xs text-accent underline-offset-4 hover:underline"
+          >
+            Read the passage
+          </Link>
+          {item.otherPaperId !== undefined && (
+            <Link
+              href={`/app/library/${item.otherPaperId}/read`}
+              className="font-sans text-xs text-ink-faint underline-offset-4 hover:text-accent hover:underline"
+            >
+              Read the other paper
+            </Link>
+          )}
+        </span>
       </li>
     );
   }

@@ -3,11 +3,18 @@
 import { ConfirmAction } from "@/app/(app)/app/_components/confirm-action";
 import { readableError } from "@/app/(app)/app/_components/errors";
 import { api } from "@/convex/_generated/api";
+import { versionSummary } from "@/lib/annotation-history/history";
+import { collectMentionedIds } from "@/lib/mentions";
 import { errorClass } from "@/lib/ui";
 import { useMutation } from "convex/react";
 import { useState } from "react";
+import { AnnotationHistory } from "./annotation-history";
+import { StatusControl, StatusLine } from "./epistemic-status";
+import type { PickedMention } from "./mention-field";
+import { MentionedBody, MentionField } from "./mention-field";
 import type { AnnotationType } from "./ontology";
 import { typeStyle } from "./ontology";
+import { Reactions } from "./reactions";
 import { TypeChips } from "./type-chips";
 import type { AnchorState, AnnotationId, AnnotationView } from "./types";
 import { VisibilityToggle } from "./visibility-toggle";
@@ -94,10 +101,14 @@ export function AnnotationCard({
   const [editing, setEditing] = useState(false);
   const [replying, setReplying] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
   const [draftBody, setDraftBody] = useState(annotation.body);
   const [replyBody, setReplyBody] = useState("");
+  const [replyPicked, setReplyPicked] = useState<PickedMention[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  const replyMentions = collectMentionedIds(replyBody, replyPicked);
 
   async function run(action: () => Promise<unknown>, fallback: string) {
     setBusy(true);
@@ -120,6 +131,17 @@ export function AnnotationCard({
     annotation.visibility === "lab" &&
     annotation.replyCount > 0 &&
     annotation.parentId === undefined;
+
+  // How many states this note has been in, counting the one on screen. A note
+  // nobody has edited sends nothing, and the card grows no control — which is
+  // the point: history is a thing you can go and find, never a thing that
+  // announces on every card that somebody changed their mind.
+  //
+  // The count comes with the note, so knowing a history exists costs no query;
+  // reading it costs one, and only once somebody asks (see `AnnotationHistory`).
+  // A withdrawn note has no count, because withdrawal takes the drafts too.
+  const versionCount = annotation.versionCount ?? 1;
+  const hasHistory = versionCount > 1 && !annotation.deleted;
 
   // Three replies is a conversation, not a pile: collapsing at that point costs
   // a click to read something that would have fitted anyway.
@@ -158,6 +180,21 @@ export function AnnotationCard({
           {when(annotation.createdAt)}
           {annotation.editedAt !== undefined ? " · edited" : ""}
         </span>
+        {/* Sits in the header rather than down in the action row because it is
+            a fact about the note's provenance, in the line that already holds
+            the other two — when it was written, and whether it has been
+            rewritten. "· 3 versions" reads as the continuation of that
+            sentence, and as a button it is the quietest one on the card. */}
+        {hasHistory && (
+          <button
+            type="button"
+            aria-expanded={showHistory}
+            onClick={() => setShowHistory((was) => !was)}
+            className="tap-target font-sans text-[11px] text-ink-faint underline-offset-4 transition-colors hover:text-accent hover:underline"
+          >
+            · {versionSummary(versionCount)}
+          </button>
+        )}
         {annotation.mine && annotation.visibility === "private" && (
           <span className="rounded-sm border border-rule px-1 font-sans text-[9px] uppercase tracking-[0.12em] text-ink-faint">
             Private
@@ -285,10 +322,36 @@ export function AnnotationCard({
         </div>
       ) : (
         annotation.body.length > 0 && (
-          <p className="mt-1.5 whitespace-pre-wrap font-serif text-sm leading-relaxed text-ink">
-            {annotation.body}
-          </p>
+          <MentionedBody
+            body={annotation.body}
+            names={annotation.mentionNames}
+            className="mt-1.5 whitespace-pre-wrap font-serif text-sm leading-relaxed text-ink"
+          />
         )
+      )}
+
+      {/* Directly under the body, because it is the same body earlier: the
+          panel unrolls beneath what the note says now and lists what it said
+          before, in the same serif and the same column. Above the marks and
+          the thread, which are what other people said *about* it. */}
+      {hasHistory && (
+        <AnnotationHistory annotation={annotation} open={showHistory} />
+      )}
+
+      {/* Under the note and above the marks, which is the order the three
+          things happened in: somebody wrote this, then the lab ruled on it,
+          then people said what they thought of it. A verdict placed down in
+          the action row would read as another control; placed here it reads as
+          what it is — a sentence about the sentence above it. */}
+      <StatusLine annotation={annotation} />
+
+      {/* Sits with the note rather than down in the action row, because a mark
+          is a thing said *about the note* — and above the thread, because a
+          reply answers the note too and the two should read in that order. A
+          withdrawn note shows none: the tombstone says one thing and endorsements
+          of a body nobody can read are not a second thing it should say. */}
+      {!annotation.deleted && !editing && (
+        <Reactions annotation={annotation} onError={setError} />
       )}
 
       {visibleReplies.length > 0 && (
@@ -298,13 +361,17 @@ export function AnnotationCard({
               <p className="font-sans text-[11px] text-ink-faint">
                 {child.mine ? "You" : child.authorName} · {when(child.createdAt)}
               </p>
-              <p className="whitespace-pre-wrap font-serif text-sm leading-snug text-ink">
-                {child.deleted ? (
-                  <span className="italic text-ink-faint">Withdrawn.</span>
-                ) : (
-                  child.body
-                )}
-              </p>
+              {child.deleted ? (
+                <p className="font-serif text-sm leading-snug italic text-ink-faint">
+                  Withdrawn.
+                </p>
+              ) : (
+                <MentionedBody
+                  body={child.body}
+                  names={child.mentionNames}
+                  className="whitespace-pre-wrap font-serif text-sm leading-snug text-ink"
+                />
+              )}
             </li>
           ))}
         </ul>
@@ -323,12 +390,20 @@ export function AnnotationCard({
 
       {replying ? (
         <div className="pop-in mt-2 flex flex-col gap-2">
-          <textarea
+          <MentionField
             autoFocus
-            rows={2}
+            paperId={annotation.paperId}
             value={replyBody}
-            onChange={(event) => setReplyBody(event.target.value)}
-            placeholder="Answer this"
+            onChange={setReplyBody}
+            onPick={(candidate) =>
+              setReplyPicked((previous) =>
+                previous.some((entry) => entry.id === candidate.id)
+                  ? previous
+                  : [...previous, candidate],
+              )
+            }
+            rows={2}
+            placeholder="Answer this — type @ to bring somebody in"
             className="w-full resize-y rounded-sm border border-rule bg-page px-2 py-1.5 font-serif text-sm leading-relaxed text-ink placeholder:text-ink-faint"
           />
           <div className="flex items-center gap-3">
@@ -337,8 +412,15 @@ export function AnnotationCard({
               disabled={busy || replyBody.trim().length === 0}
               onClick={() =>
                 void run(async () => {
-                  await reply({ parentId: annotation._id, body: replyBody });
+                  await reply({
+                    parentId: annotation._id,
+                    body: replyBody,
+                    ...(replyMentions.length > 0
+                      ? { mentions: replyMentions }
+                      : {}),
+                  });
                   setReplyBody("");
+                  setReplyPicked([]);
                   setReplying(false);
                   setExpanded(true);
                 }, "That reply didn't send.")
@@ -381,6 +463,13 @@ export function AnnotationCard({
               Edit
             </button>
           )}
+          {/* Last in the row, and only for the two people who may use it. It
+              is the one control here that is not about the caller's own
+              writing — Reply and Edit are things you do to a margin, this is
+              the lab ruling on one — so it goes at the end of the sentence
+              rather than in among them. The panel it opens takes the line
+              below, which is what the row's `flex-wrap` is for. */}
+          <StatusControl annotation={annotation} onError={setError} />
         </div>
       )}
 
