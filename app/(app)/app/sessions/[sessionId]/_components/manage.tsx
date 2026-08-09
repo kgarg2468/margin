@@ -16,9 +16,10 @@ import {
   secondaryButtonClass,
   selectClass,
 } from "@/lib/ui";
+import { awayProse, startWindow } from "@/lib/session-window";
 import { useMutation } from "convex/react";
 import { useQuery } from "convex-helpers/react/cache/hooks";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ConfirmAction } from "../../../_components/confirm-action";
 import { readableError } from "../../../_components/errors";
 
@@ -45,6 +46,23 @@ export function ManageSession({ session }: { session: SessionDetail }) {
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [moving, setMoving] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
+
+  // A session scheduled more than a day out has a Start button that will unlock
+  // on its own, so the clock has to move without a reload. It only ticks while
+  // there is something to wait for: once the window opens — or the session goes
+  // live — the interval is torn down rather than left running behind a meeting.
+  const waitingForWindow =
+    session.status === "scheduled" &&
+    !startWindow(session.scheduledAt, now).canStart;
+
+  useEffect(() => {
+    if (!waitingForWindow) {
+      return;
+    }
+    const tick = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(tick);
+  }, [waitingForWindow]);
 
   async function run(action: () => Promise<unknown>, fallback: string) {
     setError(null);
@@ -71,21 +89,33 @@ export function ManageSession({ session }: { session: SessionDetail }) {
       <h2 className={eyebrowClass}>Running it</h2>
 
       <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
-        {session.status === "scheduled" && (
-          <button
-            type="button"
-            disabled={pending}
-            className={primaryButtonClass}
-            onClick={() =>
-              void run(
-                () => startSession({ sessionId: session._id }),
-                "That session didn't start.",
-              )
-            }
-          >
-            {pending ? "Starting…" : "Start session"}
-          </button>
-        )}
+        {session.status === "scheduled" &&
+          (() => {
+            const window = startWindow(session.scheduledAt, now);
+            return (
+              <div className="flex flex-col gap-1.5">
+                <button
+                  type="button"
+                  disabled={pending || !window.canStart}
+                  className={primaryButtonClass}
+                  onClick={() =>
+                    void run(
+                      () => startSession({ sessionId: session._id }),
+                      "That session didn't start.",
+                    )
+                  }
+                >
+                  {pending ? "Starting…" : "Start session"}
+                </button>
+                {!window.canStart && (
+                  <p className="font-sans text-xs text-ink-faint">
+                    Still {awayProse(session.scheduledAt - now)} — you can start
+                    it up to a day early, or reschedule it if the meeting moved.
+                  </p>
+                )}
+              </div>
+            );
+          })()}
 
         {session.status === "live" && (
           <button
