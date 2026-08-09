@@ -1112,6 +1112,19 @@ export function Reader({
           >
             ← Paper
           </Link>
+          {/* Not a badge: somebody who followed "Read the paper" out of a
+              session needs one click back to the meeting this reading is for.
+              So it reads and sits exactly like "← Paper" — a second way back,
+              in the place where ways back live. */}
+          {sessionId !== undefined && (
+            <Link
+              href={`/app/sessions/${sessionId}`}
+              aria-label="Back to the session"
+              className="shrink-0 font-sans text-sm text-accent underline-offset-4 hover:underline"
+            >
+              ← Session
+            </Link>
+          )}
           <h1 className="min-w-0 flex-1 truncate font-serif text-lg leading-tight text-ink-strong">
             {paper.title}
           </h1>
@@ -1157,18 +1170,6 @@ export function Reader({
                 JSON
               </button>
             </div>
-          )}
-          {/* The chip is the way back to the meeting this reading is for, not
-              just a badge: somebody who followed "Read the paper" out of a
-              session needs one click to return to it. */}
-          {sessionId !== undefined && (
-            <Link
-              href={`/app/sessions/${sessionId}`}
-              aria-label="Back to the session"
-              className="shrink-0 rounded-full border border-rule px-2 py-0.5 font-sans text-[10px] uppercase tracking-[0.14em] text-ink-faint transition-colors hover:border-ink-faint hover:text-accent"
-            >
-              In session
-            </Link>
           )}
           {/* Only rendered where it does anything: in light mode the sheet is
               print-white and a "White page" control would be a lie. */}
