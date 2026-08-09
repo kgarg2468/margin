@@ -27,6 +27,7 @@ import type {
   AnnotationId,
   AnnotationView,
   Draft,
+  DraftBox,
   PageResolution,
 } from "./types";
 
@@ -104,9 +105,40 @@ export function Reader({
   const [activeId, setActiveId] = useState<AnnotationId | null>(null);
   const [filter, setFilter] = useState<Set<AnnotationType>>(new Set());
   const [draft, setDraft] = useState<Draft | null>(null);
+  // Held but not yet read: the composer is still placed from the coordinates
+  // frozen at selection time, and anchoring it to this re-measured box is the
+  // next step. Kept here anyway because the measuring is the page's to do and
+  // the box has to land somewhere the composer can reach. Both suppressions
+  // come off the moment something reads it.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const [_draftBox, setDraftBox] = useState<DraftBox | null>(null);
   const [resolutions, setResolutions] = useState<Map<number, PageResolution>>(
     new Map(),
   );
+
+  const handleDraftBox = useCallback(
+    (
+      pageIndex: number,
+      box: { top: number; left: number; width: number; height: number } | null,
+    ) => {
+      setDraftBox((previous) => {
+        if (box === null) {
+          // Only the page the composer is anchored to may retract the box; the
+          // other thirty-six report null on every mount and would otherwise
+          // clobber it.
+          return previous?.pageIndex === pageIndex ? null : previous;
+        }
+        return { pageIndex, ...box };
+      });
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (draft === null) {
+      setDraftBox(null);
+    }
+  }, [draft]);
 
   // Every activation in the reader goes through this rather than through
   // `setActiveId`, so that the gutter — which fires nobody's `mouseenter` —
@@ -922,7 +954,8 @@ export function Reader({
                   annotations={byPage.get(index) ?? EMPTY}
                   recovered={recovered}
                   activeId={activeId}
-                  composing={draft?.anchor.pageIndex === index}
+                  draft={draft?.anchor.pageIndex === index ? draft : null}
+                  onDraftBox={handleDraftBox}
                   onActivate={activate}
                   onResolved={handleResolved}
                   onDraft={setDraft}

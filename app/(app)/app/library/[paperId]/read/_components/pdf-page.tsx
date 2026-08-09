@@ -146,8 +146,17 @@ export type PdfPageProps = {
    */
   recovered: ReadonlySet<AnnotationId>;
   activeId: AnnotationId | null;
-  /** A composer is already open on this page, so it does not need offering. */
-  composing: boolean;
+  /**
+   * The composer's draft, when it belongs to this page. Draws the passage the
+   * note is being written about — otherwise there is nothing on the paper at
+   * all while somebody writes — and reports where that passage ended up so the
+   * composer can be anchored to it.
+   */
+  draft: Draft | null;
+  onDraftBox: (
+    pageIndex: number,
+    box: { top: number; left: number; width: number; height: number } | null,
+  ) => void;
   onActivate: (id: AnnotationId | null) => void;
   onResolved: (pageIndex: number, resolution: PageResolution) => void;
   onDraft: (draft: Draft) => void;
@@ -164,7 +173,8 @@ export function PdfPage({
   annotations,
   recovered,
   activeId,
-  composing,
+  draft,
+  onDraftBox,
   onActivate,
   onResolved,
   onDraft,
@@ -424,6 +434,62 @@ export function PdfPage({
     onResolved(pageIndex, { positions, points, states, orphaned });
   }, [layer, extractedLength, annotations, recovered, pageIndex, onResolved]);
 
+  // --- the passage being written about ------------------------------------
+  const [draftRects, setDraftRects] = useState<Mark["rects"]>([]);
+  const reported = useRef(false);
+
+  useEffect(() => {
+    const wrapper = wrapperRef.current;
+    const range =
+      draft === null || layer === null
+        ? null
+        : rangeForOffsets(layer, draft.anchor.start, draft.anchor.end);
+    if (wrapper === null || range === null) {
+      setDraftRects((previous) => (previous.length === 0 ? previous : []));
+      if (reported.current) {
+        reported.current = false;
+        onDraftBox(pageIndex, null);
+      }
+      return;
+    }
+
+    const bounds = wrapper.getBoundingClientRect();
+    const rects = [...range.getClientRects()]
+      .filter((rect) => rect.width > 0.5 && rect.height > 0.5)
+      .map((rect) => ({
+        left: rect.left - bounds.left,
+        top: rect.top - bounds.top,
+        width: rect.width,
+        height: rect.height,
+      }));
+    setDraftRects(rects);
+    if (rects.length === 0) {
+      if (reported.current) {
+        reported.current = false;
+        onDraftBox(pageIndex, null);
+      }
+      return;
+    }
+
+    let left = Infinity;
+    let top = Infinity;
+    let right = -Infinity;
+    let bottom = -Infinity;
+    for (const rect of rects) {
+      left = Math.min(left, rect.left);
+      top = Math.min(top, rect.top);
+      right = Math.max(right, rect.left + rect.width);
+      bottom = Math.max(bottom, rect.top + rect.height);
+    }
+    reported.current = true;
+    onDraftBox(pageIndex, {
+      left: wrapper.offsetLeft + left,
+      top: wrapper.offsetTop + top,
+      width: right - left,
+      height: bottom - top,
+    });
+  }, [draft, layer, pageIndex, onDraftBox]);
+
   // --- selection ---------------------------------------------------------
   /**
    * The current selection as a draft annotation, or `null` if there is nothing
@@ -663,11 +729,44 @@ export function PdfPage({
             </div>
           );
         })}
+
+        {/* The passage, while it is still only a selection. It wears the
+            selection's own wash rather than a type's: nothing has been chosen
+            yet, nothing has been saved, and the composer above it is still a
+            question. The dashed rule says the same thing in the language the
+            drifted marks already use. */}
+        {draftRects.map((rect, index) => (
+          <span key={`draft-${index}`}>
+            <span
+              style={{
+                position: "absolute",
+                left: rect.left,
+                top: rect.top,
+                width: rect.width,
+                height: rect.height,
+                background: "var(--highlight)",
+                opacity: 0.9,
+                borderRadius: 2,
+              }}
+            />
+            <span
+              style={{
+                position: "absolute",
+                left: rect.left,
+                top: rect.top + rect.height - 2,
+                width: rect.width,
+                height: 0,
+                borderTop: "1.5px dashed var(--accent)",
+                opacity: 0.8,
+              }}
+            />
+          </span>
+        ))}
       </div>
 
       <div ref={textLayerRef} className={styles.textLayer} />
 
-      {pending !== null && !composing && (
+      {pending !== null && draft === null && (
         <button
           type="button"
           data-annotate=""

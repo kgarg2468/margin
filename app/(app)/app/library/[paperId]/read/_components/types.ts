@@ -24,6 +24,23 @@ export type Draft = {
 };
 
 /**
+ * Where the passage a composer is anchored to actually sits, in the reader's
+ * content coordinates.
+ *
+ * Reported by the page rather than remembered from the selection, and
+ * re-reported whenever the page re-lays its text — which is what lets the
+ * composer stay beside its passage across a zoom, where the coordinates frozen
+ * at selection time would have stranded it.
+ */
+export type DraftBox = {
+  pageIndex: number;
+  top: number;
+  left: number;
+  width: number;
+  height: number;
+};
+
+/**
  * How an annotation's passage was found again on the page it was written on.
  *
  * `resolveAnchor` already knows all of this; the reason it travels up to the
