@@ -28,6 +28,23 @@ const DB_MUTATION_SELECTOR =
   "MemberExpression[object.property.name='db']" +
   ":matches([property.name='patch'], [property.name='replace'], [property.name='delete'])";
 
+/**
+ * The query cache is opt-in at the call site, which makes it easy to lose.
+ *
+ * `ConvexQueryCacheProvider` only publishes a registry on a React context;
+ * `convex/react`'s `useQuery` knows nothing about that context, so a component
+ * that imports it — which is what every editor autoimport suggests — silently
+ * drops out of the cache and goes back to flashing a skeleton on every
+ * navigation. Nothing about the code looks wrong, and nothing fails. So the
+ * convention is enforced rather than documented. `useMutation` and `useAction`
+ * are unaffected and still come from `convex/react`.
+ */
+const CACHED_USE_QUERY_MESSAGE =
+  "Import useQuery from 'convex-helpers/react/cache/hooks' instead. " +
+  "The one in convex/react does not read ConvexQueryCacheProvider's registry, " +
+  "so its subscription dies on unmount and the surface re-flashes its skeleton " +
+  "on every navigation. useMutation and useAction still come from convex/react.";
+
 const eslintConfig = [
   ...compat.extends("next/core-web-vitals", "next/typescript"),
   {
@@ -39,6 +56,23 @@ const eslintConfig = [
       "next-env.d.ts",
       "convex/_generated/**",
     ],
+  },
+  {
+    files: ["app/**/*.ts", "app/**/*.tsx"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "convex/react",
+              importNames: ["useQuery"],
+              message: CACHED_USE_QUERY_MESSAGE,
+            },
+          ],
+        },
+      ],
+    },
   },
   {
     files: ["convex/**/*.ts"],
