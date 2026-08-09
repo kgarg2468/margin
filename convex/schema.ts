@@ -37,6 +37,28 @@ export const annotationVisibility = v.union(
   v.literal("lab"),
 );
 
+/**
+ * The five marks a member can put on someone else's note.
+ *
+ * A closed set, and deliberately a scholarly one: these are the things a
+ * reader of a paper wants to say in one tap — I'm convinced, I'm not, this is
+ * the important bit, I don't follow, bring it to the meeting. There is no
+ * "like" and there will not be one. A reaction is an authored judgement about
+ * an argument, not a vote, which is also why nothing in the product sorts or
+ * ranks by them.
+ *
+ * `discuss` is the one no general-purpose annotator has: Margin is journal-club
+ * software, and "raise this on Thursday" is the cheapest useful thing a member
+ * can contribute while reading.
+ */
+export const reactionKind = v.union(
+  v.literal("agree"),
+  v.literal("doubt"),
+  v.literal("key"),
+  v.literal("unclear"),
+  v.literal("discuss"),
+);
+
 /** Two roles only: the PI (owner/admin) and everyone else. */
 export const membershipRole = v.union(v.literal("pi"), v.literal("member"));
 
@@ -342,6 +364,37 @@ export const eventDoc = v.union(
     type: v.literal("session.cancelled"),
     paperId: v.id("papers"),
     sessionId: v.id("sessions"),
+  }),
+  /**
+   * Someone put a mark on a note.
+   *
+   * A fact about what a member *did*, which is the only kind of engagement the
+   * constitution lets the ledger hold: a reaction is authored — chosen, typed,
+   * attributable — where a view is something that merely happened to a person.
+   * The distinction is the whole line between this and read tracking.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("annotation.reacted"),
+    paperId: v.id("papers"),
+    annotationId: v.id("annotations"),
+    kind: reactionKind,
+  }),
+  /**
+   * And took it off again.
+   *
+   * Its own variant rather than a `removed: true` flag on the one above,
+   * because the ledger is a list of facts and "agreed, then didn't" is two of
+   * them. A flag would also make every reader of `annotation.reacted` — the
+   * digest among them — have to remember to check it, and the one that forgot
+   * would quietly report a mark that had been withdrawn.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("annotation.unreacted"),
+    paperId: v.id("papers"),
+    annotationId: v.id("annotations"),
+    kind: reactionKind,
   }),
 );
 
@@ -767,4 +820,48 @@ export default defineSchema({
   })
     .index("by_session", ["sessionId"])
     .index("by_lab", ["labId"]),
+
+  /**
+   * One mark by one member on one note — the cheapest thing anyone can say.
+   *
+   * A row per (annotation, member, kind) rather than a counter on the
+   * annotation, for the reason every social feature eventually learns: a count
+   * cannot be un-counted by the person who made it, and a member who takes a
+   * mark back has to be able to. It also keeps the marks *attributable*, which
+   * is what makes them worth anything in a lab — "three people agree" is
+   * noise, "Nadia and Tom agree" is a conversation.
+   *
+   * Reactions carry no visibility of their own. A mark is visible exactly
+   * where the note it sits on is visible, and a private note is invisible to
+   * everyone but its author — so a reaction on one can only ever be its
+   * author's own, and goes private and comes back with it for free.
+   *
+   * `paperId` is denormalized off the annotation so the reader can fetch a
+   * whole paper's marks in one indexed read instead of one per note. It is
+   * written once and never changes: an annotation cannot move between papers.
+   */
+  reactions: defineTable({
+    labId: v.id("labs"),
+    paperId: v.id("papers"),
+    annotationId: v.id("annotations"),
+    memberId: v.id("users"),
+    kind: reactionKind,
+    createdAt: v.number(),
+  })
+    /** The reader's single read: every mark on the paper it is showing. */
+    .index("by_paper", ["paperId"])
+    /**
+     * Both the uniqueness check and the by-annotation read, from one index.
+     *
+     * Full-width it is the toggle's exact lookup — one member, one note, one
+     * kind, `.unique()` — and on the `annotationId` prefix alone it is every
+     * mark on a note. One reaction per (annotation, member, kind) is enforced
+     * here rather than by a schema constraint Convex does not have, which is
+     * why the toggle reads before it writes.
+     */
+    .index("by_annotation_and_member_and_kind", [
+      "annotationId",
+      "memberId",
+      "kind",
+    ]),
 });

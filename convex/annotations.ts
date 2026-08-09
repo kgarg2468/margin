@@ -5,7 +5,12 @@ import { mutation, query } from "./_generated/server";
 import { getMembership, requireMembership, requireUserId } from "./lib/authz";
 import { recordEvent } from "./lib/ledger";
 import { clearNotificationsFor, raiseNotification } from "./notifications";
-import { anchor, annotationType, annotationVisibility } from "./schema";
+import {
+  anchor,
+  annotationType,
+  annotationVisibility,
+  reactionKind,
+} from "./schema";
 import { disambiguate, MAX_MENTIONS_PER_NOTE } from "../lib/mentions";
 
 /**
@@ -63,6 +68,25 @@ const MAX_BODY_LENGTH = 4_000;
  */
 const MAX_ANNOTATIONS_PER_PAPER = 1_000;
 
+/**
+ * The same kind of ceiling for marks. Five kinds times a lab's worth of
+ * members times the notes on one paper stays far under this in every real
+ * case; it is here so one indexed read has a bound rather than a hope.
+ */
+const MAX_REACTIONS_PER_PAPER = 8_000;
+
+/** Enough to clear every mark off a note that is being deleted outright. */
+const MAX_REACTIONS_PER_ANNOTATION = 500;
+
+/**
+ * How many names a chip's tooltip carries.
+ *
+ * The count beside a mark is always exact; this bounds only the list of who,
+ * because "Nadia, Tom, Wren and 40 others" and "…and 400 others" are the same
+ * sentence to a reader and only one of them costs 400 reads.
+ */
+const MAX_REACTION_NAMES = 8;
+
 /** Guards against an anchor built by something other than `lib/anchoring`. */
 const MAX_QUOTE_LENGTH = 400;
 const MAX_CONTEXT_LENGTH = 64;
@@ -103,6 +127,30 @@ const annotationView = v.object({
   deleted: v.boolean(),
   /** Replies by anyone, which is what freezes visibility and blocks deletion. */
   replyCount: v.number(),
+  /**
+   * The marks on this note, one entry per kind anyone has used. Kinds nobody
+   * has used are absent rather than present with a zero — the margin draws
+   * what was said, not a scoreboard of what could have been.
+   *
+   * Empty for a withdrawn note. A tombstone says one thing ("withdrawn by its
+   * author") and endorsements of a body that is gone are not a second thing it
+   * should be saying.
+   */
+  reactions: v.array(
+    v.object({
+      kind: reactionKind,
+      /** Exact, however many names came back. */
+      count: v.number(),
+      /** The caller is one of them — the chip draws itself as theirs. */
+      mine: v.boolean(),
+      /**
+       * Who, for the chip's tooltip, excluding the caller: `mine` already says
+       * they are in there and the client is what knows how to write "You".
+       * Bounded by `MAX_REACTION_NAMES`; `count` is not.
+       */
+      names: v.array(v.string()),
+    }),
+  ),
 });
 
 /** Falls back through the fields a member might not have filled in. */
@@ -123,6 +171,8 @@ function cleanBody(body: string): string {
 }
 
 type Anchor = Doc<"annotations">["anchor"];
+
+type ReactionKind = Doc<"reactions">["kind"];
 
 /**
  * An anchor from the client is a claim like any other.
@@ -476,6 +526,94 @@ export const reply = mutation({
 });
 
 /**
+ * Put a mark on a note, or take it back off.
+ *
+ * One mutation rather than a react/unreact pair, because from the member's
+ * side it is one control: the chip is either yours or it isn't, and tapping it
+ * flips that. The server decides which way by reading first — the row's
+ * presence *is* the state — so a double-tap on a slow connection lands as one
+ * add and one remove rather than two rows the uniqueness index would have to
+ * refuse.
+ *
+ * Marks go on anything the caller can see, which includes their own private
+ * notes. Marking your own note is not vanity when nobody else can read it; it
+ * is a reader flagging their own margin — "come back to this", "raise it
+ * Thursday" — and the alternative is a rule that exists only to stop something
+ * harmless.
+ *
+ * A withdrawn note takes no new marks and shows none. Removing one is still
+ * allowed, so a note withdrawn between the render and the tap un-marks quietly
+ * instead of erroring at someone who was trying to take it back anyway.
+ */
+export const react = mutation({
+  args: { annotationId: v.id("annotations"), kind: reactionKind },
+  returns: v.union(v.literal("added"), v.literal("removed")),
+  handler: async (ctx, args) => {
+    const annotation = await ctx.db.get(args.annotationId);
+    if (annotation === null) {
+      throw new ConvexError("That note is no longer there.");
+    }
+    const membership = await requireMembership(ctx, annotation.labId);
+    // Unreachable through the UI — a private note is not in anyone else's
+    // margin to tap — which is exactly why it is checked. Visibility is a rule
+    // about the data, not about which buttons got rendered.
+    if (
+      annotation.visibility !== "lab" &&
+      annotation.memberId !== membership.userId
+    ) {
+      throw new ConvexError("That note isn't shared with the lab.");
+    }
+
+    const existing = await ctx.db
+      .query("reactions")
+      .withIndex("by_annotation_and_member_and_kind", (q) =>
+        q
+          .eq("annotationId", annotation._id)
+          .eq("memberId", membership.userId)
+          .eq("kind", args.kind),
+      )
+      .unique();
+
+    if (existing !== null) {
+      await ctx.db.delete(existing._id);
+      await recordEvent(ctx, {
+        labId: annotation.labId,
+        type: "annotation.unreacted",
+        actorId: membership.userId,
+        paperId: annotation.paperId,
+        sessionId: annotation.sessionId,
+        annotationId: annotation._id,
+        kind: args.kind,
+      });
+      return "removed";
+    }
+
+    if (annotation.deletedAt !== undefined) {
+      throw new ConvexError("That note was withdrawn.");
+    }
+
+    await ctx.db.insert("reactions", {
+      labId: annotation.labId,
+      paperId: annotation.paperId,
+      annotationId: annotation._id,
+      memberId: membership.userId,
+      kind: args.kind,
+      createdAt: Date.now(),
+    });
+    await recordEvent(ctx, {
+      labId: annotation.labId,
+      type: "annotation.reacted",
+      actorId: membership.userId,
+      paperId: annotation.paperId,
+      sessionId: annotation.sessionId,
+      annotationId: annotation._id,
+      kind: args.kind,
+    });
+    return "added";
+  },
+});
+
+/**
  * Everything on a paper the caller is allowed to see: the lab's, plus their own
  * private notes.
  *
@@ -543,19 +681,20 @@ export const listForPaper = query({
       }
     }
 
-    // One read per distinct person rather than one per annotation: a session's
-    // worth of margins is dozens of notes by a handful of people, and the
-    // people named in them are drawn from the same small roster.
+    // One read per distinct person rather than one per row: a session's worth
+    // of margin is dozens of notes and a few hundred marks by a handful of
+    // people. Shared by the note authors, the people named in them, and by
+    // the reactors below.
     const names = new Map<Id<"users">, string>();
-    const nameOf = async (userId: Id<"users">): Promise<string> => {
-      const known = names.get(userId);
+    async function nameOf(id: Id<"users">): Promise<string> {
+      const known = names.get(id);
       if (known !== undefined) {
         return known;
       }
-      const resolved = displayName(await ctx.db.get(userId));
-      names.set(userId, resolved);
+      const resolved = displayName(await ctx.db.get(id));
+      names.set(id, resolved);
       return resolved;
-    };
+    }
 
     const mentionNames = new Map<Id<"annotations">, string[]>();
     for (const annotation of annotations) {
@@ -568,6 +707,68 @@ export const listForPaper = query({
         resolved.push(await nameOf(userId));
       }
       mentionNames.set(annotation._id, resolved);
+    }
+
+    // Every mark on the paper in one indexed read, bucketed in memory. The
+    // alternative — an index read per note — is the same data at fifty times
+    // the round trips, and the margin subscribes to this query live.
+    const marks = await ctx.db
+      .query("reactions")
+      .withIndex("by_paper", (q) => q.eq("paperId", paper._id))
+      .take(MAX_REACTIONS_PER_PAPER);
+
+    type Tally = { count: number; mine: boolean; others: Id<"users">[] };
+    const tallies = new Map<Id<"annotations">, Map<ReactionKind, Tally>>();
+    for (const mark of marks) {
+      const annotation = byId.get(mark.annotationId);
+      // A mark whose note this caller cannot see, or one that has been
+      // withdrawn. The note decides who sees anything attached to it, and in
+      // both of those cases it has already said no — so the reaction is
+      // dropped here rather than filtered in the client, which would mean
+      // shipping it first.
+      if (annotation === undefined || annotation.deletedAt !== undefined) {
+        continue;
+      }
+      let forNote = tallies.get(mark.annotationId);
+      if (forNote === undefined) {
+        forNote = new Map();
+        tallies.set(mark.annotationId, forNote);
+      }
+      const tally = forNote.get(mark.kind) ?? {
+        count: 0,
+        mine: false,
+        others: [],
+      };
+      tally.count += 1;
+      if (mark.memberId === userId) {
+        tally.mine = true;
+      } else if (tally.others.length < MAX_REACTION_NAMES) {
+        tally.others.push(mark.memberId);
+      }
+      forNote.set(mark.kind, tally);
+    }
+    for (const forNote of tallies.values()) {
+      for (const tally of forNote.values()) {
+        for (const id of tally.others) {
+          await nameOf(id);
+        }
+      }
+    }
+
+    /** The tally for one note, in the order the marks were first made. */
+    function reactionsFor(
+      annotationId: Id<"annotations">,
+    ): { kind: ReactionKind; count: number; mine: boolean; names: string[] }[] {
+      const forNote = tallies.get(annotationId);
+      if (forNote === undefined) {
+        return [];
+      }
+      return [...forNote.entries()].map(([kind, tally]) => ({
+        kind,
+        count: tally.count,
+        mine: tally.mine,
+        names: tally.others.map((id) => names.get(id) ?? "A lab member"),
+      }));
     }
 
     const truncated =
@@ -593,6 +794,7 @@ export const listForPaper = query({
         editedAt: annotation.editedAt,
         deleted: annotation.deletedAt !== undefined,
         replyCount: replyCounts.get(annotation._id) ?? 0,
+        reactions: reactionsFor(annotation._id),
       })),
     };
   },
@@ -849,8 +1051,24 @@ export const remove = mutation({
     const replies = await repliesTo(ctx, annotation._id);
 
     if (replies.length === 0) {
+      // The marks go with the row they were put on. A reaction pointing at an
+      // id nothing answers to is not a fact about anything, and it would sit
+      // in the table forever because the only thing that could ever have
+      // cleaned it up is this line.
+      for (const mark of await ctx.db
+        .query("reactions")
+        .withIndex("by_annotation_and_member_and_kind", (q) =>
+          q.eq("annotationId", annotation._id),
+        )
+        .take(MAX_REACTIONS_PER_ANNOTATION)) {
+        await ctx.db.delete(mark._id);
+      }
       await ctx.db.delete(annotation._id);
     } else {
+      // A withdrawn note keeps its row, so its marks keep pointing at
+      // something real. They are simply never returned again (see
+      // `listForPaper`): a tombstone says one thing, and "four people agreed
+      // with a sentence you can no longer read" is not it.
       await ctx.db.patch(annotation._id, { body: "", deletedAt: Date.now() });
     }
 
