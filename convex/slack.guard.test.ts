@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import type { ValidatorJSON } from "convex/values";
+import { v, type ValidatorJSON } from "convex/values";
 import { describe, expect, it } from "vitest";
 import schema from "./schema";
 import { normalizeWebhookUrl, slackIsConfigured } from "./lib/slack";
@@ -57,24 +57,91 @@ function isRecord(node: Json): node is Record<string, Json> {
   return typeof node === "object" && node !== null && !Array.isArray(node);
 }
 
-/** Every field declared anywhere under `node`, as `a.b.c` paths. */
-function fieldPaths(node: Json, prefix: string[] = []): string[] {
+/** One field declared somewhere in a validator, with the type it was given. */
+type DeclaredField = {
+  /** `a.b.c` from the root of the validator. */
+  path: string;
+  /** The field's own type, in wire form. `null` when the shape had none. */
+  fieldType: Json;
+};
+
+/** Every field declared anywhere under `node`, with its declared type. */
+function declaredFields(node: Json, prefix: string[] = []): DeclaredField[] {
   if (Array.isArray(node)) {
-    return node.flatMap((child) => fieldPaths(child, prefix));
+    return node.flatMap((child) => declaredFields(child, prefix));
   }
   if (!isRecord(node)) return [];
 
   if (node.type === "object" && isRecord(node.value)) {
     return Object.entries(node.value).flatMap(([name, entry]) => {
       const path = [...prefix, name];
-      const nested = isRecord(entry) ? fieldPaths(entry.fieldType, path) : [];
-      return [path.join("."), ...nested];
+      const fieldType = isRecord(entry) ? ((entry.fieldType ?? null) as Json) : null;
+      const nested = fieldType === null ? [] : declaredFields(fieldType, path);
+      return [{ path: path.join("."), fieldType }, ...nested];
     });
   }
 
   return Object.entries(node)
     .filter(([key]) => key !== "type" && key !== "tableName")
-    .flatMap(([, child]) => fieldPaths(child, prefix));
+    .flatMap(([, child]) => declaredFields(child, prefix));
+}
+
+/** Every field declared anywhere under `node`, as `a.b.c` paths. */
+function fieldPaths(node: Json, prefix: string[] = []): string[] {
+  return declaredFields(node, prefix).map((field) => field.path);
+}
+
+/**
+ * Whether this field could be holding a URL at all.
+ *
+ * A credential is a string. A number, a boolean, an id or a literal cannot
+ * carry one however it is named, and `v.any()` could carry anything — which is
+ * why the first assertion in this file refuses to let one exist in a returns
+ * validator in the first place.
+ *
+ * Only the field's *own* type is consulted. A container is not a leak: fields
+ * inside it are walked separately and judged on their own names, so an object
+ * called `lastDeliveryFailed` is not damning and a string called `webhookUrl`
+ * inside it still would be.
+ */
+function admitsText(fieldType: Json): boolean {
+  if (Array.isArray(fieldType)) return fieldType.some(admitsText);
+  if (!isRecord(fieldType)) return false;
+  if (fieldType.type === "string" || fieldType.type === "any") return true;
+  if (fieldType.type === "union") {
+    return admitsText((fieldType.value ?? null) as Json);
+  }
+  return false;
+}
+
+/** Every place in `node` a webhook URL could be hiding under a plausible name. */
+function webhookShaped(node: Json): string[] {
+  return declaredFields(node)
+    .filter(
+      (field) =>
+        WEBHOOK_ISH.test(field.path.split(".").at(-1) ?? field.path) &&
+        (field.fieldType === null || admitsText(field.fieldType)),
+    )
+    .map((field) => field.path);
+}
+
+/** Every `v.any()` under `node`, as paths — the places this file cannot see. */
+function opaquePaths(node: Json, prefix: string[] = []): string[] {
+  if (Array.isArray(node)) {
+    return node.flatMap((child) => opaquePaths(child, prefix));
+  }
+  if (!isRecord(node)) return [];
+  if (node.type === "any") return [prefix.length === 0 ? "<returns>" : prefix.join(".")];
+
+  if (node.type === "object" && isRecord(node.value)) {
+    return Object.entries(node.value).flatMap(([name, entry]) =>
+      isRecord(entry) ? opaquePaths((entry.fieldType ?? null) as Json, [...prefix, name]) : [],
+    );
+  }
+
+  return Object.entries(node)
+    .filter(([key]) => key !== "type" && key !== "tableName")
+    .flatMap(([, child]) => opaquePaths(child, prefix));
 }
 
 function wireForm(validator: unknown): ValidatorJSON {
@@ -93,9 +160,36 @@ function wireForm(validator: unknown): ValidatorJSON {
  * Matched on the field name rather than on its value, because a validator has
  * no values — and named broadly, because the leak this exists to catch is
  * somebody adding `slackUrl`, `webhook` or `deliveryUrl` to a returns shape
- * while thinking about a settings form rather than about a credential.
+ * while thinking about a settings form rather than about a credential. The
+ * first version of this pattern promised `deliveryUrl` in that sentence and
+ * did not match it; `hookUrl`, `channelUrl`, `postUrl` and `slackDestination`
+ * walked past it too. Being wrong about which names are suspicious is the one
+ * way this whole file fails silently, so the pattern is now deliberately
+ * over-eager and `admitsText` does the narrowing — on the field's type, which
+ * cannot be talked into anything.
  */
-const WEBHOOK_ISH = /webhook|hooks?slack|slack.*url|url.*slack/i;
+const WEBHOOK_ISH =
+  /webhook|hook|slack|deliver|destination|endpoint|channel|post/i;
+
+/**
+ * The pattern, held to the names it claims to cover.
+ *
+ * A regex is the kind of thing that quietly stops matching what its comment
+ * says it matches — which is precisely how the first version of it shipped.
+ * This list is the review's own, and `channel`/`post` are here because two of
+ * the names on it still walked past the widened pattern until they were added.
+ */
+const PLAUSIBLE_NAMES = [
+  "webhookUrl",
+  "slackUrl",
+  "deliveryUrl",
+  "hookUrl",
+  "channelUrl",
+  "destinationUrl",
+  "postUrl",
+  "slackDestination",
+  "incomingWebhook",
+] as const;
 
 const normalizeName = (name: string): string =>
   name.toLowerCase().replace(/[^a-z]/g, "");
@@ -206,13 +300,48 @@ describe("the webhook URL never reaches a client", () => {
       "auth.signIn",
       "auth.signOut",
     ]);
+
+    // Declaring a returns validator is not enough; it has to be a validator
+    // that says something. `v.any()` satisfies every check above — it is not
+    // null, it parses, it has a type — while describing no fields at all, so a
+    // webhook URL returned under one is invisible to the scan below and the
+    // suite still goes green. A declared shape that admits anything is the
+    // same hole as no declared shape, wearing a hat.
+    const opaque = publicFunctions
+      .flatMap((fn) => opaquePaths(fn.returns).map((path) => `${fn.name} → ${path}`))
+      .sort();
+    expect(
+      opaque,
+      "v.any() in a returns validator makes the leak scan below blind",
+    ).toEqual([]);
+
+    // And the walk that produced that empty list can see an `any` when there
+    // is one — at the root and buried — so the assertion above is a fact about
+    // Margin rather than a fact about a broken recursion.
+    expect(opaquePaths(wireForm(v.any()))).toEqual(["<returns>"]);
+    expect(
+      opaquePaths(wireForm(v.object({ outer: v.object({ inner: v.any() }) }))),
+    ).toEqual(["outer.inner"]);
+    // The same shape with a real type in it is not flagged.
+    expect(
+      opaquePaths(wireForm(v.object({ outer: v.object({ inner: v.string() }) }))),
+    ).toEqual([]);
+  });
+
+  it("recognises every name a webhook would plausibly be given", () => {
+    // The scan below is only as good as this pattern. Checked directly, so the
+    // day it stops matching one of these it fails here — loudly, with the name
+    // in the message — rather than by returning an empty offender list.
+    const missed = PLAUSIBLE_NAMES.filter((name) => !WEBHOOK_ISH.test(name));
+    expect(missed).toEqual([]);
+    // And it is not simply matching everything, which would pass the line
+    // above while flagging half the schema.
+    expect(["title", "createdAt", "body", "quote"].filter((n) => WEBHOOK_ISH.test(n))).toEqual([]);
   });
 
   it("declares no webhook-shaped field in any public returns validator", () => {
     const offenders = publicFunctions.flatMap((fn) =>
-      fieldPaths(fn.returns)
-        .filter((path) => WEBHOOK_ISH.test(path.split(".").at(-1) ?? path))
-        .map((path) => `${fn.name} → ${path}`),
+      webhookShaped(fn.returns).map((path) => `${fn.name} → ${path}`),
     );
 
     expect(
@@ -225,11 +354,7 @@ describe("the webhook URL never reaches a client", () => {
     // The inverse assertion. If the walk could not see a webhook field at all,
     // the one above would pass for the wrong reason forever.
     const internalWithWebhook = registered
-      .filter(
-        (fn) =>
-          !fn.isPublic &&
-          fieldPaths(fn.returns).some((path) => WEBHOOK_ISH.test(path)),
-      )
+      .filter((fn) => !fn.isPublic && webhookShaped(fn.returns).length > 0)
       .map((fn) => fn.name)
       .sort();
 
@@ -262,11 +387,7 @@ describe("where the credential is stored", () => {
 
   it("lives on labs, and only on labs", () => {
     const holders = tables.flatMap(([table, validator]) =>
-      fieldPaths(validator).some((path) =>
-        WEBHOOK_ISH.test(path.split(".").at(-1) ?? path),
-      )
-        ? [table]
-        : [],
+      webhookShaped(validator).length > 0 ? [table] : [],
     );
     // Anchored in both directions: it is here, and it is nowhere else. A
     // second copy on `sessions` or `memberships` would be a second lifetime to
@@ -282,10 +403,7 @@ describe("where the credential is stored", () => {
     // one would outlive every disconnection — including the one a lab performs
     // *because* the credential leaked.
     const events = wireForm(schema.tables.events.validator);
-    const offenders = fieldPaths(events).filter((path) =>
-      WEBHOOK_ISH.test(path.split(".").at(-1) ?? path),
-    );
-    expect(offenders).toEqual([]);
+    expect(webhookShaped(events)).toEqual([]);
     // And prove the ledger does record the fact itself, so members can see in
     // the record when their margin started leaving the building.
     expect(fieldPaths(events)).toContain("connected");
