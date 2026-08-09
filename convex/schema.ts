@@ -59,6 +59,21 @@ export const reactionKind = v.union(
   v.literal("discuss"),
 );
 
+/**
+ * What an hour of discussion leaves behind.
+ *
+ * A journal club ends in one of three states per thing it touched: the lab
+ * settled it (`decision`), the lab failed to settle it (`question`), or
+ * somebody agreed to go and find out (`task`). The distinction decides whether
+ * the thing comes back — see `lib/actions/outcomes.ts`, where the rule that a
+ * decision has no open state lives, and `convex/actions.ts`, which enforces it.
+ */
+export const actionKind = v.union(
+  v.literal("decision"),
+  v.literal("question"),
+  v.literal("task"),
+);
+
 /** Two roles only: the PI (owner/admin) and everyone else. */
 export const membershipRole = v.union(v.literal("pi"), v.literal("member"));
 
@@ -540,6 +555,96 @@ export const eventDoc = v.union(
     annotationId: v.id("annotations"),
     kind: reactionKind,
   }),
+  /**
+   * The discussion produced something the lab is carrying: a decision, a
+   * question it failed to answer, or a task somebody took on.
+   *
+   * References all the way down. `citedAnnotationId` is the note the outcome
+   * came out of and never the note's prose — the ledger is append-only, so a
+   * body copied in here would outlive its author's right to withdraw it, and
+   * the reader re-checks the citation's visibility on every read instead
+   * (`convex/actions.ts`). The outcome's own text is on the `actions` row,
+   * where the person who wrote it can still reach it.
+   *
+   * `subjectUserId` is the member a task was recorded against, and is absent on
+   * everything else — a decision is nobody's in particular, and an unassigned
+   * task is a task the room has not yet found a volunteer for.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("action.recorded"),
+    paperId: v.id("papers"),
+    sessionId: v.id("sessions"),
+    actionId: v.id("actions"),
+    kind: actionKind,
+    citedAnnotationId: v.optional(v.id("annotations")),
+    subjectUserId: v.optional(v.id("users")),
+  }),
+  /**
+   * A task changed hands, or found its first owner.
+   *
+   * Its own fact rather than a field the `actions` row quietly overwrites: who
+   * agreed to do a thing, and when the lab stopped expecting it of them, is
+   * exactly the history a PI is asking about six weeks later, and the row only
+   * ever holds the current answer.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("action.assigned"),
+    paperId: v.id("papers"),
+    sessionId: v.id("sessions"),
+    actionId: v.id("actions"),
+    /** The member it is now with. */
+    subjectUserId: v.id("users"),
+  }),
+  /**
+   * Somebody declared it carried no further: the question is answered, or the
+   * task is done.
+   *
+   * One variant with a `kind` rather than a `task.completed` and a
+   * `question.resolved`, on the same reasoning
+   * `annotation.visibility_changed` carries the visibility it moved *to*. The
+   * fact has one shape — a member said this stops travelling — and `kind` is
+   * what makes a reader able to say which of the two words to use for it.
+   * Never written for a decision: recording a decision is the settling.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("action.settled"),
+    paperId: v.id("papers"),
+    sessionId: v.id("sessions"),
+    actionId: v.id("actions"),
+    kind: actionKind,
+  }),
+  /**
+   * And back open, because the answer didn't hold.
+   *
+   * Recorded rather than achieved by deleting the settling event, which is what
+   * append-only means: the lab did think this was finished, and a memory that
+   * quietly edits out the fortnight it believed so is worth less than one that
+   * says it.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("action.reopened"),
+    paperId: v.id("papers"),
+    sessionId: v.id("sessions"),
+    actionId: v.id("actions"),
+    kind: actionKind,
+  }),
+  /**
+   * Taken back by whoever recorded it — the mis-heard decision, the task typed
+   * against the wrong name. The row goes; this stays, because the row was in
+   * front of the lab and the ledger does not pretend otherwise.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("action.withdrawn"),
+    paperId: v.id("papers"),
+    sessionId: v.id("sessions"),
+    actionId: v.id("actions"),
+    kind: actionKind,
+  }),
 );
 
 export default defineSchema({
@@ -970,6 +1075,83 @@ export default defineSchema({
      * retention cap drops.
      */
     .index("by_annotation_and_version", ["annotationId", "version"]),
+
+  /**
+   * What a discussion produced: a decision, an unanswered question, or a task
+   * with somebody's name on it.
+   *
+   * The other half of the ritual. A brief carries what the lab already wrote
+   * *into* the meeting; this carries what the meeting decided back out, and an
+   * open item travels to the next session about the same paper until somebody
+   * settles it. That loop is the point — this week's outcomes are what make
+   * next week's page worth opening.
+   *
+   * ## Authored, not derived
+   *
+   * Unlike a brief item or a synthesis line, an outcome's `body` is a sentence
+   * a member typed, not a rearrangement of notes. That difference decides the
+   * redaction rule: withdrawing the cited note redacts the **citation** and
+   * leaves the outcome standing, where a brief line loses its text outright.
+   * "The lab settled on the 4°C protocol" does not stop being true because the
+   * critique that prompted it went private.
+   *
+   * ## Lab-visible, always
+   *
+   * There is no `visibility` field and there is not meant to be one. A private
+   * decision is not a decision — it is a note, and Margin already has those,
+   * with two visibilities and a constitution around them. Everything in this
+   * table is the lab's, which is also why `citedAnnotationId` may only ever
+   * point at a lab-visible annotation and is re-checked on every read.
+   */
+  actions: defineTable({
+    labId: v.id("labs"),
+    /** The meeting that produced it. An outcome always has one. */
+    sessionId: v.id("sessions"),
+    /**
+     * Denormalized from the session, because carrying forward asks "what did
+     * earlier meetings *about this paper* leave open" and asking it through
+     * the sessions table would be a read per meeting to answer a question one
+     * index can.
+     */
+    paperId: v.id("papers"),
+    kind: actionKind,
+    /** What the member wrote down. Never empty: an outcome nobody stated is not one. */
+    body: v.string(),
+    /**
+     * The lab-visible note this came out of, if it came out of one.
+     *
+     * An id, kept, and re-resolved on read — the discipline `synthesis.ts`
+     * and `briefs.ts` both apply. A citation is a claim about a row, the
+     * margin moves underneath it, and a later un-share has to take the quote
+     * back off this page too.
+     */
+    citedAnnotationId: v.optional(v.id("annotations")),
+    recordedBy: v.id("users"),
+    /**
+     * Tasks only: the member who took it on.
+     *
+     * Optional because a room often agrees something needs doing before it
+     * agrees who is doing it, and a form that refuses to record the first
+     * without the second is a form people stop using mid-meeting.
+     */
+    ownerId: v.optional(v.id("users")),
+    /**
+     * When somebody declared it carried no further — the question answered,
+     * the task done. Absent means open, and open is what travels.
+     *
+     * Never set on a decision. Recording a decision is the settling of it, and
+     * the mutation refuses the transition rather than leaving a field whose
+     * meaning depends on the kind beside it.
+     */
+    settledAt: v.optional(v.number()),
+    settledBy: v.optional(v.id("users")),
+  })
+    .index("by_session", ["sessionId"])
+    /** The carry-forward read: one paper's outcomes, newest first. */
+    .index("by_paper", ["paperId"])
+    .index("by_lab", ["labId"])
+    /** "What am I on the hook for?" — asked per member, never across the lab. */
+    .index("by_owner", ["ownerId"]),
 
   /**
    * The Ledger: append-only, never updated, never deleted. Every row is a
