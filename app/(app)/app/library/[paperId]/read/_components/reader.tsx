@@ -983,6 +983,31 @@ export function Reader({
   }, [counts.size]);
   const reserveBand = loading || counts.size > 0 || bandUsed;
 
+  /**
+   * The paper saying where it just went.
+   *
+   * Every other part of this is already named: the page-jump field's label
+   * re-renders to "On page 2 of 15", the paper's own group is labelled the
+   * same. But a label is only true on re-read — a reader who presses Page Down
+   * is told nothing at all, and the position they navigated by has silently
+   * changed under them. So a page change is announced, and only a page change:
+   * the first reading of the paper is the label's job, and repeating it here
+   * would be the reader's own screen reader talking over the paper opening.
+   */
+  const [announcement, setAnnouncement] = useState("");
+  const announced = useRef<number | null>(null);
+  useEffect(() => {
+    if (pageCount === 0) {
+      return;
+    }
+    if (announced.current === null || announced.current === currentPage) {
+      announced.current = currentPage;
+      return;
+    }
+    announced.current = currentPage;
+    setAnnouncement(`Page ${currentPage + 1} of ${pageCount}`);
+  }, [currentPage, pageCount]);
+
   const toggleFilter = (type: AnnotationType) =>
     setFilter((previous) => {
       const next = new Set(previous);
@@ -1298,6 +1323,12 @@ export function Reader({
         )}
       </header>
 
+      {/* Mounted empty and kept, because a live region that arrives with its
+          own first sentence is a region screen readers do not announce. */}
+      <p aria-live="polite" aria-atomic="true" className="sr-only">
+        {announcement}
+      </p>
+
       <div
         ref={scrollRef}
         className="flex-1 overflow-y-auto overscroll-contain"
@@ -1334,10 +1365,18 @@ export function Reader({
           >
             {/* The paper is one tab stop, and a stop that moves is only an
                 affordance if you are told it moves. */}
+            {/* What the keys do, and no more than that. The last sentence used
+                to promise that Shift and the arrows select a passage, which is
+                true only in a browser with caret browsing switched on — off by
+                default in every one of them. A hint that describes a setting
+                the reader has not got is worse than no hint: it sends somebody
+                who cannot use a mouse looking for a key that does nothing. */}
             <p id={PAGE_KEYS_HINT_ID} className="sr-only">
               Page Up and Page Down move between pages. Home and End go to the
-              first and last. Hold Shift with the arrow keys to select a passage
-              to annotate.
+              first and last. To annotate a passage, select it — by dragging
+              across it, or with Shift and the arrow keys if your browser has
+              caret browsing turned on — and take the &ldquo;Annotate
+              selection&rdquo; button that appears beside it.
             </p>
             {doc === null || baseSize === null ? (
               <p className="mt-24 font-sans text-sm text-ink-faint">
