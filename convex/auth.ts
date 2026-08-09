@@ -33,6 +33,9 @@ const SIGN_IN_LINK_TTL_S = 60 * 60;
 
 const RESEND_ENDPOINT = "https://api.resend.com/emails";
 
+const nonEmpty = (v: string | undefined): boolean =>
+  typeof v === "string" && v.trim().length > 0;
+
 /**
  * Who Margin's mail comes from.
  *
@@ -47,8 +50,26 @@ function emailFrom(): string {
 
 /** Whether this deployment can send mail at all. */
 export function emailIsConfigured(): boolean {
-  const key = process.env.RESEND_API_KEY;
-  return typeof key === "string" && key.length > 0;
+  return nonEmpty(process.env.RESEND_API_KEY);
+}
+
+/**
+ * Whether this deployment holds a Google OAuth client.
+ *
+ * Both halves, and both non-empty. The emptiness is the part worth spelling
+ * out: `npx convex env set AUTH_GOOGLE_ID ""` is how people un-set a variable
+ * they are not ready to fill in, and a dashboard field saved blank reads the
+ * same way. An existence check passes on both, so the provider registers with
+ * an empty client id and the reader is handed Google's own `invalid_client`
+ * page — the deep-inside-the-handshake failure the block comment at the top of
+ * this file promises does not happen here. Same test the Resend key gets, for
+ * the same reason: a key that is present but blank is not a key.
+ */
+export function googleIsConfigured(): boolean {
+  return (
+    nonEmpty(process.env.AUTH_GOOGLE_ID) &&
+    nonEmpty(process.env.AUTH_GOOGLE_SECRET)
+  );
 }
 
 /** Text is escaped into HTML in three places; one function so it cannot be forgotten in the fourth. */
@@ -211,6 +232,8 @@ const SignInLink: EmailConfig<DataModel> = {
  * byline read this field, and neither has anywhere to put a blank.
  */
 const GoogleProvider = Google({
+  clientId: process.env.AUTH_GOOGLE_ID?.trim(),
+  clientSecret: process.env.AUTH_GOOGLE_SECRET?.trim(),
   profile(googleProfile) {
     const email =
       typeof googleProfile.email === "string"
@@ -260,10 +283,8 @@ const providers: AuthProviderConfig[] = [
   }),
 ];
 
-if (
-  process.env.AUTH_GOOGLE_ID !== undefined &&
-  process.env.AUTH_GOOGLE_SECRET !== undefined
-) {
+// `convex/auth.providers.test.ts` pins this registration predicate.
+if (googleIsConfigured()) {
   providers.push(GoogleProvider);
 }
 

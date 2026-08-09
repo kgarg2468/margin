@@ -214,7 +214,9 @@ export default function SignInPage() {
       await signIn("google", { redirectTo: destination });
     } catch (caught) {
       setError(
-        isServiceFailure(caught)
+        caught instanceof Error && /not configured/i.test(caught.message)
+          ? "Google sign-in isn't set up on this deployment yet."
+          : isServiceFailure(caught)
           ? "We couldn't reach Google just then. Try again in a moment."
           : "Google sign-in didn't go through.",
       );
