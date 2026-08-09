@@ -19,17 +19,19 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { PdfDropzone } from "./pdf-dropzone";
 import { parseAuthors, titleFromFilename, uploadPdf } from "./pdf-ingest";
+import { ReferenceImport } from "./reference-import";
 import type { TextLayerPhase } from "./use-text-layer";
 import { useTextLayer } from "./use-text-layer";
 
 /**
- * Two ways to add a paper, and they are genuinely different acts.
+ * Three ways to add a paper, and they are genuinely different acts.
  *
  * A DOI is a lookup: you know the paper exists, you want its record, and
  * whether a readable copy comes with it is out of your hands. A PDF is a
  * deposit: the file is in front of you, and the only open question is what to
- * call it. Tabs rather than one clever box that guesses, because guessing
- * wrong on the way in is expensive later.
+ * call it. A reference export is a batch whose records need reviewing. Tabs
+ * rather than one clever box that guesses, because guessing wrong on the way
+ * in is expensive later.
  */
 export function AddPaper({
   labId,
@@ -37,14 +39,14 @@ export function AddPaper({
 }: {
   labId: Id<"labs">;
   /**
-   * Fired once a DOI has produced a paper. The library hides this whole panel
+   * Fired once an add path has produced a paper. The library hides this panel
    * as soon as it has something on the shelf, which used to take the outcome
    * of the lookup down with it the instant the query updated — so the panel
    * asks to be kept open rather than assuming it will be.
    */
   onAdded?: () => void;
 }) {
-  const [tab, setTab] = useState<"doi" | "upload">("doi");
+  const [tab, setTab] = useState<"doi" | "upload" | "references">("doi");
 
   return (
     <section className={`${panelClass} flex flex-col gap-6`}>
@@ -65,12 +67,20 @@ export function AddPaper({
           active={tab === "upload"}
           onSelect={() => setTab("upload")}
         />
+        <TabButton
+          id="references"
+          label="Import references"
+          active={tab === "references"}
+          onSelect={() => setTab("references")}
+        />
       </div>
 
       {tab === "doi" ? (
         <DoiTab labId={labId} onAdded={onAdded} />
-      ) : (
+      ) : tab === "upload" ? (
         <UploadTab labId={labId} />
+      ) : (
+        <ReferenceImport labId={labId} onAdded={onAdded} />
       )}
     </section>
   );

@@ -21,6 +21,7 @@ import {
   nextRedirectHop,
 } from "./lib/scholarly";
 import { ingestStatus } from "./schema";
+import { referenceIdentity } from "../lib/reference-import/normalize";
 
 /**
  * Paper ingest and the library.
@@ -326,6 +327,74 @@ export const createFromUpload = mutation({
     });
 
     return paperId;
+  },
+});
+
+/**
+ * Put a citation export's metadata-only record on the shelf.
+ *
+ * DOI-bearing entries do not come through here: `createFromDoi` owns those,
+ * including normalization, dedupe, and the search for a legal copy. This is
+ * the deliberately narrower door for BibTeX and RIS records with no DOI at
+ * all. They still become the same paper, with the same membership gate and
+ * ledger fact, but wait in `needs-pdf` until a lab member supplies the file.
+ */
+export const createFromMetadata = mutation({
+  args: {
+    labId: v.id("labs"),
+    title: v.string(),
+    authors: v.optional(v.array(v.string())),
+    year: v.optional(v.number()),
+    venue: v.optional(v.string()),
+    abstract: v.optional(v.string()),
+    sourceUrl: v.optional(v.string()),
+  },
+  returns: v.object({
+    paperId: v.id("papers"),
+    title: v.string(),
+    /** True when the title and year were already in this lab's library. */
+    alreadyInLibrary: v.boolean(),
+  }),
+  handler: async (ctx, args) => {
+    const membership = await requireMembership(ctx, args.labId);
+    const title = cleanTitle(args.title);
+    const identity = referenceIdentity(title, args.year);
+    const existing = (
+      await ctx.db
+        .query("papers")
+        .withIndex("by_lab", (q) => q.eq("labId", args.labId))
+        .collect()
+    ).find(
+      (paper) => referenceIdentity(paper.title, paper.year) === identity,
+    );
+    if (existing !== undefined) {
+      return {
+        paperId: existing._id,
+        title: existing.title,
+        alreadyInLibrary: true,
+      };
+    }
+    const paperId = await ctx.db.insert("papers", {
+      labId: args.labId,
+      title,
+      authors: cleanAuthors(args.authors),
+      year: args.year,
+      venue: args.venue,
+      abstract: args.abstract,
+      sourceUrl: args.sourceUrl,
+      ingestStatus: "needs-pdf",
+      addedBy: membership.userId,
+    });
+
+    await recordEvent(ctx, {
+      labId: args.labId,
+      type: "paper.added",
+      actorId: membership.userId,
+      paperId,
+      title,
+    });
+
+    return { paperId, title, alreadyInLibrary: false };
   },
 });
 
