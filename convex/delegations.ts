@@ -1234,7 +1234,8 @@ export const claim = internalMutation({
  * Gathering — the scheduled-reader mode
  * ---------------------------------------------------------------------- */
 
-const candidateShape = v.object({
+/** Exported so the eval harness (`convex/scoutEval.ts`) carries candidates in exactly this shape. */
+export const candidateShape = v.object({
   _id: v.id("annotations"),
   labId: v.id("labs"),
   paperId: v.id("papers"),

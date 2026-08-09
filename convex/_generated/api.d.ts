@@ -26,6 +26,7 @@ import type * as lib_ledger from "../lib/ledger.js";
 import type * as lib_scholarly from "../lib/scholarly.js";
 import type * as notifications from "../notifications.js";
 import type * as papers from "../papers.js";
+import type * as scoutEval from "../scoutEval.js";
 import type * as search from "../search.js";
 import type * as sessions from "../sessions.js";
 import type * as synthesis from "../synthesis.js";
@@ -57,6 +58,7 @@ declare const fullApi: ApiFromModules<{
   "lib/scholarly": typeof lib_scholarly;
   notifications: typeof notifications;
   papers: typeof papers;
+  scoutEval: typeof scoutEval;
   search: typeof search;
   sessions: typeof sessions;
   synthesis: typeof synthesis;

@@ -243,7 +243,24 @@ export class FakeDb {
     const record = (index: string, constraints: Constraint[]) => {
       this.reads.push({ table, index, constraints });
     };
+    /**
+     * A read with no index at all — a table scan, which Convex allows and
+     * this codebase almost never does.
+     *
+     * It is here for `scoutEval.questions`, whose "every lab on this
+     * deployment" read has no index to go through and is bounded by a `take`
+     * instead. Recorded under its own name so a test can still assert that a
+     * *product* read went through the index it claims to.
+     */
+    const scan = () => {
+      record("(table scan)", []);
+      return new FakeQuery(rows, [], false, false);
+    };
     return {
+      take: (count: number) => scan().take(count),
+      collect: () => scan().collect(),
+      first: () => scan().first(),
+      order: (direction: "asc" | "desc") => scan().order(direction),
       withIndex: (
         index: string,
         build?: (q: ConstraintBuilder) => ConstraintBuilder,
