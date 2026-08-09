@@ -19,13 +19,60 @@ import {
 import { awayProse, startWindow } from "@/lib/session-window";
 import { useMutation } from "convex/react";
 import { useQuery } from "convex-helpers/react/cache/hooks";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ConfirmAction } from "../../../_components/confirm-action";
 import { readableError } from "../../../_components/errors";
+import { useToast } from "../../../_components/toast";
+import { runWithFeedback } from "../../../_components/use-feedback-mutation";
 
 export type SessionDetail = NonNullable<
   FunctionReturnType<typeof api.sessions.getSession>
 >;
+
+/**
+ * What the room reads after a move forward, with the way back on it.
+ *
+ * End is pressed in two places — this row and the projector header — and a lab
+ * told "Session ended." on one screen and something else on the other is
+ * looking at two apps. So the copy and the mutation behind `Undo` live here
+ * once, and both sites call in.
+ *
+ * The undo cannot report its own failure through the surface that pushed it:
+ * by the time the toast is up, that surface is gone (this component renders
+ * nothing past `live`, and the projector view goes with it). So a refusal
+ * comes back as an error toast, in the one layer that outlives the click — and
+ * it is worth reading, because the server has real reasons to say no. The ten
+ * minutes may have lapsed while the toast sat there, or the session may have
+ * moved on to a write-up, and `reopenSession` will not walk that back. The
+ * status is not re-checked here before asking: the server is the law, and a
+ * client that guessed at the answer would only ever guess it stale.
+ */
+export function useUndoableMove() {
+  const toast = useToast();
+  const reopenSession = useMutation(api.sessions.reopenSession);
+  const restoreSession = useMutation(api.sessions.restoreSession);
+
+  return useCallback(
+    (move: "ended" | "cancelled", sessionId: Id<"sessions">) => {
+      const ended = move === "ended";
+      const undo = ended ? reopenSession : restoreSession;
+      toast({
+        message: ended ? "Session ended." : "Session cancelled.",
+        action: {
+          label: "Undo",
+          onAction: () =>
+            void runWithFeedback(() => undo({ sessionId }), {
+              errorMessage: ended
+                ? "That session didn't reopen."
+                : "That session didn't come back.",
+              toast,
+            }),
+        },
+      });
+    },
+    [toast, reopenSession, restoreSession],
+  );
+}
 
 /**
  * Running the meeting: start it, move it, hand it over, call it off.
@@ -34,15 +81,19 @@ export type SessionDetail = NonNullable<
  * server decides that and hands it back as `canManage`, so this component
  * never re-derives the rule.
  *
- * Starting is the loud button and cancelling is quiet text, because one of them
- * is what somebody came here to do and the other is a thing you should have to
- * mean. Both are irreversible; only cancelling arms first, since a session
- * started by mistake can simply be ended.
+ * Starting is the loud button; ending and calling off are quiet text, because
+ * one of them is what somebody came here to do and the others are things you
+ * should have to mean. Both of those now ask first and stay undoable for ten
+ * minutes after they fire — a stray click on a projector, in front of the
+ * whole lab, is exactly the wrong moment to find out a button was irreversible.
+ * The question is there so the slip mostly never lands; the undo is there for
+ * the slip that gets past a question nobody reads.
  */
 export function ManageSession({ session }: { session: SessionDetail }) {
   const startSession = useMutation(api.sessions.startSession);
   const endSession = useMutation(api.sessions.endSession);
   const cancelSession = useMutation(api.sessions.cancelSession);
+  const announceMove = useUndoableMove();
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [moving, setMoving] = useState(false);
@@ -118,19 +169,19 @@ export function ManageSession({ session }: { session: SessionDetail }) {
           })()}
 
         {session.status === "live" && (
-          <button
-            type="button"
-            disabled={pending}
-            className={secondaryButtonClass}
-            onClick={() =>
-              void run(
-                () => endSession({ sessionId: session._id }),
-                "That session didn't end.",
-              )
+          <ConfirmAction
+            label="End session"
+            confirmLabel="End it"
+            cancelLabel="Keep going"
+            tone="faint"
+            size="sm"
+            run={() =>
+              run(async () => {
+                await endSession({ sessionId: session._id });
+                announceMove("ended", session._id);
+              }, "That session didn't end.")
             }
-          >
-            {pending ? "Ending…" : "End session"}
-          </button>
+          />
         )}
 
         {session.status === "scheduled" && (
@@ -150,10 +201,10 @@ export function ManageSession({ session }: { session: SessionDetail }) {
               tone="faint"
               size="sm"
               run={() =>
-                run(
-                  () => cancelSession({ sessionId: session._id }),
-                  "That session didn't cancel.",
-                )
+                run(async () => {
+                  await cancelSession({ sessionId: session._id });
+                  announceMove("cancelled", session._id);
+                }, "That session didn't cancel.")
               }
             />
           </>
