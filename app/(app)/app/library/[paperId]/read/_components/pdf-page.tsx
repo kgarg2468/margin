@@ -686,6 +686,18 @@ export function PdfPage({
       style={pageStyle}
       onMouseUp={captureSelection}
       onKeyDown={(event: KeyboardEvent<HTMLDivElement>) => {
+        // Held down, and these keys are not navigation any more: Shift+End
+        // extends the selection to the end of the line, which is the gesture
+        // the whole caret path exists to serve, and a page jump would eat it
+        // and then hand `onKeyUp` a selection that was never extended.
+        if (
+          event.shiftKey ||
+          event.metaKey ||
+          event.ctrlKey ||
+          event.altKey
+        ) {
+          return;
+        }
         const target = pageKeyTarget(event.key, {
           current: pageIndex,
           pageCount,
