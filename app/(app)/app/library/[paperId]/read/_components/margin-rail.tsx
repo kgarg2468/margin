@@ -324,6 +324,9 @@ export function MarginRail({
       ? null
       : connectorGeometry(
           {
+            // gutterX and origin share an offsetParent (reader.tsx's
+            // `relative` content box) — see the note beside gutterX's
+            // measurement in pdf-page.tsx before repositioning anything.
             x: linked.card.passage.gutterX - origin.left,
             y:
               (linked.card.passage.top + linked.card.passage.bottom) / 2 -

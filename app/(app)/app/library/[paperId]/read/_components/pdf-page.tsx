@@ -340,6 +340,10 @@ export function PdfPage({
     const points = new Map<AnnotationId, PassagePoint>();
     // The gutter starts at the page's right edge, and the page does not move
     // between annotations, so this is read once rather than per mark.
+    // This offset is relative to the reader's content box (the `relative`
+    // wrapper in reader.tsx), which is also the rail spacer's offsetParent —
+    // margin-rail.tsx subtracts its own origin from this value. Giving the
+    // page column or the rail root a `position` breaks both axes silently.
     const gutterX = wrapper.offsetLeft + wrapper.offsetWidth;
 
     for (const annotation of annotations) {
