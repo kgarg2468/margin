@@ -253,6 +253,12 @@ function InviteByEmail({ lab }: { lab: LabSummary }) {
   // what a half-delivered batch needs is for the addresses that failed to
   // still be sitting there, which is a change to the box, not to a model of it.
   const field = useRef<HTMLTextAreaElement>(null);
+  // The code a half-delivered batch is already riding on. Re-sending has to
+  // reuse it: minting a fresh one per retry would leave the lab holding
+  // several live credentials, each admitting the whole batch over again.
+  const [retryInviteId, setRetryInviteId] = useState<Id<"invites"> | null>(
+    null,
+  );
 
   return (
     <form
@@ -266,8 +272,10 @@ function InviteByEmail({ lab }: { lab: LabSummary }) {
           const result = await inviteByEmail({
             labId: lab._id,
             emails: [field.current?.value ?? ""],
+            inviteId: retryInviteId ?? undefined,
           });
           if (result.failed.length === 0) {
+            setRetryInviteId(null);
             if (field.current !== null) {
               field.current.value = "";
             }
@@ -277,7 +285,10 @@ function InviteByEmail({ lab }: { lab: LabSummary }) {
           } else {
             // Everything that went through is gone from the box and everything
             // that didn't is still in it, so "send again" means pressing the
-            // button again — not reconstructing the list from a count.
+            // button again — not reconstructing the list from a count. The
+            // batch's own code comes with them, so pressing it re-delivers
+            // rather than granting a second helping of admissions.
+            setRetryInviteId(result.inviteId);
             if (field.current !== null) {
               field.current.value = result.failed.join(", ");
             }
@@ -289,6 +300,12 @@ function InviteByEmail({ lab }: { lab: LabSummary }) {
             );
           }
         } catch (caught) {
+          // Nothing was delivered, so let go of the batch's code: it may be
+          // the thing that was refused (revoked between sends, or too full for
+          // the retry), and holding on would fail the same way forever. The
+          // next press mints cleanly, which is one spare code in the worst
+          // case rather than one per retry.
+          setRetryInviteId(null);
           setError(
             readableError(caught, "We couldn't send those invitations."),
           );

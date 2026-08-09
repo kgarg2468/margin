@@ -2,7 +2,6 @@
 
 import { api } from "@/convex/_generated/api";
 import { useMutation, useQuery } from "convex/react";
-import { ConvexError } from "convex/values";
 import type { FunctionReturnType } from "convex/server";
 import {
   createContext,
@@ -13,7 +12,7 @@ import {
   useState,
 } from "react";
 import type { ReactNode } from "react";
-import { readableError } from "./errors";
+import { isPermanentInviteRefusal, readableError } from "./errors";
 
 export type LabSummary = FunctionReturnType<typeof api.labs.getMyLabs>[number];
 
@@ -106,12 +105,16 @@ export function LabProvider({ children }: { children: ReactNode }) {
    * Try to spend one invite code, and say what happened.
    *
    * The two ways this fails are not the same failure, and conflating them is
-   * what made the first version lose invitations. A `ConvexError` is the
-   * server's considered answer — revoked, expired, full — and it will say the
-   * same thing forever, so the code is spent out of the URL and the reader is
-   * told to ask for a new one. Anything else (a dropped connection, a 5xx, a
-   * transaction that lost its race) is weather: the code is untouched and
-   * still in the address bar, so a retry — or simply a reload — picks it up.
+   * what made the first version lose invitations. Only a refusal the server
+   * explicitly labels as being about the *code* — revoked, expired, full, not
+   * a code at all — is final, and only that spends it out of the URL.
+   *
+   * Everything else is weather: a dropped connection, a 5xx, a transaction
+   * that lost its race, and in particular an authorization helper saying the
+   * caller isn't signed in, which is a fact about the session and not about
+   * the invitation. The code stays in the address bar, so a retry — or simply
+   * a reload, which sends an unauthenticated reader back through `/signin`
+   * carrying it — picks the invitation back up.
    */
   const attemptRedeem = useCallback(
     async (code: string) => {
@@ -127,7 +130,7 @@ export function LabProvider({ children }: { children: ReactNode }) {
             : `You've joined ${labName}.`,
         });
       } catch (caught) {
-        if (caught instanceof ConvexError) {
+        if (isPermanentInviteRefusal(caught)) {
           clearInviteParam(code);
           setInviteNotice({
             tone: "refused",
@@ -141,7 +144,7 @@ export function LabProvider({ children }: { children: ReactNode }) {
         setInviteNotice({
           tone: "refused",
           message:
-            "We couldn't reach Margin to accept that invitation. It's still good — try again.",
+            "We couldn't accept that invitation just now — your session may have lapsed. It's still good: try again, or reload to sign in.",
           retryCode: code,
         });
       }
