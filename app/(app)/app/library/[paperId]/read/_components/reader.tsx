@@ -364,8 +364,22 @@ export function Reader({
     new Map(),
   );
 
+  /**
+   * The document every cache and every answer below is about.
+   *
+   * A recovery is a claim about one file's pagination, and it takes as long as
+   * pdf.js takes to read four pages — long enough for the PDF underneath to be
+   * replaced while it runs. Everything that lands late is checked against this
+   * before it is believed.
+   */
+  const currentDoc = useRef<PDFDocumentProxy | null>(null);
+
   // A different document is a different pagination, so none of it carries over.
+  // Declared above the recovery effect so it runs first on the commit that
+  // swaps the file: work still in flight is holding the old proxy, and by the
+  // time it comes back this ref already disagrees with it.
   useEffect(() => {
+    currentDoc.current = doc;
     pageTexts.current.clear();
     attempted.current.clear();
     setFoundOn(new Map());
@@ -395,6 +409,12 @@ export function Reader({
     }
 
     const loadPageText = async (pageIndex: number): Promise<string | null> => {
+      if (currentDoc.current !== doc) {
+        // The file this was asked about is gone. Reporting every page
+        // unreadable winds the search down at the next ring rather than
+        // reading four more pages off a document being torn down.
+        return null;
+      }
       const held = pageTexts.current.get(pageIndex);
       if (held !== undefined) {
         return held;
@@ -418,7 +438,13 @@ export function Reader({
         // hands back the same proxy for both, and cleaning it here would pull
         // the operator list out from under a live canvas.
         const extracted = normalizePdfText(text);
-        pageTexts.current.set(pageIndex, extracted);
+        // Checked again, because the swap can land during the read above. This
+        // cache is keyed by page index alone, so one late write would leave the
+        // *new* document holding a page of the old one's text — every later
+        // recovery in this paper searching a string that is not in the file.
+        if (currentDoc.current === doc) {
+          pageTexts.current.set(pageIndex, extracted);
+        }
         return extracted;
       } catch {
         // One unreadable page is not a reason to abandon the other three.
@@ -430,11 +456,22 @@ export function Reader({
     // has one, but here the work is already claimed: dropping a recovery in
     // flight because a page below happened to finish rendering would strand
     // that note as orphaned for the rest of the session.
+    //
+    // Which is why the guard is on the *document* rather than on this effect
+    // running again. A re-run is the same question about the same file and its
+    // answer is still good; a new file is a different question, and an answer
+    // carrying the old pagination would put the note on the wrong page of the
+    // paper now on screen and tell the reader, in so many words, that it found
+    // it there. Nothing is stranded by dropping it: the effect above cleared
+    // `attempted` on the same commit, so the new document asks again.
     void (async () => {
       for (const annotation of orphans) {
         const found = await recoverAnchor(annotation.anchor, loadPageText, {
           pageCount,
         });
+        if (currentDoc.current !== doc) {
+          return;
+        }
         setFoundOn((previous) => {
           const next = new Map(previous);
           next.set(annotation._id, found?.pageIndex ?? null);
