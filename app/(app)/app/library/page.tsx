@@ -7,7 +7,7 @@ import { downloadText, exportFilename } from "@/lib/export/download";
 import type { LibraryFilter } from "@/lib/library/filter";
 import { applyLibraryFilter, emptyFilter } from "@/lib/library/filter";
 import { eyebrowClass, secondaryButtonClass } from "@/lib/ui";
-import { useQuery } from "convex/react";
+import { useQuery } from "convex-helpers/react/cache/hooks";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { use, useCallback, useEffect, useRef, useState } from "react";

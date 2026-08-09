@@ -11,7 +11,8 @@ import {
   suggestTags,
 } from "@/lib/library/tags";
 import { errorClass, eyebrowClass } from "@/lib/ui";
-import { useMutation, useQuery } from "convex/react";
+import { useMutation } from "convex/react";
+import { useQuery } from "convex-helpers/react/cache/hooks";
 import { useEffect, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 

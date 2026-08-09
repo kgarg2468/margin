@@ -6,7 +6,7 @@ import { isEmpty } from "@/lib/temporal/derive";
 import { formatDate, relativeWhen } from "@/lib/sessions-ui";
 import { eyebrowClass } from "@/lib/ui";
 import type { FunctionReturnType } from "convex/server";
-import { useQuery } from "convex/react";
+import { useQuery } from "convex-helpers/react/cache/hooks";
 import Link from "next/link";
 import { useState } from "react";
 import { typeStyle } from "../read/_components/ontology";

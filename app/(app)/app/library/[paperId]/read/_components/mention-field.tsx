@@ -8,7 +8,7 @@ import {
   mentionSegments,
   rankCandidates,
 } from "@/lib/mentions";
-import { useQuery } from "convex/react";
+import { useQuery } from "convex-helpers/react/cache/hooks";
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 
 /** Somebody the author has actually chosen, kept until the note is saved. */

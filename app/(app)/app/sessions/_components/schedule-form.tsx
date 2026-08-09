@@ -15,7 +15,8 @@ import {
   primaryButtonClass,
   selectClass,
 } from "@/lib/ui";
-import { useMutation, useQuery } from "convex/react";
+import { useMutation } from "convex/react";
+import { useQuery } from "convex-helpers/react/cache/hooks";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";

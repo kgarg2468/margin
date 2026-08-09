@@ -13,7 +13,8 @@ import {
   skeletonClass,
 } from "@/lib/ui";
 import type { FunctionReturnType } from "convex/server";
-import { useAction, useMutation, useQuery } from "convex/react";
+import { useAction, useMutation } from "convex/react";
+import { useQuery } from "convex-helpers/react/cache/hooks";
 import { useState } from "react";
 import { readableError } from "../../../_components/errors";
 import { annotationAnchorId } from "./session-board";

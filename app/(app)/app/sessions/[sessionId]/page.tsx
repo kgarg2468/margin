@@ -9,7 +9,7 @@ import {
   relativeWhen,
 } from "@/lib/sessions-ui";
 import { eyebrowClass, primaryButtonClass } from "@/lib/ui";
-import { useQuery } from "convex/react";
+import { useQuery } from "convex-helpers/react/cache/hooks";
 import { PageSkeleton } from "../../_components/skeletons";
 import Link from "next/link";
 import { use, useMemo } from "react";

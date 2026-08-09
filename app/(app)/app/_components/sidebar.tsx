@@ -1,15 +1,16 @@
 "use client";
 
 import { api } from "@/convex/_generated/api";
-import { eyebrowClass, selectClass, skeletonClass } from "@/lib/ui";
+import { eyebrowClass, linkButtonClass, skeletonClass } from "@/lib/ui";
 import { useAuthActions } from "@convex-dev/auth/react";
-import { useQuery } from "convex/react";
+import { useQuery } from "convex-helpers/react/cache/hooks";
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { SearchAffordance } from "./command-palette";
 import type { LabSummary } from "./lab-provider";
 import { useLabs } from "./lab-provider";
 import { NotificationRail } from "./notifications";
+import { Select } from "./select";
 
 /** The product, in two rooms: what the lab is reading, and when it meets. */
 const sections = [
@@ -21,11 +22,10 @@ export function Sidebar() {
   const { labs, currentLab, selectLab } = useLabs();
   const viewer = useQuery(api.users.viewer);
   const { signOut } = useAuthActions();
-  const router = useRouter();
   const pathname = usePathname();
 
   return (
-    <aside className="flex shrink-0 flex-col gap-8 border-b border-rule bg-surface-sunken px-6 py-6 md:h-screen md:w-64 md:border-b-0 md:border-r md:py-8">
+    <aside className="flex shrink-0 flex-col gap-8 border-b border-rule bg-surface-sunken px-6 py-6 md:sticky md:top-0 md:h-screen md:w-64 md:self-start md:overflow-y-auto md:border-b-0 md:border-r md:py-8">
       <Link
         href="/app"
         className="self-start font-serif text-3xl lowercase tracking-tight text-ink-strong transition-opacity hover:opacity-75"
@@ -44,20 +44,12 @@ export function Sidebar() {
             {currentLab.name}
           </span>
         ) : (
-          <select
+          <Select
             aria-label="Switch lab"
-            value={currentLab?._id ?? ""}
-            onChange={(event) =>
-              selectLab(event.target.value as LabSummary["_id"])
-            }
-            className={selectClass}
-          >
-            {labs.map((lab) => (
-              <option key={lab._id} value={lab._id}>
-                {lab.name}
-              </option>
-            ))}
-          </select>
+            value={currentLab?._id ?? null}
+            onValueChange={selectLab}
+            options={labs.map((lab) => ({ value: lab._id, label: lab.name }))}
+          />
         )}
       </div>
 
@@ -83,6 +75,7 @@ export function Sidebar() {
               <li key={item.label}>
                 <Link
                   href={item.href}
+                  prefetch={true}
                   aria-current={active ? "page" : undefined}
                   className={
                     "-mx-3 flex flex-col gap-0.5 rounded-r-sm border-l-2 px-3 py-2 transition-colors " +
@@ -117,12 +110,29 @@ export function Sidebar() {
             {viewer.name ?? viewer.email}
           </span>
         )}
+        {/*
+          A document navigation, not `router.push` — the one place in the app
+          where throwing the JS context away is the point.
+
+          `clearAuth()` only tells the server to stop trusting us; it does not
+          clear the client's stored query results. Everything still subscribed
+          re-runs without an identity, `requireUserId` throws, and those
+          failures sit in the client-global result store keyed by query token.
+          The query cache holds those tokens subscribed for five minutes after
+          the last unmount, so `QueryRemoved` never fires and the failures
+          outlive the session — and the cached `useQuery` rethrows a stored
+          Error during render. Signing back in would then read a dead session's
+          errors. A full load destroys the client singleton, the result store
+          and every pending eviction timer, so the next session starts every
+          query at `undefined`. One page load at a session boundary costs
+          nothing: there is nothing worth keeping warm across it.
+        */}
         <button
           type="button"
-          className="self-start font-sans text-sm text-accent underline-offset-4 hover:underline"
+          className={`${linkButtonClass} self-start`}
           onClick={async () => {
             await signOut();
-            router.push("/signin");
+            window.location.assign("/signin");
           }}
         >
           Sign out

@@ -9,7 +9,7 @@ import { pdfAuthHeaders, pdfEndpoint } from "@/lib/pdf/delivery";
 import { loadPdfjs, normalizePdfText } from "@/lib/pdf/extract";
 import { eyebrowClass, skeletonClass } from "@/lib/ui";
 import { useAuthToken } from "@convex-dev/auth/react";
-import { useQuery } from "convex/react";
+import { useQuery } from "convex-helpers/react/cache/hooks";
 import Link from "next/link";
 import type {
   PDFDocumentLoadingTask,

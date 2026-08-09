@@ -1,5 +1,5 @@
 /**
- * Shared control classes.
+ * Shared control classes, and the one question they all ask.
  *
  * These live in one place so the sign-in page and the app shell cannot drift
  * apart, and so every control keeps referencing the semantic tokens from
@@ -9,15 +9,13 @@
  * Two grammars run through all of it, both inherited from the landing page:
  * shadows come from the elevation tokens (`--shadow-card` / `-lift` /
  * `-sheet`) and never from literals, and anything pressable acknowledges the
- * press — colours ease over 200ms and the control gives a hair under the
- * finger. Both are motion-safe; reduced motion keeps the colour changes and
- * loses the movement.
+ * press — colours ease over `--dur-hover` and the control gives a hair under
+ * the finger over `--dur-press`. The movement is motion-safe; reduced motion
+ * keeps the colour changes and loses it.
  */
 
-/** The press grammar every button shares. */
-const pressable =
-  "motion-safe:transition-[color,background-color,border-color,transform] " +
-  "motion-safe:duration-200 motion-safe:active:scale-[0.98] transition-colors";
+/** The press grammar every control shares — see `@utility pressable`. */
+const pressable = "pressable";
 
 export const labelClass =
   "font-sans text-xs uppercase tracking-[0.14em] text-ink-faint";
@@ -67,12 +65,12 @@ export const cardClass =
 export const panelClass = `${cardClass} pop-in`;
 
 /**
- * A block of what-is-coming: sunken, shaped like the content, breathing
- * slowly (see `margin-breathe`). Size it with width/height utilities.
+ * A block of what-is-coming: sunken, shaped like the content, with a sheen
+ * passing over it (see `skeleton-shimmer`). A sweep reads as a shorter wait
+ * than a pulse does. Size it with width/height utilities; stagger a list by
+ * setting `animationDelay` on the block, which the sheen inherits.
  */
-export const skeletonClass =
-  "rounded-sm bg-surface-sunken " +
-  "motion-safe:animate-[margin-breathe_1.8s_ease-in-out_infinite]";
+export const skeletonClass = "rounded-sm bg-surface-sunken skeleton-shimmer";
 
 /** An erratum in the margin: a rule down the left, plain ink, no shouting. */
 export const errorClass =
@@ -83,8 +81,46 @@ export const chipClass =
   "inline-flex items-center rounded-sm border border-rule px-1.5 py-0.5 " +
   "font-sans text-[10px] uppercase tracking-[0.14em] text-ink-faint";
 
+/** A chip that is a real control (filter chips, type toggles). */
+export const chipButtonClass = `${chipClass} ${pressable} hover:border-ink-faint hover:text-ink-muted`;
+
 export const eyebrowClass =
   "font-sans text-xs font-medium uppercase tracking-[0.18em] text-ink-faint";
+
+/**
+ * Whether the interaction that opened a surface came from the keyboard.
+ *
+ * The motion budget says keyboard-triggered surfaces render instantly (see
+ * `docs/superpowers/specs/2026-08-08-product-feel-overhaul-design.md`): a
+ * pointer takes time to arrive and the entrance covers that travel, but a
+ * keystroke is instantaneous and an animation after it is just latency you
+ * added yourself. Someone holding Tab through a form should not be watching
+ * sheets bloom.
+ *
+ * The one piece of behaviour in a file of class strings, and it earns the
+ * exception the same way they do: it is the single answer to a question three
+ * separate surfaces ask — the popover, the confirm dialog and the select.
+ * Its first home was `popover.tsx`, which quietly meant every route rendering
+ * a confirm dialog pulled the whole Base UI popover in for ten lines. Nothing
+ * here imports a framework, so nothing here can drag one along.
+ *
+ * Enter and Space on a focused button still dispatch a `click`, which is why
+ * the `KeyboardEvent` check is not enough on its own; the browser marks those
+ * synthesized clicks with a `detail` of `0`, which a real press never has.
+ */
+export function openedFromKeyboard(event: Event | undefined): boolean {
+  if (event === undefined) {
+    return false;
+  }
+  if (typeof KeyboardEvent !== "undefined" && event instanceof KeyboardEvent) {
+    return true;
+  }
+  return (
+    typeof MouseEvent !== "undefined" &&
+    event instanceof MouseEvent &&
+    event.detail === 0
+  );
+}
 
 /**
  * A key, drawn as a key: the brass label on a catalogue drawer rather than a

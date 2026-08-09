@@ -7,7 +7,7 @@ import {
   versionSummary,
 } from "@/lib/annotation-history/history";
 import { skeletonClass } from "@/lib/ui";
-import { useQuery } from "convex/react";
+import { useQuery } from "convex-helpers/react/cache/hooks";
 import { typeStyle } from "./ontology";
 import type { AnnotationView } from "./types";
 

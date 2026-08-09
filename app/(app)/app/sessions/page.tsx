@@ -4,7 +4,7 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { isUpcoming } from "@/lib/sessions-ui";
 import { eyebrowClass, secondaryButtonClass } from "@/lib/ui";
-import { useQuery } from "convex/react";
+import { useQuery } from "convex-helpers/react/cache/hooks";
 import Link from "next/link";
 import { use, useState } from "react";
 import type { LabSummary } from "../_components/lab-provider";
