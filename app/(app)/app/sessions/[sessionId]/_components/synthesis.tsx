@@ -4,7 +4,7 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { citationNumbering } from "@/lib/citations/numbering";
 import { downloadText, exportFilename } from "@/lib/export/download";
-import { sessionWriteUpToMarkdown } from "@/lib/export/markdown";
+import { SECTION_ORDER, sessionWriteUpToMarkdown } from "@/lib/export/markdown";
 import { relativeWhen } from "@/lib/sessions-ui";
 import {
   errorClass,
@@ -64,10 +64,12 @@ type Section = Synthesis["sections"][number];
  *
  * Citations are numbered once for the whole write-up, by first appearance
  * walking `SECTION_ORDER` — so two bullets drawn from the same note carry the
- * same number, which is the only thing a reader can do anything with. The map
- * is built here, from the same ordered array this component renders, and
- * handed down; the Markdown export builds its own from the same rule, so the
- * file and the screen cannot disagree. See `lib/citations/numbering.ts`.
+ * same number, which is the only thing a reader can do anything with. That
+ * order is imported from `lib/export/markdown.ts` rather than restated here,
+ * because it is the numbering rule itself: the export folds its own map over
+ * the very same array, so the file and the screen cannot disagree about which
+ * note "Note 3" is — not by convention, but because there is only one list.
+ * See `lib/citations/numbering.ts`.
  *
  * Whether a number is also a *link* is a separate question, and the board
  * below answers it: `anchoredIds` says which notes really have an anchor on
@@ -85,18 +87,6 @@ type Section = Synthesis["sections"][number];
  * page says in as many words that the approved copy stands until somebody
  * approves a new one.
  */
-
-/** Canonical order and a heading for a section whose own is missing. */
-const SECTION_ORDER: readonly {
-  key: Section["key"];
-  fallback: string;
-}[] = [
-  { key: "summary", fallback: "What the session was about" },
-  { key: "open-questions", fallback: "Open questions" },
-  { key: "critiques-and-methods", fallback: "Critiques and methods" },
-  { key: "connections", fallback: "Connections" },
-  { key: "next-reading", fallback: "What to read next" },
-];
 
 export function SessionSynthesis({
   session,

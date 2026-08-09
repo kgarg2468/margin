@@ -1,6 +1,19 @@
 import { citationNumbering } from "../citations/numbering";
 
-const SECTION_ORDER = [
+/**
+ * The canonical section order, and a heading for a section whose own is
+ * missing.
+ *
+ * Exported, and imported by the session's write-up component rather than
+ * restated there, because this array is not a layout preference — it *is* the
+ * citation numbering rule. Notes are numbered by first appearance walking
+ * these sections, so a second copy that drifted by one line would renumber the
+ * screen and not the download, and "Note 3" would mean two different notes in
+ * two artifacts a reader is holding side by side. That is the exact defect
+ * this file was already written to prevent; one array is what actually
+ * prevents it.
+ */
+export const SECTION_ORDER = [
   { key: "summary", fallback: "What the session was about" },
   { key: "open-questions", fallback: "Open questions" },
   { key: "critiques-and-methods", fallback: "Critiques and methods" },
@@ -75,9 +88,10 @@ function markdownItem<A extends string>(
  *
  * Citation numbers are built here, from the sections this function was already
  * handed, in the canonical order it prints them — not passed in. The page
- * builds its map by the same rule from the same ordered array, so a downloaded
- * .md and the screen it came from cannot disagree about which note "Note 3"
- * is: there is no argument to forget to thread through.
+ * builds its map by the same rule from `SECTION_ORDER` above, which it imports
+ * rather than repeats, so a downloaded .md and the screen it came from cannot
+ * disagree about which note "Note 3" is: there is no argument to forget to
+ * thread through, and no second ordering to keep in step.
  */
 export function sessionWriteUpToMarkdown<A extends string = string>({
   title,
