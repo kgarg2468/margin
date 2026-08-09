@@ -182,8 +182,14 @@ const REQUEST_TIMEOUT_MS = 120_000;
  * Slightly longer than the request timeout: the lease has to outlive the call
  * it is protecting, and an action that dies without clearing its marker must
  * not lock the session out for good.
+ *
+ * Exported because a live lease is not only this module's business.
+ * `sessions.reopenSession` reads it to refuse an undo while a run is in
+ * flight: reopening moves the session off `ended`, and `store` below will only
+ * write to a session that has ended — so a reopen mid-run turns a paid call
+ * into a refusal nobody asked for. One constant, two enforcements.
  */
-const GENERATION_LEASE_MS = 3 * 60 * 1000;
+export const GENERATION_LEASE_MS = 3 * 60 * 1000;
 
 const synthesisSection = v.object({
   key: synthesisSectionKey,

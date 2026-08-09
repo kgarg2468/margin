@@ -11,6 +11,7 @@ import {
   OUTCOME_KINDS,
   type OutcomeKind,
 } from "@/lib/actions";
+import { cleanQuote } from "@/lib/quotes";
 import { formatDate } from "@/lib/sessions-ui";
 import {
   errorClass,
@@ -313,7 +314,9 @@ function OutcomeBody({ outcome }: { outcome: OutcomeRow }) {
           </p>
         ) : (
           <blockquote className="font-serif text-[13px] italic leading-snug text-ink-faint">
-            <span className="line-clamp-2">{outcome.citation.quote}</span>
+            <span className="line-clamp-2">
+              {cleanQuote(outcome.citation.quote ?? "", 160)}
+            </span>
             <span className="not-italic tabular-nums">
               {outcome.citation.authorName !== undefined
                 ? ` — ${outcome.citation.authorName}`

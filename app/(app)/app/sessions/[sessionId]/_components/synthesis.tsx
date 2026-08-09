@@ -2,8 +2,9 @@
 
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import { citationNumbering } from "@/lib/citations/numbering";
 import { downloadText, exportFilename } from "@/lib/export/download";
-import { sessionWriteUpToMarkdown } from "@/lib/export/markdown";
+import { SECTION_ORDER, sessionWriteUpToMarkdown } from "@/lib/export/markdown";
 import { relativeWhen } from "@/lib/sessions-ui";
 import {
   errorClass,
@@ -15,9 +16,10 @@ import {
 import type { FunctionReturnType } from "convex/server";
 import { useAction, useMutation } from "convex/react";
 import { useQuery } from "convex-helpers/react/cache/hooks";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { readableError } from "../../../_components/errors";
-import { annotationAnchorId } from "./session-board";
+import { CitationRef } from "./session-board";
+import { anchoredIds, groupSessionNotes } from "./session-notes";
 import type { SessionDetail } from "./manage";
 
 type Synthesis = NonNullable<
@@ -58,6 +60,22 @@ type Section = Synthesis["sections"][number];
  * Both thresholds are read from live annotation data, never from what the
  * write-up stored at generation time.
  *
+ * ## The numbers are the write-up's, not the bullet's
+ *
+ * Citations are numbered once for the whole write-up, by first appearance
+ * walking `SECTION_ORDER` — so two bullets drawn from the same note carry the
+ * same number, which is the only thing a reader can do anything with. That
+ * order is imported from `lib/export/markdown.ts` rather than restated here,
+ * because it is the numbering rule itself: the export folds its own map over
+ * the very same array, so the file and the screen cannot disagree about which
+ * note "Note 3" is — not by convention, but because there is only one list.
+ * See `lib/citations/numbering.ts`.
+ *
+ * Whether a number is also a *link* is a separate question, and the board
+ * below answers it: `anchoredIds` says which notes really have an anchor on
+ * this page, and a citation to anything else is drawn as a plain number. A
+ * number that scrolls nowhere must not promise to.
+ *
  * ## The approved copy cannot do that, and says so
  *
  * Prose a person wrote has no citations to re-check — nobody can tell which
@@ -69,18 +87,6 @@ type Section = Synthesis["sections"][number];
  * page says in as many words that the approved copy stands until somebody
  * approves a new one.
  */
-
-/** Canonical order and a heading for a section whose own is missing. */
-const SECTION_ORDER: readonly {
-  key: Section["key"];
-  fallback: string;
-}[] = [
-  { key: "summary", fallback: "What the session was about" },
-  { key: "open-questions", fallback: "Open questions" },
-  { key: "critiques-and-methods", fallback: "Critiques and methods" },
-  { key: "connections", fallback: "Connections" },
-  { key: "next-reading", fallback: "What to read next" },
-];
 
 export function SessionSynthesis({
   session,
@@ -96,10 +102,55 @@ export function SessionSynthesis({
   const synthesis = useQuery(api.synthesis.getForSession, {
     sessionId: session._id,
   });
+  // The same subscription the page is already running — the cached `useQuery`
+  // hands both callers one socket — read here for one purpose: to know which
+  // notes the board below has actually drawn an anchor for.
+  const margin = useQuery(api.annotations.listForPaper, {
+    paperId: session.paperId,
+  });
   const generate = useAction(api.synthesis.generate);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [editing, setEditing] = useState(false);
+
+  // The sections this write-up will actually render, in the order it renders
+  // them. The citation numbering is folded over exactly this array, so what a
+  // reader meets first is what gets Note 1.
+  const ordered = useMemo(
+    () =>
+      synthesis === undefined || synthesis === null
+        ? []
+        : SECTION_ORDER.flatMap(({ key, fallback }) => {
+            const section = synthesis.sections.find((one) => one.key === key);
+            return section === undefined || section.items.length === 0
+              ? []
+              : [{ key, fallback, section }];
+          }),
+    [synthesis],
+  );
+
+  // Numbered over the *visible* citations only. A withdrawn note that still
+  // took a number would leave a hole in the sequence — "Note 1 · Note 3" on a
+  // line whose middle citation was never drawn — and a gap invites exactly the
+  // question the redaction exists to refuse.
+  const numbering = useMemo(
+    () =>
+      citationNumbering(
+        ordered.flatMap(({ section }) =>
+          section.items.map((item) => ({
+            annotationIds: item.annotationIds.filter((id) =>
+              visibleAnnotationIds.has(id),
+            ),
+          })),
+        ),
+      ),
+    [ordered, visibleAnnotationIds],
+  );
+
+  const anchored = useMemo(
+    () => anchoredIds(groupSessionNotes(margin?.annotations ?? [], session._id)),
+    [margin, session._id],
+  );
 
   const has = synthesis !== undefined && synthesis !== null;
   const approved = session.synthesis;
@@ -179,20 +230,16 @@ export function SessionSynthesis({
           </p>
         ) : (
           <div className="flex flex-col gap-8">
-            {SECTION_ORDER.map(({ key, fallback }) => {
-              const section = synthesis.sections.find((one) => one.key === key);
-              if (section === undefined || section.items.length === 0) {
-                return null;
-              }
-              return (
-                <SynthesisSection
-                  key={key}
-                  section={section}
-                  fallback={fallback}
-                  visibleAnnotationIds={visibleAnnotationIds}
-                />
-              );
-            })}
+            {ordered.map(({ key, fallback, section }) => (
+              <SynthesisSection
+                key={key}
+                section={section}
+                fallback={fallback}
+                visibleAnnotationIds={visibleAnnotationIds}
+                numbering={numbering}
+                anchored={anchored}
+              />
+            ))}
           </div>
         )}
 
@@ -692,10 +739,16 @@ function SynthesisSection({
   section,
   fallback,
   visibleAnnotationIds,
+  numbering,
+  anchored,
 }: {
   section: Section;
   fallback: string;
   visibleAnnotationIds: ReadonlySet<Id<"annotations">>;
+  /** One registry for the whole write-up — see `citationNumbering`. */
+  numbering: ReadonlyMap<Id<"annotations">, number>;
+  /** The notes the board below really has an anchor for. */
+  anchored: ReadonlySet<string>;
 }) {
   return (
     <div className="flex flex-col gap-3">
@@ -734,15 +787,20 @@ function SynthesisSection({
                     {!partial && item.attribution.length > 0 && (
                       <span>{item.attribution.join(", ")}</span>
                     )}
-                    {cited.map((id, position) => (
-                      <a
-                        key={id}
-                        href={`#${annotationAnchorId(id)}`}
-                        className="text-accent underline-offset-4 hover:underline"
-                      >
-                        Note {position + 1}
-                      </a>
-                    ))}
+                    {cited.map((id) => {
+                      // The registry was folded over these same filtered ids,
+                      // so a miss is impossible — and if it ever became
+                      // possible, a citation with no number is not a citation.
+                      const number = numbering.get(id);
+                      return number === undefined ? null : (
+                        <CitationRef
+                          key={id}
+                          id={id}
+                          number={number}
+                          anchored={anchored.has(id)}
+                        />
+                      );
+                    })}
                     {partial && (
                       <span className="italic">
                         Some of the notes behind this are no longer shared.

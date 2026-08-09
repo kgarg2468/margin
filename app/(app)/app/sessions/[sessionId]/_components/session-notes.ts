@@ -146,3 +146,84 @@ export function ofType(
 ): AnnotationView[] {
   return notes.filter((note) => note.type === type);
 }
+
+/**
+ * Where a note is drawn, as two lists that partition the ontology.
+ *
+ * The board's one promise is that a note appears exactly once, and which place
+ * is decided by its type: four of the seven are things the lab noticed *in the
+ * paper*, so they sit beside the passage; the other three are what a journal
+ * club talks *from*, so they stand in the floor's columns. `session-board.tsx`
+ * renders from these; `anchoredIds` below reads them to answer where a
+ * citation can actually land. They live here, with the grouping, because a
+ * pure rule about the board should be testable without mounting it — and the
+ * test asserts the partition, so a type added to the ontology and to neither
+ * list cannot slip through as a note nobody can link to.
+ *
+ * The floor's columns are declared over in `session-board.tsx`, since they
+ * carry headings and empty-state copy this file has no business holding. The
+ * suite holds that list against `ON_THE_FLOOR` type for type: the partition
+ * alone would survive a type moved between these two lists, and what that
+ * moves is a column onto the board with no anchor behind it.
+ */
+export const AT_THE_PASSAGE: readonly AnnotationType[] = [
+  "hypothesis",
+  "method-note",
+  "definition",
+  "note",
+];
+
+export const ON_THE_FLOOR: readonly AnnotationType[] = [
+  "open-question",
+  "critique",
+  "connection-to-own-work",
+];
+
+/** A projector should not try to paint four hundred passage cards. */
+export const MAX_PASSAGE_CARDS = 40;
+
+/** As much of a note as the anchoring question needs. */
+type Drawn = { _id: string; type: AnnotationType };
+
+/**
+ * The notes this board actually puts an anchor on the page for.
+ *
+ * A synthesis or brief citation renders as a link to `note-<id>`, and a link
+ * to an id that is not on the page is a promise the page cannot keep — the
+ * reader clicks a number and nothing moves. Rather than emit anchors for
+ * everything and hope, the pages ask this what is really on screen and draw
+ * the rest of the citations as plain numbers.
+ *
+ * Three things get an anchor, and the reasons are the board's own layout:
+ * passage notes whose card survived `MAX_PASSAGE_CARDS`, every floor note, and
+ * the replies drawn underneath a floor note. Everything else — a note written
+ * outside this session, a reply whose parent is elsewhere, the tail of a very
+ * heavily marked paper — is cited by number and left unlinked.
+ */
+export function anchoredIds(notes: {
+  inSession: readonly Drawn[];
+  repliesByParent: ReadonlyMap<string, readonly Drawn[]>;
+  passages: readonly { notes: readonly Drawn[] }[];
+}): Set<string> {
+  const anchored = new Set<string>();
+
+  for (const passage of notes.passages.slice(0, MAX_PASSAGE_CARDS)) {
+    for (const note of passage.notes) {
+      if (AT_THE_PASSAGE.includes(note.type)) {
+        anchored.add(note._id);
+      }
+    }
+  }
+
+  for (const note of notes.inSession) {
+    if (!ON_THE_FLOOR.includes(note.type)) {
+      continue;
+    }
+    anchored.add(note._id);
+    for (const reply of notes.repliesByParent.get(note._id) ?? []) {
+      anchored.add(reply._id);
+    }
+  }
+
+  return anchored;
+}

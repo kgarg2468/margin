@@ -6,8 +6,9 @@ import { errorClass, eyebrowClass } from "@/lib/ui";
 import { useMutation } from "convex/react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { ConfirmAction } from "../../../_components/confirm-action";
 import { readableError } from "../../../_components/errors";
-import type { SessionDetail } from "./manage";
+import { useUndoableMove, type SessionDetail } from "./manage";
 import {
   FloorColumns,
   MarginElsewhere,
@@ -57,8 +58,8 @@ export function LiveSession({
 }) {
   const elapsed = useElapsed(session.startedAt);
   const endSession = useMutation(api.sessions.endSession);
+  const { announceMove } = useUndoableMove();
   const [error, setError] = useState<string | null>(null);
-  const [pending, setPending] = useState(false);
 
   const heading = session.title ?? session.paperTitle ?? "This session";
 
@@ -99,25 +100,32 @@ export function LiveSession({
           Read the paper
         </Link>
 
+        {/* The one place in the app where a destructive click happens in front
+            of an audience, so it is the place the two-step matters most: the
+            question, then ten minutes in which the answer can be taken back.
+            Word for word what the manage row says, because the presenter uses
+            one screen and the room is looking at the other.
+
+            `sm` rather than the `xs` this scale otherwise reserves for chrome:
+            this row is chrome on a laptop and a headline on a projector, and
+            End sits between two `text-sm` links either way. */}
         {session.canManage && (
-          <button
-            type="button"
-            disabled={pending}
-            className="rounded-sm border border-rule bg-surface px-2.5 py-1 font-sans text-sm text-ink transition-colors hover:border-ink-faint disabled:cursor-not-allowed disabled:opacity-50"
-            onClick={async () => {
+          <ConfirmAction
+            label="End session"
+            confirmLabel="End it"
+            cancelLabel="Keep going"
+            tone="faint"
+            size="sm"
+            run={async () => {
               setError(null);
-              setPending(true);
               try {
                 await endSession({ sessionId: session._id });
+                announceMove("ended", session._id);
               } catch (caught) {
                 setError(readableError(caught, "That session didn't end."));
-              } finally {
-                setPending(false);
               }
             }}
-          >
-            {pending ? "Ending…" : "End session"}
-          </button>
+          />
         )}
       </header>
 

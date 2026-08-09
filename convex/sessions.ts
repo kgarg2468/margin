@@ -1,4 +1,12 @@
 import { ConvexError, v } from "convex/values";
+/**
+ * How far ahead of its scheduled time a session may be started. Generous on
+ * purpose — labs move a meeting forward a day without touching the calendar —
+ * but a session started a fortnight early is the wrong row, clicked in a list.
+ * The rule itself lives in `lib/` so the button that offers the start and the
+ * mutation that enforces it cannot drift apart.
+ */
+import { UNDO_WINDOW_MS, awayProse, startWindow } from "../lib/session-window";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
@@ -6,6 +14,7 @@ import { mutation, query } from "./_generated/server";
 import { getMembership, requireMembership, requireUserId } from "./lib/authz";
 import { recordEvent } from "./lib/ledger";
 import { annotationType, ingestStatus, sessionStatus } from "./schema";
+import { GENERATION_LEASE_MS } from "./synthesis";
 
 /**
  * Journal-club sessions: the calendar and the lifecycle.
@@ -44,12 +53,6 @@ const MIN_SCHEDULE_DELAY_MS = 60 * 1000;
 const CLOCK_SKEW_GRACE_MS = 5 * 60 * 1000;
 /** Nobody schedules a journal club two years out; a date this far away is a typo or a bad epoch. */
 const MAX_SCHEDULE_AHEAD_MS = 2 * 365 * 24 * 60 * 60 * 1000;
-/**
- * How far ahead of its scheduled time a session may be started. Generous on
- * purpose — labs move a meeting forward a day without touching the calendar —
- * but a session started a fortnight early is the wrong row, clicked in a list.
- */
-const MAX_EARLY_START_MS = 24 * 60 * 60 * 1000;
 const MAX_TITLE_LENGTH = 200;
 /** Presenter notes are prep, not a manuscript — and they get read into one long-context synthesis call. */
 export const MAX_NOTES_LENGTH = 20_000;
@@ -347,18 +350,6 @@ function cleanScheduledAt(input: number): number {
     throw new ConvexError("Sessions can be scheduled up to two years ahead.");
   }
   return at;
-}
-
-/**
- * "in about 3 days" — enough for a refusal to be actionable without pulling in
- * a date library or guessing at the reader's timezone.
- */
-function untilProse(ms: number): string {
-  const hours = Math.round(ms / (60 * 60 * 1000));
-  if (hours < 48) {
-    return `in about ${hours} hours`;
-  }
-  return `in about ${Math.round(hours / 24)} days`;
 }
 
 /** Somebody has to be in the lab to present to it. */
@@ -686,10 +677,10 @@ export const startSession = mutation({
     // irreversible — it burns the prep boundary, fires the start digest, and
     // there is no transition back to `scheduled` — so the one case worth
     // refusing is the one that is obviously a misclick in a list of meetings.
-    const early = session.scheduledAt - Date.now();
-    if (early > MAX_EARLY_START_MS) {
+    const { canStart } = startWindow(session.scheduledAt, Date.now());
+    if (!canStart) {
       throw new ConvexError(
-        `That session isn't until ${untilProse(early)}. Start it closer to the time, or reschedule it if the meeting really has moved.`,
+        `That session is still ${awayProse(session.scheduledAt - Date.now())}. Start it closer to the time, or reschedule it if the meeting really has moved.`,
       );
     }
 
@@ -791,6 +782,185 @@ export const cancelSession = mutation({
     await recordEvent(ctx, {
       labId: session.labId,
       type: "session.cancelled",
+      actorId: membership.userId,
+      paperId: session.paperId,
+      sessionId: session._id,
+    });
+    return null;
+  },
+});
+
+/* -------------------------------------------------------------------------
+ * The two moves back
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Whether a forward move is still close enough behind us to be taken back.
+ *
+ * A row with no timestamp at all is treated as lapsed rather than as fresh.
+ * The field is written by the mutation that made the move, so its absence
+ * means a session that reached this status some other way — a migration, a
+ * row from before the field existed — and "I cannot tell when this happened"
+ * is not a reason to allow an undo.
+ */
+function withinUndoWindow(at: number | undefined): boolean {
+  return at !== undefined && Date.now() - at <= UNDO_WINDOW_MS;
+}
+
+/**
+ * Take back an End pressed by mistake. Presenter, scheduler, or PI.
+ *
+ * The one backwards edge out of `ended`, and it exists because the End button
+ * sits next to everything else on a live session and a meeting that is still
+ * going does not become over because somebody's cursor slipped. Ten minutes,
+ * and only ten: past that the lab has moved on, the digest boundaries have
+ * fired, and what looks like an undo is really a request to hold the meeting
+ * again — which is a new session.
+ *
+ * It deliberately does not touch synthesis or brief state. A draft written
+ * against an ended session is somebody's work, and reopening is a correction
+ * to the status, not a rollback of the afternoon. Ending again later writes a
+ * fresh `session.ended`, which is the honest record: the second end is when
+ * the room actually emptied.
+ *
+ * The one thing it waits for is a synthesis being written *right now*. That
+ * work is somebody's too, and it is the only work in the product that is
+ * already paid for by the time this mutation runs — the model call is in
+ * flight, and `synthesis.store` will only write to a session that has ended.
+ * A reopen inside the lease would therefore not cancel the run; it would let
+ * it finish and then throw its output away, which is the one outcome an undo
+ * has no business causing. So the undo waits the couple of minutes out.
+ */
+export const reopenSession = mutation({
+  args: { sessionId: v.id("sessions") },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const { session, membership } = await requireSessionAccess(
+      ctx,
+      args.sessionId,
+    );
+    requireManage(session, membership);
+    if (session.status !== "ended") {
+      refuse(session, "reopened");
+    }
+    if (!withinUndoWindow(session.endedAt)) {
+      throw new ConvexError(
+        "That session ended more than ten minutes ago. An End can be taken back for ten minutes — from the toast, or from the session's own page while the window is open. Past that, meeting about this paper again is a new session.",
+      );
+    }
+    // Checked after the window, and the order is the message: a lapsed undo is
+    // a permanent no, and "wait for it to land" would be a lie told to
+    // somebody who has no way back anyway.
+    if (
+      session.synthesisGeneratingAt !== undefined &&
+      Date.now() - session.synthesisGeneratingAt < GENERATION_LEASE_MS
+    ) {
+      throw new ConvexError(
+        "A write-up for this session is being written right now. Wait for it to land before reopening the meeting.",
+      );
+    }
+
+    // No digest to re-arm: `endSession` armed nothing, and the two boundaries
+    // this session had were both spent on the way in.
+    await ctx.db.patch(session._id, {
+      status: "live",
+      endedAt: undefined,
+    });
+    await recordEvent(ctx, {
+      labId: session.labId,
+      type: "session.reopened",
+      actorId: membership.userId,
+      paperId: session.paperId,
+      sessionId: session._id,
+    });
+    return null;
+  },
+});
+
+/**
+ * Put back a meeting cancelled by mistake. Presenter, scheduler, or PI.
+ *
+ * Cancelling calls off the T−2h prep digest, so restoring has to arm it again
+ * — otherwise the undo hands back a session on the calendar that has quietly
+ * lost the boundary it was scheduled with, and nobody finds out until the
+ * morning of the meeting when the digest doesn't arrive.
+ *
+ * What gets re-armed is the boundary, not the meeting. A job is queued only
+ * when T−2h is *itself* still ahead — not merely when the meeting is — because
+ * inside the two-hour window the boundary has already fired, and arming it
+ * again would post the lab's prep to Slack a second time. `digests` dedupes
+ * exactly by its delivered-set and an approved brief is protected, but the
+ * Slack channel post has no posted-once guard of its own, so the duplicate
+ * would be real and visible to everyone in the room.
+ *
+ * The accepted cost: a cancel and a restore that straddle the exact T−2h
+ * moment — inside the same ten-minute undo window — lose their prep digest.
+ * That is strictly narrower than the double post it replaces, and it fails
+ * toward silence, which is the direction every delivery rider in this codebase
+ * chooses when it has to choose. Whoever is that late still gets the
+ * session-start refresh, which is the boundary that lies ahead.
+ *
+ * A restored session whose hour has already passed therefore gets no job
+ * either, which is the rule `createSession` enforces from the other side:
+ * `cleanScheduledAt` will not put a meeting in the past on the calendar at
+ * all, so nothing here should arm a "coming up in two hours" digest about
+ * yesterday.
+ *
+ * And it is held to the same calendar ceiling as scheduling one, because it
+ * puts the same row back in the same list — see the check below for the way
+ * around the cap that an unchecked undo would open.
+ */
+export const restoreSession = mutation({
+  args: { sessionId: v.id("sessions") },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const { session, membership } = await requireSessionAccess(
+      ctx,
+      args.sessionId,
+    );
+    requireManage(session, membership);
+    if (session.status !== "cancelled") {
+      refuse(session, "restored");
+    }
+    if (!withinUndoWindow(session.cancelledAt)) {
+      throw new ConvexError(
+        "That session was cancelled more than ten minutes ago. A cancellation can be taken back for ten minutes — from the toast, or from the session's own page while the window is open. Past that, holding the meeting after all means putting it back on the calendar as a new one.",
+      );
+    }
+
+    // The ceiling `createSession` enforces, enforced again on the way back.
+    // Restoring puts a meeting on the calendar exactly as scheduling one does,
+    // and an undo that walked past the cap is a way through it: a lab at fifty
+    // cancels one, schedules its replacement, restores the cancelled one, and
+    // lands at fifty-one with an extra prep-digest job queued behind it. One
+    // past the cap, so the check reads the same at the ceiling as over it.
+    const outstanding = await ctx.db
+      .query("sessions")
+      .withIndex("by_lab_and_status", (q) =>
+        q.eq("labId", session.labId).eq("status", "scheduled"),
+      )
+      .take(MAX_SCHEDULED_SESSIONS + 1);
+    if (outstanding.length >= MAX_SCHEDULED_SESSIONS) {
+      throw new ConvexError(
+        `This lab already has ${MAX_SCHEDULED_SESSIONS} sessions on the calendar. Hold or cancel one before putting this one back.`,
+      );
+    }
+
+    // The boundary, not the meeting — see the note above. `schedulePrepDigest`
+    // answers a boundary in the past by running the job a minute from now,
+    // which is precisely the second Slack post this is avoiding, so the
+    // question has to be asked here rather than left to it.
+    const boundaryAhead = session.scheduledAt - PREP_LEAD_MS > Date.now();
+    await ctx.db.patch(session._id, {
+      status: "scheduled",
+      cancelledAt: undefined,
+      prepDigestJobId: boundaryAhead
+        ? await schedulePrepDigest(ctx, session._id, session.scheduledAt)
+        : undefined,
+    });
+    await recordEvent(ctx, {
+      labId: session.labId,
+      type: "session.restored",
       actorId: membership.userId,
       paperId: session.paperId,
       sessionId: session._id,

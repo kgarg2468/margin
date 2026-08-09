@@ -1,13 +1,15 @@
 "use client";
 
 import type { Id } from "@/convex/_generated/dataModel";
+import { cleanQuote } from "@/lib/quotes";
 import { eyebrowClass } from "@/lib/ui";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import Link from "next/link";
 import type { AnnotationType } from "../../../library/[paperId]/read/_components/ontology";
 import { typeStyle } from "../../../library/[paperId]/read/_components/ontology";
 import type { AnnotationView } from "../../../library/[paperId]/read/_components/types";
 import type { PassageGroup, SessionNotes } from "./session-notes";
-import { ofType } from "./session-notes";
+import { AT_THE_PASSAGE, MAX_PASSAGE_CARDS, ofType } from "./session-notes";
 
 /**
  * The collective view of a journal club, in three pieces: a spine, a map, and
@@ -31,36 +33,38 @@ import { ofType } from "./session-notes";
  * is per type, and no view in this file can answer "who has read this".
  */
 
-/** The three types the floor is built from, in the order a meeting works down them. */
-const FLOOR: readonly { type: AnnotationType; heading: string; empty: string }[] =
-  [
-    {
-      type: "open-question",
-      heading: "Open questions",
-      empty: "Questions the lab types in the margin land here.",
-    },
-    {
-      type: "critique",
-      heading: "Critiques",
-      empty: "Nothing challenged yet.",
-    },
-    {
-      type: "connection-to-own-work",
-      heading: "Connections",
-      empty: "Nobody has tied this to their own work yet.",
-    },
-  ];
-
-/** Types with no column of their own: they belong beside their passage. */
-const AT_THE_PASSAGE: readonly AnnotationType[] = [
-  "hypothesis",
-  "method-note",
-  "definition",
-  "note",
+/**
+ * The three types the floor is built from, in the order a meeting works down
+ * them.
+ *
+ * Exported only so `session-notes.test.ts` can hold it against `ON_THE_FLOOR`,
+ * which is the list `anchoredIds` anchors from. The two have to name the same
+ * three types: a type moved from one list and not the other renders a column
+ * whose notes no citation can link to, or emits anchors for a column that
+ * isn't drawn — and the partition test next door would stay green through
+ * either, because both lists would still cover the ontology exactly once.
+ */
+export const FLOOR: readonly {
+  type: AnnotationType;
+  heading: string;
+  empty: string;
+}[] = [
+  {
+    type: "open-question",
+    heading: "Open questions",
+    empty: "Questions the lab types in the margin land here.",
+  },
+  {
+    type: "critique",
+    heading: "Critiques",
+    empty: "Nothing challenged yet.",
+  },
+  {
+    type: "connection-to-own-work",
+    heading: "Connections",
+    empty: "Nobody has tied this to their own work yet.",
+  },
 ];
-
-/** A projector should not try to paint four hundred passage cards. */
-const MAX_PASSAGE_CARDS = 40;
 
 /**
  * The session's spine: one segmented rule, a band of ink per annotation type,
@@ -76,16 +80,15 @@ export function SessionSpine({ notes }: { notes: SessionNotes }) {
   if (notes.total === 0) {
     return null;
   }
-  const summary = notes.counts
-    .map(({ type, count }) => `${count} ${typeStyle(type).label.toLowerCase()}`)
-    .join(", ");
 
   return (
     <div className="flex flex-col gap-2.5">
+      {/* The strip is decoration: every number in it is spelled out in the
+          legend below, in the same order, so an assistive reader that met
+          both would hear the session's counts twice. */}
       <div
-        role="img"
-        aria-label={`${notes.total} notes in this session: ${summary}`}
-        className="flex h-1.5 w-full gap-px overflow-hidden bg-rule"
+        aria-hidden="true"
+        className="flex h-2.5 w-full gap-px overflow-hidden bg-rule"
       >
         {notes.counts.map(({ type, count }) => (
           <span
@@ -95,25 +98,57 @@ export function SessionSpine({ notes }: { notes: SessionNotes }) {
             // whole rule re-cutting itself in one frame.
             className="motion-safe:transition-[flex-grow] motion-safe:duration-500 motion-safe:ease-[cubic-bezier(0.16,1,0.3,1)]"
             style={{
-              flex: `${count} 0 0%`,
-              backgroundColor: typeStyle(type).ink,
+              // A floor, not pure proportion: one note in forty is 2.5% of the
+              // rule — thinner than the gap beside it — and a type the lab
+              // actually wrote would read as absent. `flexBasis` buys every
+              // present type 10px before the counts divide what's left, so
+              // proportion still dominates once the numbers are real.
+              flexGrow: count,
+              // Matches the h-2.5 track: the smallest band is a square.
+              flexBasis: "10px",
+              flexShrink: 0,
+              backgroundColor: spineInk(type),
             }}
           />
         ))}
       </div>
-      <ul aria-hidden="true" className="flex flex-wrap gap-x-4 gap-y-1">
+      <ul
+        aria-label={`${notes.total} ${notes.total === 1 ? "note" : "notes"} in this session`}
+        className="flex flex-wrap gap-x-4 gap-y-1"
+      >
         {notes.counts.map(({ type, count }) => (
           <li
             key={type}
-            style={{ color: typeStyle(type).ink }}
-            className="font-sans text-[11px] uppercase tracking-[0.12em] tabular-nums"
+            className="flex items-baseline gap-1.5 font-sans text-[11px]"
           >
-            {typeStyle(type).label} {count}
+            <span
+              style={{ color: typeStyle(type).ink }}
+              className="uppercase tracking-[0.08em]"
+            >
+              {typeStyle(type).label}
+            </span>
+            {/* The count leaves the type's ink: at 11px a mid violet or a
+                faint neutral is the least readable thing on the row, and the
+                number is the part you came for. */}
+            <span className="text-ink tabular-nums">{count}</span>
           </li>
         ))}
       </ul>
     </div>
   );
+}
+
+/**
+ * The spine's band colour, which is `typeStyle().ink` for six of the seven.
+ *
+ * `note` is drawn in `--ink-faint`, which is right everywhere it labels text
+ * but wrong here: the band sits on a `bg-rule` track, and in dark mode faint
+ * ink on that track is a smear — on the one type that is the untyped default
+ * and so usually the widest band on the rule. The remap is local to the spine
+ * because `note`'s ink is load-bearing in the reader and the cards.
+ */
+function spineInk(type: AnnotationType): string {
+  return type === "note" ? "var(--ink-muted)" : typeStyle(type).ink;
 }
 
 /**
@@ -180,12 +215,12 @@ export function PassageBoard({
       {hidden > 0 && (
         <p className="font-sans text-xs text-ink-faint">
           {hidden} more marked {hidden === 1 ? "passage" : "passages"} —{" "}
-          <a
+          <Link
             href={readHref}
             className="text-accent underline-offset-4 hover:underline"
           >
             read the paper
-          </a>{" "}
+          </Link>{" "}
           to see them in place.
         </p>
       )}
@@ -217,9 +252,12 @@ export function MarginElsewhere({
     <p className="font-sans text-xs text-ink-faint tabular-nums">
       {count} more lab {count === 1 ? "note" : "notes"} on this paper{" "}
       {count === 1 ? "was" : "were"} written outside this session —{" "}
-      <a href={readHref} className="text-accent underline-offset-4 hover:underline">
+      <Link
+        href={readHref}
+        className="text-accent underline-offset-4 hover:underline"
+      >
         read them in the margin
-      </a>
+      </Link>
       .
     </p>
   );
@@ -242,7 +280,7 @@ function PassageCard({ passage }: { passage: PassageGroup }) {
       </span>
 
       <blockquote className="font-serif text-[15px] italic leading-snug text-ink">
-        <span className="line-clamp-4">{passage.quote}</span>
+        <span className="line-clamp-4">{cleanQuote(passage.quote, 280)}</span>
       </blockquote>
 
       <ul className="flex flex-wrap gap-1.5">
@@ -264,7 +302,15 @@ function PassageCard({ passage }: { passage: PassageGroup }) {
       {beside.length > 0 && (
         <ul className="flex flex-col gap-1.5 border-t border-rule pt-2">
           {beside.map((note) => (
-            <li key={note._id}>
+            // The anchor a citation to this note jumps to. Four of the seven
+            // types are only ever drawn here, so without it every synthesis
+            // line resting on a hypothesis or a method note pointed at an id
+            // that was not on the page.
+            <li
+              key={note._id}
+              id={annotationAnchorId(note._id)}
+              className="scroll-mt-24"
+            >
               {note.body.length > 0 ? (
                 <p className="whitespace-pre-wrap font-serif text-sm leading-relaxed text-ink">
                   {note.body}
@@ -407,13 +453,17 @@ function FloorNote({
       </p>
 
       <blockquote className="mt-1 font-serif text-[13px] italic leading-snug text-ink-faint">
-        <span className="line-clamp-2">{note.anchor.quote}</span>
+        <span className="line-clamp-2">{cleanQuote(note.anchor.quote, 160)}</span>
       </blockquote>
 
       {replies.length > 0 && (
         <ul className="mt-2 flex flex-col gap-1.5 border-l border-rule pl-2.5">
           {replies.map((reply) => (
-            <li key={reply._id}>
+            <li
+              key={reply._id}
+              id={annotationAnchorId(reply._id)}
+              className="scroll-mt-24"
+            >
               <p className="whitespace-pre-wrap font-serif text-sm leading-snug text-ink">
                 {reply.body}
               </p>
@@ -431,4 +481,42 @@ function FloorNote({
 /** Where a synthesis item's citation jumps to. */
 export function annotationAnchorId(id: Id<"annotations">): string {
   return `note-${id}`;
+}
+
+/**
+ * One citation, in the write-up and in the brief.
+ *
+ * The number comes from `citationNumbering` — one registry per document, so
+ * "Note 3" is the same note wherever it appears and two lines resting on the
+ * same note say so. The link comes from `anchoredIds`, and only when the board
+ * below has really drawn that note: a citation to a note written in an earlier
+ * session, or past the passage cap, is still worth numbering and still worth
+ * attributing, but it has nowhere on this page to go.
+ *
+ * So it drops the accent with the href rather than keeping the colour and
+ * losing the underline. Accent *is* the link affordance in this app — a
+ * number in it that swallows the click would be the same broken promise in
+ * quieter clothes — and unlinked it simply takes the ink of the metadata line
+ * it sits on.
+ */
+export function CitationRef({
+  id,
+  number,
+  anchored,
+}: {
+  id: Id<"annotations">;
+  number: number;
+  anchored: boolean;
+}) {
+  if (!anchored) {
+    return <span className="tabular-nums">Note {number}</span>;
+  }
+  return (
+    <a
+      href={`#${annotationAnchorId(id)}`}
+      className="text-accent tabular-nums underline-offset-4 hover:underline"
+    >
+      Note {number}
+    </a>
+  );
 }
