@@ -7,6 +7,15 @@ export function cleanReferenceText(value: string): string {
     .trim();
 }
 
+/** A stable title-and-year key for DOI-less references. */
+export function referenceIdentity(
+  title: string,
+  year: number | undefined,
+): string {
+  const normalizedTitle = title.toLowerCase().replace(/\s+/g, " ").trim();
+  return `${normalizedTitle}\u0000${year ?? ""}`;
+}
+
 /** RIS and BibTeX both commonly encode a person as "Last, First". */
 export function normalizeAuthor(value: string): string {
   const author = cleanReferenceText(stripOuterBraces(value));

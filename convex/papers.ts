@@ -21,6 +21,7 @@ import {
   nextRedirectHop,
 } from "./lib/scholarly";
 import { ingestStatus } from "./schema";
+import { referenceIdentity } from "../lib/reference-import/normalize";
 
 /**
  * Paper ingest and the library.
@@ -348,10 +349,31 @@ export const createFromMetadata = mutation({
     abstract: v.optional(v.string()),
     sourceUrl: v.optional(v.string()),
   },
-  returns: v.object({ paperId: v.id("papers"), title: v.string() }),
+  returns: v.object({
+    paperId: v.id("papers"),
+    title: v.string(),
+    /** True when the title and year were already in this lab's library. */
+    alreadyInLibrary: v.boolean(),
+  }),
   handler: async (ctx, args) => {
     const membership = await requireMembership(ctx, args.labId);
     const title = cleanTitle(args.title);
+    const identity = referenceIdentity(title, args.year);
+    const existing = (
+      await ctx.db
+        .query("papers")
+        .withIndex("by_lab", (q) => q.eq("labId", args.labId))
+        .collect()
+    ).find(
+      (paper) => referenceIdentity(paper.title, paper.year) === identity,
+    );
+    if (existing !== undefined) {
+      return {
+        paperId: existing._id,
+        title: existing.title,
+        alreadyInLibrary: true,
+      };
+    }
     const paperId = await ctx.db.insert("papers", {
       labId: args.labId,
       title,
@@ -372,7 +394,7 @@ export const createFromMetadata = mutation({
       title,
     });
 
-    return { paperId, title };
+    return { paperId, title, alreadyInLibrary: false };
   },
 });
 

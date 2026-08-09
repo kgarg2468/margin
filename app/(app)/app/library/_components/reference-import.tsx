@@ -4,6 +4,7 @@ import { readableError } from "@/app/(app)/app/_components/errors";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import {
+  findWithinBatchDuplicates,
   importReferences,
   type ReferenceImportOutcome,
 } from "@/lib/reference-import/import";
@@ -144,6 +145,11 @@ export function ReferenceImport({
     setOutcomes(results);
   }
 
+  const withinBatchDuplicates =
+    preview === null
+      ? new Map<number, number>()
+      : findWithinBatchDuplicates(preview.entries, selected);
+
   return (
     <div
       role="tabpanel"
@@ -264,6 +270,7 @@ export function ReferenceImport({
           <ul className="flex flex-col divide-y divide-rule border-y border-rule">
             {preview.entries.map((entry, index) => {
               const outcome = outcomes.get(index);
+              const withinBatchDuplicate = withinBatchDuplicates.has(index);
               const details = [
                 entry.authors.join(", "),
                 entry.year?.toString(),
@@ -299,7 +306,11 @@ export function ReferenceImport({
                         </span>
                       )}
                     </span>
-                    {outcome !== undefined && <Outcome outcome={outcome} />}
+                    {outcome !== undefined ? (
+                      <Outcome outcome={outcome} />
+                    ) : withinBatchDuplicate ? (
+                      <span className={chipClass}>Skipped duplicate</span>
+                    ) : null}
                   </label>
                 </li>
               );
