@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ListenerHost, StoppableEvent } from "./click-suppressor";
+import type { Defer, ListenerHost, StoppableEvent } from "./click-suppressor";
 import { suppressNextClick } from "./click-suppressor";
 
 /**
@@ -52,6 +52,26 @@ function fakeHost() {
     return { stopped, stoppedImmediately };
   };
   return { host, live, fire };
+}
+
+/** The end of the turn, held so a test can decide when it comes. */
+function fakeTurn() {
+  let queued: (() => void) | null = null;
+  const defer: Defer = (run) => {
+    queued = run;
+    return () => {
+      queued = null;
+    };
+  };
+  return {
+    defer,
+    end: () => {
+      const run = queued;
+      queued = null;
+      run?.();
+    },
+    pending: () => queued !== null,
+  };
 }
 
 describe("the drag's trailing click", () => {
@@ -108,5 +128,61 @@ describe("what stops it eating a click it was not armed for", () => {
     fire("click");
     disarm();
     expect(live).toHaveLength(0);
+  });
+});
+
+/**
+ * The drag this is armed for is often the drag that fires no click at all: a
+ * mousedown and a mouseup on different elements have no common ancestor to
+ * dispatch one to. The listener has to come down anyway, and it cannot wait
+ * for a gesture that may not come for an hour.
+ */
+describe("a drag that never produces its click", () => {
+  it("stands the listener down at the end of the turn that armed it", () => {
+    const { host, live } = fakeHost();
+    const turn = fakeTurn();
+    suppressNextClick(host, turn.defer);
+    expect(live).toHaveLength(2);
+    turn.end();
+    expect(live).toHaveLength(0);
+  });
+
+  it("leaves a keyboard click alone, which is the one that would be eaten", () => {
+    // Enter or Space on "Save note" dispatches a click with no pointer event
+    // anywhere near it — nothing to disarm on — so a listener still armed from
+    // some earlier drag would swallow it and the keystroke would do nothing.
+    const { host, fire } = fakeHost();
+    const turn = fakeTurn();
+    suppressNextClick(host, turn.defer);
+    turn.end();
+    expect(fire("click").stopped).toBe(0);
+  });
+
+  it("still swallows the click that does arrive in the same turn", () => {
+    const { host, fire } = fakeHost();
+    const turn = fakeTurn();
+    suppressNextClick(host, turn.defer);
+    // The browser dispatches the trailing click synchronously after the
+    // mouseup, so it lands before the turn ends.
+    expect(fire("click").stoppedImmediately).toBe(1);
+    turn.end();
+  });
+
+  it("calls the wait off once it has disarmed some other way", () => {
+    const { host, fire } = fakeHost();
+    const turn = fakeTurn();
+    suppressNextClick(host, turn.defer);
+    fire("click");
+    expect(turn.pending()).toBe(false);
+  });
+
+  it("survives a defer that runs the moment it is handed the work", () => {
+    const { host, fire, live } = fakeHost();
+    suppressNextClick(host, (run) => {
+      run();
+      return () => {};
+    });
+    expect(live).toHaveLength(0);
+    expect(fire("click").stopped).toBe(0);
   });
 });

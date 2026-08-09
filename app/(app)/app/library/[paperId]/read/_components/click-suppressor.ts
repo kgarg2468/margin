@@ -15,16 +15,24 @@
  * exactly one click, in the capture phase, before any of the listeners that
  * would interpret it can run.
  *
- * Two ways out, and both matter:
+ * Three ways out, and all of them matter:
  *
  * - the click itself removes the listener, so one gesture buys one swallow;
- * - the next `pointerdown` removes it too, so a drag that somehow never
- *   produces its click cannot leave a trap behind that eats a genuine outside
- *   press an hour later. `pointerdown` opens every gesture, so the stale
- *   listener is gone before the click that would have hit it.
+ * - the end of this turn of the event loop removes it, because the trailing
+ *   click — when there is one — is dispatched synchronously after the mouseup,
+ *   in this same turn. A drag whose mousedown and mouseup land on different
+ *   elements fires **no** click at all, which is exactly the drag this is armed
+ *   for; without this the listener would stay armed for as long as the reader
+ *   kept their hands off the mouse, and then swallow the next click it saw.
+ *   The one that would be — Enter or Space on "Save note", which dispatches a
+ *   click with no pointer event anywhere near it — is a keystroke that would
+ *   silently do nothing;
+ * - the next `pointerdown` removes it too, which is belt and braces now but
+ *   costs nothing and states the intent: this belongs to one gesture.
  *
- * Written against the two methods it actually uses rather than against
- * `Document`, so the lifecycle above can be tested without a DOM.
+ * Written against the methods it actually uses rather than against `Document`
+ * and `setTimeout`, so the lifecycle above can be tested without a DOM and
+ * without waiting.
  */
 
 /** A click as this file needs to see it: something it can stop. */
@@ -50,13 +58,28 @@ export type ListenerHost = {
 };
 
 /**
- * Swallow the next click, once.
+ * Somewhere to put "at the end of this turn", handed in so a test can run the
+ * turn itself. Returns the way to call it off.
+ */
+export type Defer = (run: () => void) => () => void;
+
+const afterThisTurn: Defer = (run) => {
+  const timer = setTimeout(run, 0);
+  return () => clearTimeout(timer);
+};
+
+/**
+ * Swallow the next click, once, and only if it arrives in this turn.
  *
  * Returns the same teardown the listeners call on themselves, so a component
  * unmounting mid-gesture takes its listener with it.
  */
-export function suppressNextClick(host: ListenerHost): () => void {
+export function suppressNextClick(
+  host: ListenerHost,
+  defer: Defer = afterThisTurn,
+): () => void {
   let armed = true;
+  let cancelTurnEnd: (() => void) | null = null;
 
   const disarm = () => {
     if (!armed) {
@@ -65,6 +88,8 @@ export function suppressNextClick(host: ListenerHost): () => void {
     armed = false;
     host.removeEventListener("click", onClick, true);
     host.removeEventListener("pointerdown", onPointerDown, true);
+    cancelTurnEnd?.();
+    cancelTurnEnd = null;
   };
 
   const onClick = (event: StoppableEvent) => {
@@ -82,5 +107,13 @@ export function suppressNextClick(host: ListenerHost): () => void {
 
   host.addEventListener("click", onClick, true);
   host.addEventListener("pointerdown", onPointerDown, true);
+  const stopWaiting = defer(disarm);
+  if (armed) {
+    cancelTurnEnd = stopWaiting;
+  } else {
+    // A `defer` that ran its callback there and then. Nothing is armed any
+    // more, and the timer it handed back is already spent.
+    stopWaiting();
+  }
   return disarm;
 }
