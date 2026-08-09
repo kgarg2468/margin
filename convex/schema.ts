@@ -702,6 +702,21 @@ export const eventDoc = v.union(
     type: v.literal("session.ended"),
     sessionId: v.id("sessions"),
   }),
+  /**
+   * The end was a misclick, and somebody took it back inside the undo window.
+   *
+   * Its own fact rather than a correction to `session.ended`, because `events`
+   * is append-only and because the two are both true: the meeting was ended at
+   * 14:02 and reopened at 14:03, and a lab reading its own history is better
+   * served by that than by a row that quietly became something else. Ending it
+   * again afterwards writes a second `session.ended` — which is the honest
+   * shape, since the second end is when the room actually emptied.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("session.reopened"),
+    sessionId: v.id("sessions"),
+  }),
   v.object({
     ...eventBase,
     type: v.literal("session.synthesized"),
@@ -741,6 +756,17 @@ export const eventDoc = v.union(
   v.object({
     ...eventBase,
     type: v.literal("session.cancelled"),
+    paperId: v.id("papers"),
+    sessionId: v.id("sessions"),
+  }),
+  /**
+   * And put back, inside the undo window, by somebody who did not mean to call
+   * it off. The counterpart to `session.reopened`, and appended for the same
+   * reason: the cancellation happened, and so did the change of mind.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("session.restored"),
     paperId: v.id("papers"),
     sessionId: v.id("sessions"),
   }),

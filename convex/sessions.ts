@@ -66,6 +66,19 @@ const MAX_SESSIONS = 100;
  */
 const MAX_SCHEDULED_SESSIONS = 50;
 /**
+ * How long a forward move stays undoable.
+ *
+ * An undo is a toast-length regret, not a time machine. Ten minutes is the
+ * wrong row clicked in a list, the End button pressed while the room is still
+ * arguing, the cancellation of the meeting that was actually next week's — all
+ * of them noticed in the same breath. It is deliberately far too short to be a
+ * general "put the lifecycle back" power: a lab that wants last month's session
+ * live again wants a new session, and a lifecycle that can be walked backwards
+ * at will is one nothing downstream can trust.
+ */
+const UNDO_WINDOW_MS = 10 * 60 * 1000;
+
+/**
  * How many of a session's annotations `getSessionContext` will count. Well past
  * a real meeting (25 people writing 40 notes each), and the response says when
  * it was hit rather than quietly under-reporting.
@@ -781,6 +794,126 @@ export const cancelSession = mutation({
     await recordEvent(ctx, {
       labId: session.labId,
       type: "session.cancelled",
+      actorId: membership.userId,
+      paperId: session.paperId,
+      sessionId: session._id,
+    });
+    return null;
+  },
+});
+
+/* -------------------------------------------------------------------------
+ * The two moves back
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Whether a forward move is still close enough behind us to be taken back.
+ *
+ * A row with no timestamp at all is treated as lapsed rather than as fresh.
+ * The field is written by the mutation that made the move, so its absence
+ * means a session that reached this status some other way — a migration, a
+ * row from before the field existed — and "I cannot tell when this happened"
+ * is not a reason to allow an undo.
+ */
+function withinUndoWindow(at: number | undefined): boolean {
+  return at !== undefined && Date.now() - at <= UNDO_WINDOW_MS;
+}
+
+/**
+ * Take back an End pressed by mistake. Presenter, scheduler, or PI.
+ *
+ * The one backwards edge out of `ended`, and it exists because the End button
+ * sits next to everything else on a live session and a meeting that is still
+ * going does not become over because somebody's cursor slipped. Ten minutes,
+ * and only ten: past that the lab has moved on, the digest boundaries have
+ * fired, and what looks like an undo is really a request to hold the meeting
+ * again — which is a new session.
+ *
+ * It deliberately does not touch synthesis or brief state. A draft written
+ * against an ended session is somebody's work, and reopening is a correction
+ * to the status, not a rollback of the afternoon. Ending again later writes a
+ * fresh `session.ended`, which is the honest record: the second end is when
+ * the room actually emptied.
+ */
+export const reopenSession = mutation({
+  args: { sessionId: v.id("sessions") },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const { session, membership } = await requireSessionAccess(
+      ctx,
+      args.sessionId,
+    );
+    requireManage(session, membership);
+    if (session.status !== "ended") {
+      refuse(session, "reopened");
+    }
+    if (!withinUndoWindow(session.endedAt)) {
+      throw new ConvexError(
+        "That session ended more than ten minutes ago. Undo is for the press you regret while the toast is still up — to meet about this paper again, schedule another session.",
+      );
+    }
+
+    // No digest to re-arm: `endSession` armed nothing, and the two boundaries
+    // this session had were both spent on the way in.
+    await ctx.db.patch(session._id, {
+      status: "live",
+      endedAt: undefined,
+    });
+    await recordEvent(ctx, {
+      labId: session.labId,
+      type: "session.reopened",
+      actorId: membership.userId,
+      paperId: session.paperId,
+      sessionId: session._id,
+    });
+    return null;
+  },
+});
+
+/**
+ * Put back a meeting cancelled by mistake. Presenter, scheduler, or PI.
+ *
+ * Cancelling calls off the T−2h prep digest, so restoring has to arm it again
+ * — otherwise the undo hands back a session on the calendar that has quietly
+ * lost the boundary it was scheduled with, and nobody finds out until the
+ * morning of the meeting when the digest doesn't arrive.
+ *
+ * A restored session whose hour has already passed gets no job, which is the
+ * rule `createSession` enforces from the other side: `cleanScheduledAt` will
+ * not put a meeting in the past on the calendar at all, so nothing here should
+ * arm a "coming up in two hours" digest about yesterday. The same clock-skew
+ * grace applies, so "this afternoon" does not become the past because a laptop
+ * is three minutes fast.
+ */
+export const restoreSession = mutation({
+  args: { sessionId: v.id("sessions") },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const { session, membership } = await requireSessionAccess(
+      ctx,
+      args.sessionId,
+    );
+    requireManage(session, membership);
+    if (session.status !== "cancelled") {
+      refuse(session, "restored");
+    }
+    if (!withinUndoWindow(session.cancelledAt)) {
+      throw new ConvexError(
+        "That session was cancelled more than ten minutes ago. Undo is for the press you regret while the toast is still up — to hold the meeting after all, put it back on the calendar as a new one.",
+      );
+    }
+
+    const stillAhead = session.scheduledAt >= Date.now() - CLOCK_SKEW_GRACE_MS;
+    await ctx.db.patch(session._id, {
+      status: "scheduled",
+      cancelledAt: undefined,
+      prepDigestJobId: stillAhead
+        ? await schedulePrepDigest(ctx, session._id, session.scheduledAt)
+        : undefined,
+    });
+    await recordEvent(ctx, {
+      labId: session.labId,
+      type: "session.restored",
       actorId: membership.userId,
       paperId: session.paperId,
       sessionId: session._id,
