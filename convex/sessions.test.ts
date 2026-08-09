@@ -1,5 +1,5 @@
 import { ConvexError } from "convex/values";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Doc, Id } from "./_generated/dataModel";
 import {
   FakeCtx,
@@ -33,6 +33,33 @@ vi.mock("@convex-dev/auth/server", async (importOriginal) => ({
 
 const MINUTE = 60 * 1000;
 const HOUR = 60 * MINUTE;
+
+/**
+ * The undo window, restated rather than imported — deliberately.
+ *
+ * Importing `UNDO_WINDOW_MS` from `sessions.ts` would make these tests agree
+ * with whatever the module currently says, which is precisely the thing they
+ * exist to check: a suite that imports the constant passes just as happily
+ * after somebody halves it. The number is the spec, so it is written here, and
+ * a change to the module's value has to be a deliberate change to this line too.
+ */
+const UNDO_WINDOW = 10 * 60 * 1000;
+
+/**
+ * The at-the-boundary cases stop the clock, because they are a millisecond
+ * wide. The handler reads `Date.now()` itself, so a test that seeded
+ * `now - UNDO_WINDOW` and then lost a millisecond to the await would be
+ * asserting `UNDO_WINDOW + 1` half the time — a flake that looks exactly like
+ * an off-by-one in the guard.
+ */
+function freezeClock(): void {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-03-04T10:00:00.000Z"));
+}
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 type Seed = Awaited<ReturnType<typeof seedLab>>;
 
@@ -113,14 +140,52 @@ describe("reopenSession", () => {
     expect(session.synthesisApprovedAt).toBeDefined();
   });
 
-  it("refuses once the undo window has closed", async () => {
+  it("still reopens at the last instant of the window", async () => {
+    // The window is closed-ended, and which end it is closed on is a real
+    // decision: someone pressing undo on the tenth minute is inside the toast
+    // they were offered, not a second past it.
+    const { ctx, seed } = await world();
+    freezeClock();
+    const sessionId = await seedSession(ctx, seed, {
+      status: "ended",
+      endedAt: Date.now() - UNDO_WINDOW,
+    });
+
+    await reopen(ctx, sessionId);
+
+    expect((await sessionRow(ctx, sessionId)).status).toBe("live");
+  });
+
+  it("refuses one millisecond past the window", async () => {
+    const { ctx, seed } = await world();
+    const sessionId = await seedSession(ctx, seed, {
+      status: "ended",
+      endedAt: Date.now() - UNDO_WINDOW - 1,
+    });
+
+    await expect(reopen(ctx, sessionId)).rejects.toBeInstanceOf(ConvexError);
+    expect((await sessionRow(ctx, sessionId)).status).toBe("ended");
+  });
+
+  it("refuses once the undo window has closed, and says that is why", async () => {
+    // The copy is asserted because `instanceof ConvexError` is satisfied by
+    // every other refusal in this handler too — a window guard that got
+    // reordered behind the status check, or replaced by it, would still throw.
     const { ctx, seed } = await world();
     const sessionId = await seedSession(ctx, seed, {
       status: "ended",
       endedAt: Date.now() - 11 * MINUTE,
     });
 
-    await expect(reopen(ctx, sessionId)).rejects.toBeInstanceOf(ConvexError);
+    try {
+      await reopen(ctx, sessionId);
+      expect.unreachable("a session ended 11 minutes ago is past the window");
+    } catch (caught) {
+      expect(caught).toBeInstanceOf(ConvexError);
+      expect((caught as ConvexError<string>).data).toContain(
+        "more than ten minutes ago",
+      );
+    }
     expect((await sessionRow(ctx, sessionId)).status).toBe("ended");
   });
 
@@ -227,14 +292,47 @@ describe("restoreSession", () => {
     expect(session.prepDigestJobId).toBeUndefined();
   });
 
-  it("refuses once the undo window has closed", async () => {
+  it("still restores at the last instant of the window", async () => {
+    const { ctx, seed } = await world();
+    freezeClock();
+    const sessionId = await seedSession(ctx, seed, {
+      status: "cancelled",
+      cancelledAt: Date.now() - UNDO_WINDOW,
+      scheduledAt: Date.now() + 24 * HOUR,
+    });
+
+    await restore(ctx, sessionId);
+
+    expect((await sessionRow(ctx, sessionId)).status).toBe("scheduled");
+  });
+
+  it("refuses one millisecond past the window", async () => {
+    const { ctx, seed } = await world();
+    const sessionId = await seedSession(ctx, seed, {
+      status: "cancelled",
+      cancelledAt: Date.now() - UNDO_WINDOW - 1,
+    });
+
+    await expect(restore(ctx, sessionId)).rejects.toBeInstanceOf(ConvexError);
+    expect((await sessionRow(ctx, sessionId)).status).toBe("cancelled");
+  });
+
+  it("refuses once the undo window has closed, and says that is why", async () => {
     const { ctx, seed } = await world();
     const sessionId = await seedSession(ctx, seed, {
       status: "cancelled",
       cancelledAt: Date.now() - 11 * MINUTE,
     });
 
-    await expect(restore(ctx, sessionId)).rejects.toBeInstanceOf(ConvexError);
+    try {
+      await restore(ctx, sessionId);
+      expect.unreachable("a session cancelled 11 minutes ago is past the window");
+    } catch (caught) {
+      expect(caught).toBeInstanceOf(ConvexError);
+      expect((caught as ConvexError<string>).data).toContain(
+        "more than ten minutes ago",
+      );
+    }
     expect((await sessionRow(ctx, sessionId)).status).toBe("cancelled");
   });
 
