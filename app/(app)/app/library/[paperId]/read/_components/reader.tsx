@@ -1014,6 +1014,16 @@ export function Reader({
    * changed under them. So a page change is announced, and only a page change:
    * the first reading of the paper is the label's job, and repeating it here
    * would be the reader's own screen reader talking over the paper opening.
+   *
+   * And only a page change the paper is not already announcing by itself. Page
+   * Up, Page Down, Home, End and the jump field all move the ring onto a page
+   * wrapper, which is a `role="group"` named "Page 2 of 15" — the very sentence
+   * this region would read. So while the ring is on the paper, the paper
+   * speaks: one announcement per key press rather than two, and none at all for
+   * the thirteen pages that a jump to the back of a paper scrolls smoothly
+   * past on the way. Asked of the DOM at the moment of the change rather than
+   * tracked as a journey with a beginning and an end, because a journey has to
+   * be cleaned up after and this is not a thing that may get stuck.
    */
   const [announcement, setAnnouncement] = useState("");
   const announced = useRef<number | null>(null);
@@ -1026,6 +1036,14 @@ export function Reader({
       return;
     }
     announced.current = currentPage;
+    // The ring is on a page of the paper, so a page is naming itself and this
+    // has nothing to add. `dataset.page` is the wrapper's own marker; anything
+    // else holding the ring — the margin, the toolbar, `<body>` under a wheel
+    // scroll — says nothing about where the paper is, and then this does.
+    const focused = document.activeElement;
+    if (focused instanceof HTMLElement && focused.dataset.page !== undefined) {
+      return;
+    }
     setAnnouncement(`Page ${currentPage + 1} of ${pageCount}`);
   }, [currentPage, pageCount]);
 
