@@ -9,7 +9,19 @@ export type BibtexPaper = {
 
 /** Braced BibTeX values still need literal braces distinguished from delimiters. */
 function escapeBibtexValue(value: string): string {
-  return value.replaceAll("{", "\\{").replaceAll("}", "\\}");
+  const escapes: Readonly<Record<string, string>> = {
+    "\\": "\\textbackslash{}",
+    "{": "\\{",
+    "}": "\\}",
+    "%": "\\%",
+    "&": "\\&",
+    "#": "\\#",
+    _: "\\_",
+    $: "\\$",
+    "~": "\\textasciitilde{}",
+    "^": "\\textasciicircum{}",
+  };
+  return value.replace(/[\\{}%&#_$~^]/g, (character) => escapes[character] ?? character);
 }
 
 /**

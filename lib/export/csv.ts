@@ -10,6 +10,7 @@ export type AnnotationExportInput = {
   body: string;
   createdAt: number;
   parentId?: string;
+  deleted: boolean;
 };
 
 type AnnotationExportRecord = {
@@ -21,6 +22,7 @@ type AnnotationExportRecord = {
   body: string;
   createdAt: string;
   threadParentReference: string | null;
+  deleted: boolean;
 };
 
 const CSV_COLUMNS = [
@@ -32,6 +34,7 @@ const CSV_COLUMNS = [
   "body",
   "created_at",
   "thread_parent_reference",
+  "deleted",
 ] as const;
 
 function toRecord(annotation: AnnotationExportInput): AnnotationExportRecord {
@@ -44,12 +47,18 @@ function toRecord(annotation: AnnotationExportInput): AnnotationExportRecord {
     body: annotation.body,
     createdAt: new Date(annotation.createdAt).toISOString(),
     threadParentReference: annotation.parentId ?? null,
+    deleted: annotation.deleted,
   };
 }
 
-/** RFC 4180 field escaping, including embedded quotes and either newline style. */
-function csvCell(value: string | number | null): string {
-  const text = value === null ? "" : String(value);
+/** Spreadsheet formula neutralization followed by RFC 4180 field escaping. */
+function csvCell(value: string | number | boolean | null): string {
+  const text =
+    typeof value === "string" && /^[=+\-@\t\r]/.test(value)
+      ? `'${value}`
+      : value === null
+        ? ""
+        : String(value);
   return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
@@ -70,6 +79,7 @@ export function annotationsToCsv(
         record.body,
         record.createdAt,
         record.threadParentReference,
+        record.deleted,
       ]
         .map(csvCell)
         .join(",");

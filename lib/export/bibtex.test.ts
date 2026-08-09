@@ -5,10 +5,10 @@ describe("papersToBibtex", () => {
   it("writes the metadata Margin already has and preserves unicode", () => {
     const papers: BibtexPaper[] = [
       {
-        title: "Über CRISPR in {Living} Cells",
+        title: "Über 100% CRISPR in {Living} Cells",
         authors: ["Ada Lovelace", "Élodie Durand"],
         year: 2026,
-        venue: "Journal of A&B",
+        venue: "Journal of A&B #1_2 ~ ^ $ \\",
         doi: "10.1000/example",
         abstract: "A result with {boundaries} and naïve participants.",
       },
@@ -16,10 +16,10 @@ describe("papersToBibtex", () => {
 
     expect(papersToBibtex(papers)).toBe(
       "@article{Lovelace2026Uber,\n" +
-        "  title = {{Über} {CRISPR} in \\{{Living}\\} {Cells}},\n" +
+        "  title = {{Über} 100\\% {CRISPR} in \\{{Living}\\} {Cells}},\n" +
         "  author = {Ada Lovelace and Élodie Durand},\n" +
         "  year = {2026},\n" +
-        "  journal = {Journal of A&B},\n" +
+        "  journal = {Journal of A\\&B \\#1\\_2 \\textasciitilde{} \\textasciicircum{} \\$ \\textbackslash{}},\n" +
         "  doi = {10.1000/example},\n" +
         "  abstract = {A result with \\{boundaries\\} and naïve participants.}\n" +
         "}\n",
