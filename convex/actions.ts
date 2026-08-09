@@ -2,6 +2,7 @@ import { ConvexError, v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { mutation, query } from "./_generated/server";
+import { cascadeForAction } from "./delegations";
 import { getMembership, requireUserId } from "./lib/authz";
 import { recordEvent } from "./lib/ledger";
 import { actionKind } from "./schema";
@@ -461,6 +462,13 @@ export const setSettled = mutation({
         settledAt: Date.now(),
         settledBy: userId,
       });
+      // A settled question is not a question the scout may keep working on:
+      // the subject fence is what stops this feature drifting into chat, and
+      // it has to hold after the fact as well as before it. Findings that
+      // came back earlier are superseded rather than deleted — the lab may
+      // well have settled it *because* of one, and an artifact that erases
+      // itself at the moment it was useful is an artifact nobody can audit.
+      await cascadeForAction(ctx, action._id, "subject-settled", userId);
     } else {
       await ctx.db.patch(action._id, {
         settledAt: undefined,
@@ -490,10 +498,28 @@ export const setSettled = mutation({
  * Somebody who thinks a decision was mis-heard reopens the conversation rather
  * than editing the minutes.
  *
- * The row goes rather than being tombstoned. Nothing is built on top of an
- * outcome — no replies, no derived artifact cites one — so leaving a redacted
- * husk in the panel would be clutter with nothing holding it up. The ledger
- * already says it existed, which is the part that cannot be rewritten.
+ * The row goes rather than being tombstoned. No conversation is built on top
+ * of an outcome — there are no replies to leave answering nothing — so leaving
+ * a redacted husk in the panel would be clutter with nothing holding it up.
+ * The ledger already says it existed, which is the part that cannot be
+ * rewritten.
+ *
+ * ## What *is* built on top of one, and what that costs here
+ *
+ * This comment used to say that nothing derived cites an outcome. The scout
+ * falsified it: a delegation names the open question it was handed, and a
+ * finding is a machine's report about that question. The premise changed
+ * rather than the design (`docs/design/agent-delegation.md` §5.4), and the
+ * change is `cascadeForAction` below — an in-flight run is cancelled with its
+ * lease cleared, so anything still working fails closed rather than storing a
+ * finding about a question that no longer exists, and returned findings are
+ * marked superseded rather than deleted.
+ *
+ * The delegation rows keep the deleted action's id. There is nothing left to
+ * resolve it against, which is exactly what the surface renders as "question
+ * withdrawn" — the same honest shape a redacted citation has everywhere else
+ * in this product: a reference outliving the thing it referenced is a record
+ * that something was here, not a claim about what it said.
  */
 export const remove = mutation({
   args: { actionId: v.id("actions") },
@@ -505,6 +531,9 @@ export const remove = mutation({
         "Only the person who recorded an outcome can take it back.",
       );
     }
+
+    // Before the row goes, so the cascade can still read what it is about.
+    await cascadeForAction(ctx, action._id, "subject-withdrawn", userId);
 
     await ctx.db.delete(action._id);
     await recordEvent(ctx, {
