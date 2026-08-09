@@ -160,6 +160,20 @@ async function existingBrief(
  * and is ordinary prep rather than something the lab failed to settle. One
  * still `scheduled` has not happened yet, and this session itself is obviously
  * not prior to itself.
+ *
+ * Both of those rules are conditions on the *query* rather than a pass over its
+ * results, because the cap has to fall on rows that qualify. Filtering
+ * afterwards spends the budget on cancellations and on meetings still ahead of
+ * the lab, and a held meeting pushed out of the window that way does not go
+ * missing quietly: its unanswered questions stop being carried-over and are
+ * assembled as fresh, so the brief silently claims the lab has never discussed
+ * them.
+ *
+ * Newest first, so if a paper somehow outruns the cap the meetings kept are the
+ * recent ones — the further back a question was left open, the less the room
+ * remembers of it. Ordering is by creation rather than by `scheduledAt`, which
+ * is what `by_paper` offers; they differ only for a session backdated after the
+ * fact, and buying an index for that is not worth a schema change.
  */
 async function priorSessions(
   ctx: QueryCtx | MutationCtx,
@@ -168,15 +182,19 @@ async function priorSessions(
   const onPaper = await ctx.db
     .query("sessions")
     .withIndex("by_paper", (q) => q.eq("paperId", session.paperId))
+    .order("desc")
+    .filter((q) =>
+      q.and(
+        q.neq(q.field("_id"), session._id),
+        q.or(
+          q.eq(q.field("status"), "ended"),
+          q.eq(q.field("status"), "synthesized"),
+        ),
+      ),
+    )
     .take(PRIOR_SESSION_LIMIT);
   return new Map(
-    onPaper
-      .filter(
-        (one) =>
-          one._id !== session._id &&
-          (one.status === "ended" || one.status === "synthesized"),
-      )
-      .map((one) => [one._id, one.scheduledAt] as const),
+    onPaper.map((one) => [one._id, one.scheduledAt] as const),
   );
 }
 
@@ -393,6 +411,46 @@ async function stillSharedAmong(
   return stillShared;
 }
 
+/** A stored section, as it sits on the row. */
+type StoredSection = Doc<"briefs">["sections"][number];
+
+/**
+ * Re-apply the margin's current state to an assembly that was frozen when it
+ * was written.
+ *
+ * A brief item's text is not a description of the notes it cites — it is those
+ * notes, formatted. A collision line carries both members' names and what each
+ * of them wrote; the other sections carry one member's name and their words. So
+ * the rule is all-or-nothing: unless *every* note behind a line is still shared
+ * with the lab, the text goes.
+ *
+ * That is stricter than `synthesis.applyWithdrawals`, which keeps a partly
+ * withdrawn item's text and drops its attribution instead. It can afford to,
+ * because a synthesis item is a model's paraphrase and its names are a union
+ * that cannot be mapped back to particular ids — strip them and nothing points
+ * at anybody. Here the mapping is the sentence. Stripping the attribution off
+ * "Ana defined the term Ben left a question on" leaves a sentence that is still
+ * about Ana and Ben, and rewriting it to say less would mean re-deriving the
+ * line from a note the reader is no longer allowed to read.
+ *
+ * The ids are left in place. The citations are what a redacted line still
+ * honestly is — a line was here, resting on these — and the caller counts
+ * withdrawals off them.
+ */
+export function redactWithdrawn(
+  sections: readonly StoredSection[],
+  stillShared: ReadonlySet<Id<"annotations">>,
+): StoredSection[] {
+  return sections.map((section) => ({
+    ...section,
+    items: section.items.map((item) =>
+      item.annotationIds.every((id) => stillShared.has(id))
+        ? item
+        : { ...item, text: WITHDRAWN_ITEM_TEXT },
+    ),
+  }));
+}
+
 /** Every annotation a brief rests on, deduped, so each is read once. */
 function collectCitations(
   sections: readonly Doc<"briefs">["sections"][number][],
@@ -416,9 +474,19 @@ function collectCitations(
  * landed in a reader's cache, because a brief that keeps quoting a note
  * somebody took back is a way around `visibility: "private"`.
  *
- * A line whose notes have *all* gone is replaced rather than dropped, the same
- * threshold `synthesis.getForSession` applies and for the same reason: saying a
- * line was here keeps the record honest, where silently shortening the brief
+ * The threshold is all-or-nothing, and deliberately stricter than the one
+ * `synthesis.getForSession` applies. A synthesis item is a model's paraphrase,
+ * so when one of its several citations goes the sentence can stand with its
+ * attribution stripped — no particular name is provably still behind it. A
+ * brief item is not a paraphrase. Its text was *built* from the notes it cites:
+ * a collision line names both members and quotes what each of them wrote. Drop
+ * one of those two and the surviving half of the sentence is still the
+ * withdrawn member's name against the passage they marked. So a line loses its
+ * text the moment *any* note behind it stops being shared, not only when they
+ * have all gone.
+ *
+ * Replaced rather than dropped, which is the part synthesis has right and this
+ * keeps: saying a line was here is honest, where silently shortening the brief
  * would make the lab's prep look thinner than it was.
  *
  * `null` for anyone else in the lab, so the panel simply doesn't render — the
@@ -486,15 +554,7 @@ export const getForSession = query({
       generation: brief.generation,
       generatedAt: brief.generatedAt,
       trigger: brief.trigger,
-      sections: brief.sections.map((section) => ({
-        ...section,
-        items: section.items.map((item) => {
-          const live = item.annotationIds.filter((id) => stillShared.has(id));
-          return live.length === 0
-            ? { ...item, text: WITHDRAWN_ITEM_TEXT }
-            : item;
-        }),
-      })),
+      sections: redactWithdrawn(brief.sections, stillShared),
       citationCount: stillShared.size,
       approval:
         brief.approvedAt === undefined
