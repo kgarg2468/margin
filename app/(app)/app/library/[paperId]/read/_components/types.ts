@@ -38,9 +38,24 @@ export type AnchorState = {
   ambiguous: boolean;
 };
 
+/**
+ * Where a passage sits, in the reader's content coordinates — enough to draw a
+ * line to it from the margin and no more.
+ *
+ * `gutterX` is the right edge of the *page*, not of the passage: the connector
+ * belongs in the gutter, and a line from the sentence itself would cross the
+ * paragraph it is about. See `lib/rail/connector.ts`.
+ */
+export type PassagePoint = {
+  top: number;
+  bottom: number;
+  gutterX: number;
+};
+
 /** Where a page put each of its annotations, and which ones it could not place. */
 export type PageResolution = {
   positions: Map<AnnotationId, number>;
+  points: Map<AnnotationId, PassagePoint>;
   states: Map<AnnotationId, AnchorState>;
   orphaned: AnnotationId[];
 };

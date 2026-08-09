@@ -17,6 +17,7 @@ import type {
 } from "pdfjs-dist/types/src/display/api";
 import type { CSSProperties, KeyboardEvent, MouseEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ruleOpacity, washOpacity } from "./mark-alpha";
 import { typeStyle } from "./ontology";
 import styles from "./reader.module.css";
 import type {
@@ -25,6 +26,7 @@ import type {
   AnnotationView,
   Draft,
   PageResolution,
+  PassagePoint,
 } from "./types";
 
 /**
@@ -335,6 +337,10 @@ export function PdfPage({
     const orphaned: AnnotationId[] = [];
     const positions = new Map<AnnotationId, number>();
     const states = new Map<AnnotationId, AnchorState>();
+    const points = new Map<AnnotationId, PassagePoint>();
+    // The gutter starts at the page's right edge, and the page does not move
+    // between annotations, so this is read once rather than per mark.
+    const gutterX = wrapper.offsetLeft + wrapper.offsetWidth;
 
     for (const annotation of annotations) {
       const resolved = cachedResolve(
@@ -380,6 +386,15 @@ export function PdfPage({
         ambiguous: resolved.ambiguous,
       });
       positions.set(annotation._id, wrapper.offsetTop + (rects[0]?.top ?? 0));
+      let lowest = 0;
+      for (const rect of rects) {
+        lowest = Math.max(lowest, rect.top + rect.height);
+      }
+      points.set(annotation._id, {
+        top: wrapper.offsetTop + (rects[0]?.top ?? 0),
+        bottom: wrapper.offsetTop + lowest,
+        gutterX,
+      });
       states.set(annotation._id, {
         method: resolved.method,
         confidence: resolved.confidence,
@@ -402,7 +417,7 @@ export function PdfPage({
     }
 
     setMarks(placed);
-    onResolved(pageIndex, { positions, states, orphaned });
+    onResolved(pageIndex, { positions, points, states, orphaned });
   }, [layer, extractedLength, annotations, recovered, pageIndex, onResolved]);
 
   // --- selection ---------------------------------------------------------
@@ -617,13 +632,10 @@ export function PdfPage({
                       width: rect.width,
                       height: rect.height,
                       background: style.wash,
-                      opacity: mark.drifted
-                        ? isActive
-                          ? 0.55
-                          : 0.25
-                        : isActive
-                          ? 1
-                          : 0.5,
+                      opacity: washOpacity({
+                        drifted: mark.drifted,
+                        active: isActive,
+                      }),
                       borderRadius: 2,
                       transition: "opacity 120ms",
                     }}
@@ -639,7 +651,7 @@ export function PdfPage({
                         ? `${rule}px dashed ${ink}`
                         : undefined,
                       background: mark.drifted ? undefined : ink,
-                      opacity: isActive ? 1 : 0.75,
+                      opacity: ruleOpacity({ active: isActive }),
                     }}
                   />
                 </span>

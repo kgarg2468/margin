@@ -4,9 +4,15 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AnnotationCard } from "./annotation-card";
 import { typeStyle } from "./ontology";
+import { connectorGeometry } from "@/lib/rail/connector";
 import { DEFAULT_GAP, relaxColumn } from "@/lib/rail/relax";
 import { eyebrowClass, skeletonClass } from "@/lib/ui";
-import type { AnchorState, AnnotationId, AnnotationView } from "./types";
+import type {
+  AnchorState,
+  AnnotationId,
+  AnnotationView,
+  PassagePoint,
+} from "./types";
 
 /**
  * How a note takes and leaves its place in the margin: the entrance the
@@ -30,6 +36,8 @@ export type RailCard = {
   top: number;
   /** How its passage was found again, when the page it is on has resolved. */
   state?: AnchorState;
+  /** Where its passage is, for the connector across the gutter. */
+  passage?: PassagePoint;
   /**
    * The page the passage actually turned up on, when that is not the page the
    * note was written on. Set only for a note recovered from a neighbouring
@@ -60,6 +68,12 @@ const UNMEASURED = 0;
  * be a line drawn to somewhere the eye already was.
  */
 const TETHER_MIN = 12;
+
+/**
+ * How far down a card the connector meets it: the middle of its first line,
+ * which is the type badge, not the top edge of the box.
+ */
+const CARD_LINK_Y = 15;
 
 /**
  * The margin.
@@ -304,6 +318,20 @@ export function MarginRail({
     );
   }
 
+  const linked = placed.find(({ card: entry }) => entry.annotation._id === activeId);
+  const connector =
+    linked === undefined || linked.card.passage === undefined
+      ? null
+      : connectorGeometry(
+          {
+            x: linked.card.passage.gutterX - origin.left,
+            y:
+              (linked.card.passage.top + linked.card.passage.bottom) / 2 -
+              origin.top,
+          },
+          { x: 0, y: linked.top + CARD_LINK_Y },
+        );
+
   return (
     <div ref={rootRef} className="w-full shrink-0 lg:w-80">
       {aligned ? (
@@ -369,6 +397,40 @@ export function MarginRail({
                 }}
               />
             ),
+          )}
+
+          {/* The note and the sentence, joined. Only ever for the one card the
+              pointer or the keyboard is on: a margin with sixteen leader lines
+              in it is a wiring diagram, and the reader is trying to read.
+              Decorative, in the card's own ink, and out in the gutter where it
+              crosses nothing.
+
+              Accepted, and not worth the fix: a path's `d` cannot be
+              CSS-transitioned, so when a thread expands and the card eases to
+              its new line over 300ms the line snaps there on the first frame.
+              Only opacity is animated here. */}
+          {connector !== null && linked !== undefined && (
+            <svg
+              aria-hidden
+              width={connector.width}
+              height={connector.height}
+              className="pointer-events-none absolute overflow-visible motion-safe:transition-opacity motion-safe:duration-[var(--dur-enter)]"
+              style={{
+                left: connector.left,
+                top: connector.top,
+                width: connector.width,
+                height: connector.height,
+              }}
+            >
+              <path
+                d={connector.path}
+                fill="none"
+                strokeWidth={1.5}
+                strokeLinecap="round"
+                stroke={typeStyle(linked.card.annotation.type).ink}
+                opacity={0.85}
+              />
+            </svg>
           )}
         </div>
       ) : (

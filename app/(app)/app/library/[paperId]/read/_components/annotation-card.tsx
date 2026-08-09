@@ -154,6 +154,12 @@ export function AnnotationCard({
       onMouseEnter={() => onActivate(annotation._id)}
       onMouseLeave={() => onActivate(null)}
       onFocus={() => onActivate(annotation._id)}
+      // Tabbing *within* a card — from Reply to Edit — is not leaving it.
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          onActivate(null);
+        }
+      }}
       style={{ borderLeftColor: style.ink }}
       // A card, not a slab: rounded, hairline-bordered, resting on the page
       // with a whisper of shadow — the Fig. 1 grammar. The type's ink keeps

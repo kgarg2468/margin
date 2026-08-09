@@ -52,6 +52,17 @@ import type {
 /** Below this the margin cannot align to passages, so it becomes a list. */
 const ALIGNED_WIDTH = 1024;
 
+/**
+ * A beat before the link goes out.
+ *
+ * Moving the pointer from a highlight to the card about it crosses the
+ * gutter, which belongs to neither — the page fires `mouseleave`, the card
+ * has not fired `mouseenter` yet, and the link dies halfway through a journey
+ * the reader is deliberately making. Anything that activates in the meantime
+ * cancels the clear, so the only thing this delays is actually leaving.
+ */
+const LINK_GRACE_MS = 120;
+
 function useAligned(): boolean {
   const [aligned, setAligned] = useState(false);
   useEffect(() => {
@@ -95,6 +106,33 @@ export function Reader({
   const [draft, setDraft] = useState<Draft | null>(null);
   const [resolutions, setResolutions] = useState<Map<number, PageResolution>>(
     new Map(),
+  );
+
+  // Every activation in the reader goes through this rather than through
+  // `setActiveId`, so that the gutter — which fires nobody's `mouseenter` —
+  // cannot put the link out mid-journey. See `LINK_GRACE_MS`.
+  const clearing = useRef<number | null>(null);
+  const activate = useCallback((id: AnnotationId | null) => {
+    if (clearing.current !== null) {
+      window.clearTimeout(clearing.current);
+      clearing.current = null;
+    }
+    if (id === null) {
+      clearing.current = window.setTimeout(() => {
+        clearing.current = null;
+        setActiveId(null);
+      }, LINK_GRACE_MS);
+      return;
+    }
+    setActiveId(id);
+  }, []);
+  useEffect(
+    () => () => {
+      if (clearing.current !== null) {
+        window.clearTimeout(clearing.current);
+      }
+    },
+    [],
   );
 
   // In dark mode the sheet is developed dark by default (see reader.module.css)
@@ -534,6 +572,7 @@ export function Reader({
         replies: repliesByParent.get(annotation._id) ?? [],
         top: 0,
         state: resolution?.states.get(annotation._id),
+        passage: resolution?.points.get(annotation._id),
         // Only when it is somewhere other than where it was written: the rail
         // says so beside the card, and has nothing to say in the ordinary case.
         ...(page === annotation.anchor.pageIndex
@@ -575,11 +614,11 @@ export function Reader({
 
   const focusPassage = useCallback(
     (annotation: AnnotationView) => {
-      setActiveId(annotation._id);
+      activate(annotation._id);
       const element = pageElements.current.get(pageOf(annotation));
       element?.scrollIntoView({ block: "center", behavior: "smooth" });
     },
-    [pageOf],
+    [activate, pageOf],
   );
 
   /**
@@ -884,7 +923,7 @@ export function Reader({
                   recovered={recovered}
                   activeId={activeId}
                   composing={draft?.anchor.pageIndex === index}
-                  onActivate={setActiveId}
+                  onActivate={activate}
                   onResolved={handleResolved}
                   onDraft={setDraft}
                   registerElement={registerPage}
@@ -901,7 +940,7 @@ export function Reader({
             aligned={aligned}
             columnHeight={columnHeight}
             activeId={activeId}
-            onActivate={setActiveId}
+            onActivate={activate}
             onFocusPassage={focusPassage}
           />
 
