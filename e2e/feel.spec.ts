@@ -70,20 +70,35 @@ test.describe("press feel", () => {
   });
 
   /**
-   * The same invariant swept across a whole page rather than one control. The
-   * base layer answers the pointer for every `button` on the document, so a
-   * control that comes back with the default cursor is one that a utility has
-   * quietly overridden — the "dead button" a user hovers and cannot tell is
-   * live. The landing page is the one route with no auth and no backend, which
-   * is why it is the page swept.
+   * The same invariant swept across a whole page rather than one control.
+   *
+   * The probe is deliberately wider than `role=button`: the landing page has no
+   * `<button>` at all — its controls are links by design, including a hero CTA
+   * wearing `primaryButtonClass` — so a sweep of buttons alone would loop zero
+   * times and pass forever. Links are also where the real regression lives on
+   * this route: their pointer comes from the UA's `:any-link` default rather
+   * than from the base layer, so a `cursor` utility landing in a shared button
+   * class would kill the affordance with nothing watching.
+   *
+   * Hence the floor. A page-sweeping assertion that finds nothing to sweep is
+   * a green test reporting a fact it never checked, and the count is the only
+   * thing standing between this test and that.
    */
   test("landing has no dead buttons", async ({ page }) => {
     await page.goto("/");
-    for (const el of await page.getByRole("button").all()) {
+    const controls = await page
+      .locator("button, [role=button], a[href]")
+      .all();
+
+    let probed = 0;
+    for (const el of controls) {
       if (await el.isVisible()) {
+        probed += 1;
         await expect(el).toHaveCSS("cursor", "pointer");
       }
     }
+
+    expect(probed).toBeGreaterThan(0);
   });
 });
 
@@ -104,12 +119,26 @@ test.describe("press feel", () => {
  * actually gets is the fact worth pinning: the control does not move when
  * pressed. Driven with a real mouse press because `:active` answers trusted
  * input, not a dispatched `pointerdown`.
+ *
+ * The transition string still earns its keep, as a precondition rather than as
+ * the assertion. `scale: none` is also what a control that never wore
+ * `pressable` reports, so without proving the probed element carries the press
+ * grammar this test would go green on any button that simply has no press to
+ * suppress — and `getByRole("button").first()` only happens to be the
+ * `pressable` submit today. Sampled under the emulation because, per the note
+ * above, the declaration is identical in both modes; that is exactly why it
+ * cannot serve as the assertion and can serve as the guard.
  */
 test.describe("reduced motion", () => {
   test("a press moves nothing", async ({ page }) => {
     await page.emulateMedia({ reducedMotion: "reduce" });
     await page.goto("/signin");
     const button = page.getByRole("button").first();
+
+    const transition = await button.evaluate(
+      (el) => getComputedStyle(el).transition,
+    );
+    expect(transition).toContain("scale 0.06s");
 
     await button.hover();
     await page.mouse.down();
