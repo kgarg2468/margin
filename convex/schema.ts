@@ -195,6 +195,86 @@ export const anchor = v.object({
 });
 
 /**
+ * What kind of agent a delegation was handed to.
+ *
+ * A union of one, and written as a union on purpose: the scout is the first
+ * capability the lab can hand a piece of work to, not the only one the shape
+ * has to survive. What it is *not* is a principal — there is no agent row in
+ * `users` and there will not be one (`docs/design/agent-delegation.md` §3.4).
+ * An agent is a capability the lab invokes; the person who invoked it is who
+ * the ledger names.
+ */
+export const delegationAgentKind = v.union(v.literal("scout.corpus"));
+
+/**
+ * What put the delegation on the queue.
+ *
+ * `brief` is the T−2h chain running the scout over the questions the last
+ * meeting left open — nobody presses anything, and the presenter is the
+ * ledger's actor, exactly as `brief.generated` already works. `manual` is a
+ * member asking on a specific question, and carries the requester.
+ */
+export const delegationTrigger = v.union(
+  v.literal("brief"),
+  v.literal("manual"),
+);
+
+/**
+ * Where a delegation is in its life.
+ *
+ * `queued → running → returned | empty | failed`, with `cancelled` reachable
+ * from either of the two live states. The last four are terminal: a row is
+ * never re-opened and never hard-deleted, because the row *is* the audit trail
+ * of what the lab asked a machine to do.
+ *
+ * `returned` and `empty` are the honest-null distinction, and they are two
+ * states rather than one because they answer different questions. `empty`
+ * means retrieval found nothing — the lab has not written about this. A run
+ * whose every item died at the citation gate is `failed`, not `empty`: the
+ * scout found material and could not cite it, which is a failure of the run
+ * and not an answer about the corpus.
+ */
+export const delegationStatus = v.union(
+  v.literal("queued"),
+  v.literal("running"),
+  v.literal("returned"),
+  v.literal("empty"),
+  v.literal("failed"),
+  v.literal("cancelled"),
+);
+
+/**
+ * Why a run ended without a finding — a closed set, never prose.
+ *
+ * The ledger is append-only, so a free-text reason written there could never
+ * be corrected or taken back. The `delegations` row carries a sentence for the
+ * reader (`failureReason`, mutable, on a row that can die); this is what the
+ * ledger gets, and it is a vocabulary rather than a message.
+ */
+export const delegationFailure = v.union(
+  /** Nobody stored a result inside the lease; the slot was reclaimed. */
+  v.literal("lease-expired"),
+  /** Retrieval or the model call itself threw. */
+  v.literal("run-error"),
+  /** Material came back and every item of it died at the citation gate. */
+  v.literal("nothing-citable"),
+);
+
+/**
+ * Why an active delegation was cancelled — again a closed set.
+ *
+ * Three of the four are the subject moving underneath the run: a question that
+ * has been settled, withdrawn, or whose cited note stopped being shared is a
+ * question the scout must stop working on. The fourth is a person saying so.
+ */
+export const delegationCancellation = v.union(
+  v.literal("subject-settled"),
+  v.literal("subject-withdrawn"),
+  v.literal("citation-withdrawn"),
+  v.literal("by-member"),
+);
+
+/**
  * Fields every ledger row carries, whatever kind of fact it records.
  *
  * `paperId` and `sessionId` live here rather than only on the variants that
@@ -715,6 +795,60 @@ export const eventDoc = v.union(
     sessionId: v.id("sessions"),
     actionId: v.id("actions"),
     kind: actionKind,
+  }),
+  /**
+   * The lab handed a question to a machine.
+   *
+   * `actorId` is a person in all four of these — the presenter when the brief
+   * chain queued it, the requester when a member asked. A job has no name
+   * (`docs/design/agent-delegation.md` §3.3), and `trigger` is what keeps a
+   * scheduled run from reading as somebody pressing a button at two in the
+   * morning. It is the same arrangement `brief.generated` already uses.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("delegation.requested"),
+    delegationId: v.id("delegations"),
+    agentKind: delegationAgentKind,
+    trigger: delegationTrigger,
+  }),
+  /**
+   * It came back with something.
+   *
+   * The counts are here and the prose is not, which is the ledger's usual
+   * rule and matters more than usual for this row: a finding is a machine's
+   * paraphrase of notes whose authors may un-share them tomorrow, and a copy
+   * of it in an append-only table would be a paraphrase that could never be
+   * redacted. `droppedForCitation` is how many items the citation gate killed,
+   * which is the number that says whether to trust the run.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("delegation.returned"),
+    delegationId: v.id("delegations"),
+    findingId: v.id("findings"),
+    trigger: delegationTrigger,
+    itemCount: v.number(),
+    droppedForCitation: v.number(),
+  }),
+  /** Retrieval found nothing. A legitimate answer, and recorded as one. */
+  v.object({
+    ...eventBase,
+    type: v.literal("delegation.empty"),
+    delegationId: v.id("delegations"),
+    trigger: delegationTrigger,
+  }),
+  v.object({
+    ...eventBase,
+    type: v.literal("delegation.failed"),
+    delegationId: v.id("delegations"),
+    reason: delegationFailure,
+  }),
+  v.object({
+    ...eventBase,
+    type: v.literal("delegation.cancelled"),
+    delegationId: v.id("delegations"),
+    reason: delegationCancellation,
   }),
 );
 
@@ -1633,4 +1767,248 @@ export default defineSchema({
     .index("by_paper", ["paperId"])
     /** The toggle's exact row, to move by one. */
     .index("by_annotation_and_kind", ["annotationId", "kind"]),
+
+  /**
+   * One piece of work the lab handed to a machine, and everything that
+   * happened to it.
+   *
+   * The scout runs over the open questions a brief carries forward and reports
+   * what the lab has already said that bears on each — cited, proposed, never
+   * accepted. `docs/design/agent-delegation.md` is the whole argument; the
+   * parts of it this table is *responsible* for are these:
+   *
+   * ## The row is the audit trail
+   *
+   * Nothing here is ever hard-deleted. A terminal delegation is the record
+   * that the lab asked a machine a question and what came back, and a product
+   * whose agent work vanishes when it finishes is a product that cannot answer
+   * "why does the brief say this". A row pointing at an action that has since
+   * been withdrawn keeps the id as a tombstone reference, and the surface
+   * renders it as a question that was withdrawn — the same shape a redacted
+   * citation already has everywhere else in this schema.
+   *
+   * ## The lease is a token, not a flag
+   *
+   * `lease` plus `leaseAcquiredAt` are the synthesis arrangement
+   * (`convex/synthesis.ts`, `GENERATION_LEASE_MS`) applied per delegation
+   * rather than per session, and they exist for the failure the flag alone
+   * cannot survive: a scheduled action can be retried after a crash, so
+   * `status === "running"` is not by itself evidence that a run is still
+   * alive. The claim mutation moves `queued → running` atomically and stamps
+   * a fresh token; the store mutation refuses unless it still holds that exact
+   * token and the token is inside its three minutes. A run that overran has
+   * been superseded and writes nothing. Cancelling clears the lease, which is
+   * what makes a cancelled run's store fail closed rather than racing it.
+   *
+   * ## No agent principal
+   *
+   * `requestedBy` is a person, always. There is no `agentId`, and `agentKind`
+   * is a capability name rather than an identity. See `delegationAgentKind`.
+   *
+   * ## No prose
+   *
+   * Except `failureReason`, which is one sentence written *by this codebase*
+   * for the reader ("the scout ran out of time"). No annotation body, no model
+   * output, and no query text ever lands here — the last of those because a
+   * record of what a lab searched for is exactly the read-tracking the privacy
+   * constitution forbids, and it does not stop being forbidden because a
+   * machine did the searching.
+   */
+  delegations: defineTable({
+    labId: v.id("labs"),
+    agentKind: delegationAgentKind,
+    trigger: delegationTrigger,
+    /** The brief whose carried-forward questions queued this, on `brief` runs. */
+    briefId: v.optional(v.id("briefs")),
+    /**
+     * The open-question annotation this is about — **the v1 subject**.
+     *
+     * The brief is the trigger, and what the brief carries forward is
+     * annotations: `lib/brief/assemble.ts` builds its "still open from earlier
+     * sessions" section from top-level `open-question` notes with no replies,
+     * and a brief item stores `annotationIds`. So this is the id a
+     * brief-triggered run is about, and the subject whose text becomes the
+     * retrieval query.
+     */
+    annotationId: v.optional(v.id("annotations")),
+    /**
+     * The outcomes-panel question this is about — the other subject kind.
+     *
+     * An `actions` row of kind `question` is a different noun: what a meeting
+     * recorded as unresolved, rather than what somebody wrote in a margin. It
+     * gets the same treatment because it asks the same sort of thing, and one
+     * of the two is always set.
+     */
+    actionId: v.optional(v.id("actions")),
+    /** The presenter on a brief run, the requester on a manual one. Never a machine. */
+    requestedBy: v.id("users"),
+    requestedAt: v.number(),
+    status: delegationStatus,
+    startedAt: v.optional(v.number()),
+    /** The claim token. Absent on a queued row, cleared on cancellation. */
+    lease: v.optional(v.string()),
+    leaseAcquiredAt: v.optional(v.number()),
+    /** Terminal-state provenance, for the ledger and for the reader respectively. */
+    failure: v.optional(delegationFailure),
+    failureReason: v.optional(v.string()),
+    cancellation: v.optional(delegationCancellation),
+    settledAt: v.optional(v.number()),
+    findingId: v.optional(v.id("findings")),
+  })
+    /**
+     * The concurrency cap, and the reason the status vocabulary is closed:
+     * "how many runs is this lab holding open right now" has to be one indexed
+     * read, not a scan of every delegation the lab has ever made.
+     */
+    .index("by_lab_and_status", ["labId", "status"])
+    /**
+     * The rolling daily budget, as a range read over time.
+     *
+     * `by_lab_and_status` cannot answer it. Rows here are never deleted, so
+     * "how much has this lab spent today" asked through the status index is a
+     * walk over every run the lab has ever made, and it gets slower every
+     * week. A range on `requestedAt` reads exactly the day in question, and
+     * the cost bound stays a cost bound instead of becoming one.
+     */
+    .index("by_lab_and_time", ["labId", "requestedAt"])
+    /**
+     * One subject's history, and the "is there already a run on this" check.
+     *
+     * Two indexes because there are two kinds of subject. v1's is the
+     * annotation: the brief's carried-forward section is built from
+     * `open-question` annotations with no replies (`lib/brief/assemble.ts`),
+     * and those ids are what a brief item stores. The action subject is for
+     * the outcomes panel's question rows, which are a different noun that
+     * happens to ask a similar thing.
+     */
+    .index("by_annotation", ["annotationId"])
+    .index("by_action", ["actionId"])
+    .index("by_brief", ["briefId"]),
+
+  /**
+   * What a scout found: a cited, revocable, proposed-not-accepted report.
+   *
+   * ## Not an annotation, deliberately
+   *
+   * Annotations are human speech — that is the first constitutional constraint
+   * in the design doc and the reason this is a table of its own rather than a
+   * flag on `annotations`. A machine never writes an annotation, a reply, or
+   * an epistemic status. It writes here, it is rendered agent-styled, and a
+   * member who agrees with it writes their own words. The precedent is
+   * `syntheses` and `briefs`: derived artifacts live beside the margin, never
+   * inside it.
+   *
+   * ## Whole-item redaction, and why it is stricter than the synthesis rule
+   *
+   * `synthesis.applyWithdrawals` keeps an item's text while *any* citation
+   * survives, dropping the attribution instead — it can afford to, because a
+   * synthesis item's attribution is a union of names that cannot be mapped
+   * back to particular ids. A finding is a paraphrase of the specific notes it
+   * cites, so an item resting on A and B whose A has been withdrawn is still
+   * carrying A's substance in its sentence. The rule here is therefore
+   * all-or-nothing: **an item dies when any one of its citations stops being
+   * shared**, checked at gather, again at store, and again on every read. The
+   * ids stay so the reader can run the same test and see the same verdict.
+   *
+   * ## `coverage` is computed, never model prose
+   *
+   * "Searched 41 annotations across 6 papers and found nothing citable" is an
+   * honest null only if the numbers are counted by this codebase. A model
+   * asked to describe its own search will describe one it did not do.
+   */
+  findings: defineTable({
+    labId: v.id("labs"),
+    delegationId: v.id("delegations"),
+    agentKind: delegationAgentKind,
+    /**
+     * The subject, denormalized off the delegation at write.
+     *
+     * Both, and not because the finding needs to know: a Convex index needs a
+     * *stored field* to sort on, and "the newest non-superseded finding for
+     * this question" is the render read for both subject kinds. Reading it
+     * through the delegation would be a hop per finding on the hot path of
+     * drawing a brief.
+     */
+    annotationId: v.optional(v.id("annotations")),
+    actionId: v.optional(v.id("actions")),
+    items: v.array(
+      v.object({
+        /** The model's prose, capped and sanitized. Never reaches the ledger. */
+        text: v.string(),
+        /**
+         * Never empty. An item that cited nothing real died at the gate before
+         * this table saw it — a model that cannot cite is a model that made it
+         * up, which is the rule `syntheses.sections.items.annotationIds`
+         * already states and this one inherits.
+         */
+        citedAnnotationIds: v.array(v.id("annotations")),
+        /** Derived from the citations at store time, never asked of the model. */
+        citedPaperIds: v.array(v.id("papers")),
+      }),
+    ),
+    coverage: v.object({
+      annotationsSearched: v.number(),
+      papersTouched: v.number(),
+      queriesRun: v.number(),
+    }),
+    /** How many items the citation gate killed. The reader is told. */
+    droppedForCitation: v.number(),
+    /** The exact model id that produced this, for provenance. */
+    model: v.string(),
+    generatedAt: v.number(),
+    /**
+     * Set when a newer run for the same subject returns. That is the whole
+     * meaning, and keeping it that narrow is deliberate.
+     *
+     * It does **not** mean "a note behind this has been withdrawn". That is a
+     * different fact with a different remedy: read-time whole-item redaction,
+     * which re-checks every citation on every read and therefore cannot go
+     * stale. Overloading this flag to carry it would put a privacy guarantee
+     * behind a denormalized boolean written by one code path — and a
+     * denormalization that is load-bearing for privacy is one that leaks the
+     * first time somebody forgets to write it.
+     *
+     * A superseded finding is not deleted: the delegation history is what
+     * makes "why did March's brief say this" answerable.
+     */
+    supersededAt: v.optional(v.number()),
+  })
+    .index("by_delegation", ["delegationId"])
+    /** The render read: the newest non-superseded finding for one subject. */
+    .index("by_annotation", ["annotationId"])
+    .index("by_action", ["actionId"])
+    .index("by_lab", ["labId"]),
+
+  /**
+   * One row per (finding, cited annotation) — the reverse lookup a withdrawal
+   * needs.
+   *
+   * A citation's home is `findings.items[].citedAnnotationIds`, nested inside
+   * an array inside an array, and Convex cannot index into either. So "which
+   * findings rest on the note this author just took back" has no indexed
+   * answer on that shape, and the alternative is scanning a lab's findings on
+   * every un-share — an unbounded read on the hot path of the one act the
+   * privacy constitution most needs to be cheap.
+   *
+   * These rows are *lookup structure, not state*. They are written in the same
+   * mutation as the finding they belong to, they are never updated, and
+   * nothing reads them to decide what a member may see. Read-time whole-item
+   * redaction is still the defense of record: if this table were empty, or
+   * stale, or dropped tomorrow, no withdrawn note would become visible — the
+   * cascade would simply have to find the affected findings the slow way. That
+   * separation is deliberate. A denormalization that is load-bearing for
+   * privacy is a denormalization that can leak by going stale.
+   *
+   * `labId` rides along so a lab-scoped sweep never has to hop through the
+   * finding to know whose it is.
+   */
+  findingCitations: defineTable({
+    labId: v.id("labs"),
+    findingId: v.id("findings"),
+    annotationId: v.id("annotations"),
+  })
+    /** The withdrawal path: every finding that cites this note. */
+    .index("by_annotation", ["annotationId"])
+    /** And back the other way, so a finding's rows go when it does. */
+    .index("by_finding", ["findingId"]),
 });
