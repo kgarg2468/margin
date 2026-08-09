@@ -71,7 +71,9 @@ export default function AuthedError({
           "authenticated" against a session the backend had stopped trusting
           and the reader was pushed straight back into the same failure.
           `signOut()` clears those tokens, and `recoverSession` holds the two
-          in order.
+          in order — and sends them to a `/signin` carrying the flag that tells
+          the middleware not to bounce them off an auth cookie a failed
+          sign-out request left behind.
         */}
         <button
           type="button"

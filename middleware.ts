@@ -4,6 +4,7 @@ import {
   nextjsMiddlewareRedirect,
 } from "@convex-dev/auth/nextjs/server";
 import type { NextRequest } from "next/server";
+import { isRecoveryDestination } from "@/lib/auth/session-recovery";
 
 const isSignInPage = createRouteMatcher(["/signin"]);
 const isProtectedRoute = createRouteMatcher(["/app(.*)"]);
@@ -36,7 +37,17 @@ function inviteSuffix(request: NextRequest): string {
  */
 export default convexAuthNextjsMiddleware(
   async (request, { convexAuth }) => {
-    if (isSignInPage(request) && (await convexAuth.isAuthenticated())) {
+    // The one exception, and it is the reason the flag exists: a reader
+    // leaving the error boundary has already awaited `signOut()`, and if that
+    // request never reached `/api/auth` the cookie it would have cleared is
+    // still here. Redirecting them to `/app` on the strength of that cookie is
+    // a loop out of the one page offering a way out, so the recovery
+    // destination is let through — and only that exact destination.
+    if (
+      isSignInPage(request) &&
+      !isRecoveryDestination(request.nextUrl.searchParams) &&
+      (await convexAuth.isAuthenticated())
+    ) {
       return nextjsMiddlewareRedirect(request, `/app${inviteSuffix(request)}`);
     }
     if (isProtectedRoute(request) && !(await convexAuth.isAuthenticated())) {
