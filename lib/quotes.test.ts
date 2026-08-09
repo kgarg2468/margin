@@ -12,6 +12,11 @@ describe("cleanQuote", () => {
       cleanQuote("as shown in prior work [12] the model [3, 14] converges.", 100),
     ).toBe("as shown in prior work the model converges.");
   });
+  it("leaves bracketed notation glued to a word alone", () => {
+    expect(cleanQuote("the entry x[0] and values in y[12] are swapped", 100)).toBe(
+      "the entry x[0] and values in y[12] are swapped",
+    );
+  });
   it("cuts at the last sentence end that fits", () => {
     expect(
       cleanQuote("First point. Second point continues well past the cap.", 20),

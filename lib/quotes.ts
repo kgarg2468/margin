@@ -5,7 +5,10 @@
  * This trims a quote for display as an address — enough to find the
  * passage — preferring to end where a sentence does.
  */
-const DEBRIS = /\s*\[\d+(?:\s*[,–-]\s*\d+)*\]/g;
+// Whitespace before the bracket is part of the pattern: a marker glued to a
+// word, like the subscript in "x[0]", is the author's own notation, not a
+// citation, and stripping it would put words in their mouth.
+const DEBRIS = /\s+\[\d+(?:\s*[,–-]\s*\d+)*\]/g;
 
 export function cleanQuote(raw: string, max: number): string {
   const flat = raw.replace(DEBRIS, "").replace(/\s+/g, " ").trim();
