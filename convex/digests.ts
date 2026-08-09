@@ -9,6 +9,7 @@ import {
   type QueryCtx,
 } from "./_generated/server";
 import { getMembership, requireMembership, requireUserId } from "./lib/authz";
+import { slackIsConfigured } from "./lib/slack";
 import {
   assembleDigest,
   detectCollisions,
@@ -450,6 +451,24 @@ export const buildSessionPrep = internalMutation({
         sessionId: args.sessionId,
         expectedScheduledAt: args.expectedScheduledAt,
       });
+
+      // And the lab's Slack channel, if it has one — the third rider on this
+      // one boundary handle, for the same reason the brief is the second.
+      //
+      // What it posts is *not* one of the digests written below, and must never
+      // become one. A `digests` row is one person's mail: its delta is computed
+      // against that member's own cursor and its lines are phrased with "you",
+      // so a channel post built from one — or from the union of all of them —
+      // would publish exactly the attention data the privacy constitution
+      // refuses to store an aggregate of. `slack.boundaryPayload` re-reads the
+      // paper and posts the part that is a fact about the margin rather than
+      // about anybody: where two people have landed on the same passage.
+      if (slackIsConfigured(await ctx.db.get(session.labId))) {
+        await ctx.scheduler.runAfter(0, internal.slack.deliverBoundary, {
+          sessionId: args.sessionId,
+          expectedScheduledAt: args.expectedScheduledAt,
+        });
+      }
     }
 
     const paper = await ctx.db.get(session.paperId);

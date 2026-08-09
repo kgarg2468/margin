@@ -340,6 +340,25 @@ export const eventDoc = v.union(
     type: v.literal("invite.revoked"),
     inviteId: v.id("invites"),
   }),
+  /**
+   * The lab's margin started, or stopped, leaving the building.
+   *
+   * A PI wiring a Slack channel to the lab decides that briefs, boundary posts
+   * and approved write-ups — all of them built out of what members wrote — are
+   * readable by whoever is in that channel, which may not be only the lab. That
+   * is precisely the kind of collective fact the ledger exists to hold: every
+   * member can see, in the record, when it started and who decided it.
+   *
+   * The URL is not carried, and could not be. It is a credential — anyone
+   * holding it can post as the lab — and `events` rows are never deleted, so a
+   * copy of one here would outlive every disconnection. `connected` says which
+   * way the switch moved, which is the whole fact.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("slack.delivery_changed"),
+    connected: v.boolean(),
+  }),
   v.object({
     ...eventBase,
     type: v.literal("paper.added"),
@@ -880,6 +899,30 @@ export default defineSchema({
      * transaction — Convex mutations are atomic, so it cannot drift.
      */
     memberCount: v.number(),
+    /**
+     * Where this lab's artifacts are posted, if the PI has wired up a channel.
+     *
+     * A Slack incoming-webhook URL and nothing else — no team id, no channel
+     * name, no bot token, no OAuth grant. The URL *is* the credential and it
+     * *is* the destination, which is the whole reason the webhook shape was
+     * chosen over a Slack app: a PI pastes one string and the lab is wired,
+     * with no workspace admin in the loop and nothing for Margin to keep
+     * beyond the one field.
+     *
+     * It never leaves the server. `convex/slack.ts` holds the only reads, and
+     * every one of them is an `internalQuery` or a mutation that writes it —
+     * no public query returns it, not even to the PI who pasted it, because a
+     * webhook URL in a query result is a webhook URL in the browser's cache and
+     * in every dev tools pane it is ever opened in. `convex/slack.guard.test.ts`
+     * asserts that structurally against the schema's own validators.
+     *
+     * Absent means Slack delivery is off, and that is the only representation
+     * of "off" there is: clearing the field is what disconnecting does. A
+     * separate boolean would be a second source of truth for one question, and
+     * the failure mode of the two disagreeing is a lab that believes it has
+     * stopped posting and has not.
+     */
+    slackWebhookUrl: v.optional(v.string()),
   }).index("by_creator", ["createdBy"]),
 
   /** Join table between users and labs; the single source of truth for authorization. */

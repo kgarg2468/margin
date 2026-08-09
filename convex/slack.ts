@@ -1,0 +1,812 @@
+import { ConvexError, v } from "convex/values";
+import { internal } from "./_generated/api";
+import type { Doc, Id } from "./_generated/dataModel";
+import {
+  internalAction,
+  internalQuery,
+  mutation,
+  query,
+  type QueryCtx,
+} from "./_generated/server";
+import { pause, retryAfterMs, siteUrl } from "./auth";
+import { redactWithdrawn } from "./briefs";
+import { getMembership, requirePi, requireUserId } from "./lib/authz";
+import { recordEvent } from "./lib/ledger";
+import { normalizeWebhookUrl, slackIsConfigured } from "./lib/slack";
+import { isStillShared, WITHDRAWN_ITEM_TEXT } from "./synthesis";
+import {
+  collisionLine,
+  detectCollisions,
+  MAX_DIGEST_ITEMS,
+  type DigestAnnotation,
+} from "../lib/digest/engine";
+import {
+  composeBoundaryMessage,
+  composeBriefMessage,
+  composeSynthesisMessage,
+  slackDate,
+  type SlackMessage,
+} from "../lib/slack/compose";
+
+/**
+ * Slack delivery: the lab's artifacts, in the room the lab already lives in.
+ *
+ * Margin's three artifacts — the presenter's brief, the pre-session boundary
+ * post, the approved write-up — are what a journal club produces. In the app
+ * they are the record. In a channel they are the *distribution*: the thing the
+ * postdoc who missed Thursday actually reads, and the thing that makes a lab's
+ * reading visible to a lab rather than to whoever opened the tab.
+ *
+ * ## A webhook, not an app
+ *
+ * There is no OAuth here, no bot user, no slash command and no DM. A PI pastes
+ * one incoming-webhook URL into lab settings and the lab is wired. That is a
+ * deliberate ceiling, not a first version: a Slack *app* needs a workspace
+ * admin's approval, which for a university lab means a ticket to central IT and
+ * a quarter of waiting, and the whole product thesis is that a PI can get their
+ * lab running on a Sunday night. One pasted string clears that.
+ *
+ * It also keeps the blast radius small in both directions. Margin can post into
+ * exactly one channel and can do nothing else in the workspace — it cannot read
+ * a message, list a member, or open a DM, because a webhook grants none of
+ * those. And the only thing Margin stores is the one string.
+ *
+ * ## Three artifacts, and when each one goes
+ *
+ * Two of the three are posted because a *person published them*, and one at a
+ * boundary the whole lab shares:
+ *
+ *   - **The brief**, when the presenter or PI marks it reviewed. Not when it is
+ *     assembled — `briefs.getForSession` deliberately answers `null` to
+ *     everyone but those two people, because a brief is somebody's prep and the
+ *     organiser who booked the room has no business reading it. Posting an
+ *     unapproved assembly into a channel would walk straight through that rule.
+ *     Approval is the presenter saying "this is the meeting's agenda", which is
+ *     exactly the act that makes it the lab's to read.
+ *   - **The boundary post**, two hours before a meeting, off the same job that
+ *     builds the prep digests — and it is emphatically *not* one of those
+ *     digests. See `boundaryPayload`.
+ *   - **The approved write-up**, when somebody approves it, including a
+ *     revision. A revision is news: the lab's record of a meeting changed, and
+ *     the channel that holds the old one should hold the correction.
+ *
+ * Everything else Margin can deliver stays where it is. Mentions and replies
+ * are addressed to one person and go to that person's inbox and their email;
+ * a per-member digest is per-member mail. Neither belongs in a shared channel,
+ * and there is no per-user Slack path here to put them in one.
+ *
+ * ## The constitution still applies
+ *
+ * No tracking, no third-party assets, nothing that sells anything —
+ * `convex/email.guard.test.ts` says why for mail, and a channel post is the
+ * same kind of object: handed to a third party, unrecallable. `siteUrl()` is
+ * the only base for a link, and a deployment that does not know its own origin
+ * posts nothing at all, because a post whose one link goes nowhere is worse
+ * than the in-app artifact that is already sitting there.
+ */
+
+/* -------------------------------------------------------------------------
+ * The transport
+ * ---------------------------------------------------------------------- */
+
+/**
+ * How many times one message will ask Slack again before giving up.
+ *
+ * The same three `sendEmail` uses, for the same reason: it covers a burst that
+ * outran a rate limit without turning a broken destination into an action that
+ * sits there retrying.
+ */
+const POST_ATTEMPTS = 3;
+
+/**
+ * Hand one message to a Slack incoming webhook.
+ *
+ * Shaped after `sendEmail` in `convex/auth.ts` — bounded attempts, `retry-after`
+ * believed rather than guessed at, the response body kept out of anything the
+ * browser can see — and it diverges from it in exactly one place, on purpose.
+ *
+ * ## Why only a 429 is re-asked
+ *
+ * `sendEmail` retries `5xx` and network failures as well, and it is right to:
+ * it sends an `Idempotency-Key`, so Resend replays the first outcome and a
+ * re-ask can only ever *be* a re-ask. An incoming webhook has no such thing.
+ * There is no key to send, no id to reconcile against, and no way to ask Slack
+ * whether the message it never finished answering about was posted. So a re-ask
+ * after an ambiguous answer — a `502` from an edge, a socket that dropped
+ * mid-flight — is a coin flip between recovering a lost post and putting the
+ * lab's write-up into their channel twice.
+ *
+ * Those two outcomes are not equally bad, and that is what decides it. The
+ * in-app artifact is the record and it is already written; a Slack post that
+ * did not arrive costs the lab a notification they can still go and read. A
+ * duplicated write-up in the channel is a thing the lab has to explain to
+ * itself, cannot delete without workspace permissions Margin does not have, and
+ * quietly makes the product look like it does not know what it sent.
+ *
+ * A `429` is the one refusal with no ambiguity in it: Slack is saying it did
+ * not take this message and to come back at a stated time. That gets waited out
+ * and re-asked. Everything else — a `5xx`, a `4xx`, a `fetch` that threw — is
+ * logged once and dropped.
+ *
+ * `retryAfterMs` is imported rather than restated. It already reads both
+ * spellings of the header, already refuses to believe a delay longer than this
+ * action is willing to wait, and already survived being got wrong once; a
+ * second copy of that reasoning is a second copy to get wrong again.
+ */
+export async function postToSlack(
+  webhookUrl: string,
+  message: SlackMessage,
+): Promise<void> {
+  const body = JSON.stringify(message);
+
+  const failed = (why: string) =>
+    new Error(`Slack refused a message: ${why}`);
+
+  for (let attempt = 0; attempt < POST_ATTEMPTS; attempt++) {
+    const lastAttempt = attempt === POST_ATTEMPTS - 1;
+
+    let response: Response;
+    try {
+      response = await fetch(webhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+      });
+    } catch (caught) {
+      // Not retried, unlike the mail path: a `fetch` that threw may have
+      // delivered before the connection went, and there is no idempotency key
+      // to make a second ask safe.
+      throw failed(`unreachable (${String(caught)})`);
+    }
+
+    if (response.ok) {
+      return;
+    }
+
+    if (response.status === 429 && !lastAttempt) {
+      const wait = retryAfterMs(response, attempt);
+      // `null` is Slack asking for longer than this action will wait. Falling
+      // through to the failure below is the point.
+      if (wait !== null) {
+        await pause(wait);
+        continue;
+      }
+    }
+
+    // Slack answers a bad webhook with a short body — `no_service`,
+    // `invalid_payload`, `channel_not_found` — which is genuinely the most
+    // useful thing in the log, and carries no secret. The URL does, so it is
+    // never logged and never put in an error.
+    const detail = await response.text().catch(() => "");
+    throw failed(`${response.status} ${detail}`.trim());
+  }
+}
+
+/* -------------------------------------------------------------------------
+ * Lab settings — the PI's half
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Whether this lab posts to Slack, and whether you are the one who decides.
+ *
+ * **Every member sees `connected`, not only the PI.** That is the whole reason
+ * this query exists in the shape it does: turning it on means the notes a
+ * member writes can be read by everyone in a Slack channel, which may be more
+ * people than the lab. Somebody whose writing leaves the building is owed the
+ * fact that it does, in the product, without having to ask.
+ *
+ * What nobody gets is the URL. It is not in this validator, it is not in any
+ * other public query in the codebase, and `convex/slack.guard.test.ts` asserts
+ * that by walking the schema and every returns validator rather than by
+ * trusting this sentence. A webhook URL handed to the browser is a credential
+ * in a query cache and in every dev tools pane that cache is ever opened in —
+ * and the PI who pasted it has it already, in Slack, where it came from.
+ *
+ * Answers `false`/`false` rather than throwing for a non-member, the same
+ * posture `notifications.outstandingCount` takes: a surface that renders
+ * nothing is the correct reading of "you are not in this lab".
+ */
+export const status = query({
+  args: { labId: v.id("labs") },
+  returns: v.object({
+    connected: v.boolean(),
+    /** Whether the caller is the PI, and so may change it. */
+    canManage: v.boolean(),
+  }),
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    const membership = await getMembership(ctx, args.labId, userId);
+    if (membership === null) {
+      return { connected: false, canManage: false };
+    }
+    const lab = await ctx.db.get(args.labId);
+    return {
+      connected: slackIsConfigured(lab),
+      canManage: membership.role === "pi",
+    };
+  },
+});
+
+/**
+ * Point this lab at a Slack channel. PI only.
+ *
+ * The refusal is written for the person holding a URL they thought was right,
+ * because that is who gets it: a webhook pasted half-selected, or copied from
+ * the wrong page of Slack's own setup flow, looks exactly like one that works.
+ * Saying which part is wrong is the difference between fixing it now and
+ * discovering at the T−2h boundary that nothing was ever going to arrive.
+ *
+ * Replacing an existing webhook is ordinary — a lab that moves channels pastes
+ * the new one — and writes the same ledger fact as connecting for the first
+ * time, because from the lab's side the fact is the same: their margin leaves
+ * the building, by this person's decision, as of now.
+ */
+export const connect = mutation({
+  args: { labId: v.id("labs"), webhookUrl: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const actor = await requirePi(ctx, args.labId);
+
+    const webhookUrl = normalizeWebhookUrl(args.webhookUrl);
+    if (webhookUrl === null) {
+      throw new ConvexError(
+        "That doesn't look like a Slack incoming webhook. It should start with https://hooks.slack.com/ and carry the path Slack gave you — copy the whole URL from the Incoming Webhooks page.",
+      );
+    }
+
+    await ctx.db.patch(args.labId, { slackWebhookUrl: webhookUrl });
+    await recordEvent(ctx, {
+      labId: args.labId,
+      actorId: actor.userId,
+      type: "slack.delivery_changed",
+      connected: true,
+    });
+    return null;
+  },
+});
+
+/**
+ * Stop posting. PI only.
+ *
+ * The field is removed rather than blanked, so "off" has one representation
+ * and `slackIsConfigured` has one question to answer. Idempotent: disconnecting
+ * a lab that was never connected is a no-op and writes no ledger fact, because
+ * nothing about the lab changed.
+ */
+export const disconnect = mutation({
+  args: { labId: v.id("labs") },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const actor = await requirePi(ctx, args.labId);
+    const lab = await ctx.db.get(args.labId);
+    if (!slackIsConfigured(lab)) {
+      return null;
+    }
+    await ctx.db.patch(args.labId, { slackWebhookUrl: undefined });
+    await recordEvent(ctx, {
+      labId: args.labId,
+      actorId: actor.userId,
+      type: "slack.delivery_changed",
+      connected: false,
+    });
+    return null;
+  },
+});
+
+/* -------------------------------------------------------------------------
+ * Shared payload plumbing
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Ceiling on how much of a paper's margin the boundary post looks at.
+ *
+ * The same thousand `convex/digests.ts` and `convex/briefs.ts` each pool, for
+ * the same reason — collision detection is quadratic in it, and reading
+ * newest-first means a runaway paper contributes the live end of its
+ * conversation rather than its opening months.
+ */
+const POOL_LIMIT = 1000;
+
+/** A display name, with the same fallbacks the rest of the product uses. */
+function displayName(user: Doc<"users"> | null): string {
+  return user?.name ?? user?.email ?? "A lab member";
+}
+
+/**
+ * The lab's webhook, if this lab has one and this session belongs to it.
+ *
+ * Every payload query starts here, and it is the only place the URL is read.
+ */
+async function destinationFor(
+  ctx: QueryCtx,
+  labId: Id<"labs">,
+): Promise<string | null> {
+  const lab = await ctx.db.get(labId);
+  if (!slackIsConfigured(lab)) {
+    return null;
+  }
+  return lab?.slackWebhookUrl ?? null;
+}
+
+/** Which of these citations are still shared with the lab, one read each. */
+async function stillSharedAmong(
+  ctx: QueryCtx,
+  labId: Id<"labs">,
+  citations: Iterable<Id<"annotations">>,
+): Promise<Set<Id<"annotations">>> {
+  const stillShared = new Set<Id<"annotations">>();
+  for (const annotationId of citations) {
+    if (isStillShared(await ctx.db.get(annotationId), labId)) {
+      stillShared.add(annotationId);
+    }
+  }
+  return stillShared;
+}
+
+/* -------------------------------------------------------------------------
+ * The brief
+ * ---------------------------------------------------------------------- */
+
+const briefPayloadShape = v.object({
+  webhookUrl: v.string(),
+  sessionId: v.id("sessions"),
+  paperTitle: v.string(),
+  scheduledAt: v.number(),
+  presenterName: v.string(),
+  approvedByName: v.string(),
+  citationCount: v.number(),
+  sections: v.array(
+    v.object({
+      heading: v.string(),
+      items: v.array(v.string()),
+      droppedCount: v.number(),
+    }),
+  ),
+});
+
+/**
+ * Everything the brief post needs, re-read at the moment of sending.
+ *
+ * Re-read rather than carried on the job's arguments, for the reason
+ * `notifications.emailPayload` states: the gap between "mutation committed" and
+ * "action ran" is a real interval and things happen in it. A note withdrawn or
+ * flipped back to private in that window must not be posted, and a channel post
+ * is the one delivery Margin cannot take back — it has no permission to edit or
+ * delete a message it sent through a webhook.
+ *
+ * So the same all-or-nothing redaction `briefs.getForSession` applies on read is
+ * applied here, out of the same `redactWithdrawn` rather than a second copy of
+ * the rule. A redacted line is then **dropped** rather than posted as its
+ * marker, which is the one place this diverges from the in-app surface and it
+ * is a property of the medium: in the app the marker tells the presenter their
+ * agenda has moved under them, and the panel updates when it moves again. A
+ * channel post is frozen at the instant it was made, so a tombstone in one is
+ * permanent furniture saying a line used to be here, on a page nobody can
+ * refresh.
+ *
+ * `approvedAt` is the guard against posting a superseded review. A brief can be
+ * approved, re-assembled and approved again while this job is queued, and each
+ * approval schedules its own post; without the check the older job would post
+ * the newer text under the older claim.
+ */
+export const briefPayload = internalQuery({
+  args: { sessionId: v.id("sessions"), approvedAt: v.number() },
+  returns: v.union(v.null(), briefPayloadShape),
+  handler: async (ctx, args) => {
+    const session = await ctx.db.get(args.sessionId);
+    if (session === null || session.status === "cancelled") {
+      return null;
+    }
+    const webhookUrl = await destinationFor(ctx, session.labId);
+    if (webhookUrl === null) {
+      return null;
+    }
+
+    const brief = await ctx.db
+      .query("briefs")
+      .withIndex("by_session", (q) => q.eq("sessionId", args.sessionId))
+      .unique();
+    if (brief === null || brief.approvedAt !== args.approvedAt) {
+      return null;
+    }
+
+    const paper = await ctx.db.get(session.paperId);
+    if (paper === null) {
+      return null;
+    }
+
+    const cited = new Set<Id<"annotations">>();
+    for (const section of brief.sections) {
+      for (const item of section.items) {
+        for (const annotationId of item.annotationIds) cited.add(annotationId);
+      }
+    }
+    const stillShared = await stillSharedAmong(ctx, session.labId, cited);
+
+    const sections = redactWithdrawn(brief.sections, stillShared)
+      .map((section) => ({
+        heading: section.heading,
+        items: section.items
+          .filter((item) => item.text !== WITHDRAWN_ITEM_TEXT)
+          .map((item) => item.text),
+        droppedCount: section.droppedCount,
+      }))
+      .filter((section) => section.items.length > 0);
+    // A brief whose every line has been withdrawn is not a brief. Nothing is
+    // posted, and the in-app panel already says so to the two people it is for.
+    if (sections.length === 0) {
+      return null;
+    }
+
+    return {
+      webhookUrl,
+      sessionId: session._id,
+      paperTitle: paper.title,
+      scheduledAt: session.scheduledAt,
+      presenterName: displayName(await ctx.db.get(session.presenterId)),
+      approvedByName:
+        brief.approvedBy === undefined
+          ? "the presenter"
+          : displayName(await ctx.db.get(brief.approvedBy)),
+      citationCount: stillShared.size,
+      sections,
+    };
+  },
+});
+
+/**
+ * Post the brief, because its presenter signed it off.
+ *
+ * Failures are logged, never thrown. The brief is already in the app and is the
+ * artifact of record; a channel post is the courtesy copy, and a job that
+ * throws would show up as a failed function every time a lab's webhook is stale
+ * without anything useful happening as a result.
+ */
+export const deliverBrief = internalAction({
+  args: { sessionId: v.id("sessions"), approvedAt: v.number() },
+  returns: v.null(),
+  // Spelled out rather than inferred: this action calls a query declared in its
+  // own module, and an inferred return type makes that a cycle TypeScript
+  // resolves by widening the whole generated `api` to `any` — the same note as
+  // in `convex/notifications.ts`.
+  handler: async (ctx, args): Promise<null> => {
+    const site = siteUrl();
+    if (site === null) {
+      console.error(
+        "SITE_URL is not set on this deployment, so a Slack post would carry a link to nowhere. Nothing was posted; the brief stands in the app.",
+      );
+      return null;
+    }
+
+    const payload = await ctx.runQuery(internal.slack.briefPayload, {
+      sessionId: args.sessionId,
+      approvedAt: args.approvedAt,
+    });
+    if (payload === null) {
+      return null;
+    }
+
+    try {
+      await postToSlack(
+        payload.webhookUrl,
+        composeBriefMessage({
+          paperTitle: payload.paperTitle,
+          when: slackDate(payload.scheduledAt),
+          presenterName: payload.presenterName,
+          approvedByName: payload.approvedByName,
+          sections: payload.sections,
+          citationCount: payload.citationCount,
+          url: `${site}/app/sessions/${payload.sessionId}`,
+        }),
+      );
+    } catch (caught) {
+      console.error(`Could not post a brief to Slack: ${String(caught)}`);
+    }
+    return null;
+  },
+});
+
+/* -------------------------------------------------------------------------
+ * The boundary post
+ * ---------------------------------------------------------------------- */
+
+const boundaryPayloadShape = v.object({
+  webhookUrl: v.string(),
+  paperId: v.id("papers"),
+  paperTitle: v.string(),
+  scheduledAt: v.number(),
+  presenterName: v.string(),
+  lines: v.array(v.string()),
+  annotationCount: v.number(),
+});
+
+/**
+ * The margin as it stands two hours out, addressed to the room.
+ *
+ * ## Why this is not one of the digests the same boundary just wrote
+ *
+ * `digests.buildSessionPrep` writes a row per member, and a `digests` row is
+ * **one person's mail**: its delta is computed against that member's own
+ * cursor, its lines are phrased with "you", and its whole privacy story is that
+ * `listMine` starts from the signed-in user's id. Posting one into a shared
+ * channel would undo all of that at once, and so would posting the union of
+ * them — what a member has and has not caught up on is exactly the attention
+ * data the privacy constitution refuses to store an aggregate of, and a channel
+ * post computed from cursors is that aggregate, published.
+ *
+ * So the boundary post is built from the part of the same computation that is a
+ * fact about the *paper* rather than about anybody: the gold collisions in its
+ * margin. Two people landing on one passage from different directions is true
+ * whether or not either of them has read the other, and it is the single most
+ * useful thing to put in front of a lab two hours before they argue about it.
+ *
+ * `detectCollisions` is re-run here rather than passed down from the boundary
+ * job, which costs one extra quadratic pass over a capped pool twice per
+ * session — and buys the thing that matters more: a note withdrawn between T−2h
+ * and this POST is simply not in the pool, because the pool is read now.
+ *
+ * The recipient handed to `collisionLine` is the empty string, which is not a
+ * user id and so matches nobody. That is what keeps "you" out of a line
+ * addressed to a room: the engine writes a collision from the recipient's side
+ * when they are one of its two authors, and a channel is not one of the
+ * authors. Every line therefore names both members, which is what the room
+ * wants anyway.
+ *
+ * The `scheduled` / `expectedScheduledAt` guard is the same one the boundary
+ * job makes and is re-made here for the same reason `briefs.buildForSession`
+ * re-makes it: this is a separate transaction, later, and the cheapest way for
+ * a check to stay true is for it never to be inherited. A meeting moved or
+ * called off in the interval gets no post.
+ */
+export const boundaryPayload = internalQuery({
+  args: { sessionId: v.id("sessions"), expectedScheduledAt: v.number() },
+  returns: v.union(v.null(), boundaryPayloadShape),
+  handler: async (ctx, args) => {
+    const session = await ctx.db.get(args.sessionId);
+    if (session === null) {
+      return null;
+    }
+    if (
+      session.status !== "scheduled" ||
+      session.scheduledAt !== args.expectedScheduledAt
+    ) {
+      return null;
+    }
+    const webhookUrl = await destinationFor(ctx, session.labId);
+    if (webhookUrl === null) {
+      return null;
+    }
+    const paper = await ctx.db.get(session.paperId);
+    if (paper === null) {
+      return null;
+    }
+
+    // Privacy is the index, not a filter: `by_paper_and_visibility` at "lab"
+    // cannot return a private annotation.
+    const visible = await ctx.db
+      .query("annotations")
+      .withIndex("by_paper_and_visibility", (q) =>
+        q.eq("paperId", session.paperId).eq("visibility", "lab"),
+      )
+      .order("desc")
+      .take(POOL_LIMIT);
+    const live = visible.filter((a) => a.deletedAt === undefined);
+    if (live.length === 0) {
+      // Nothing in the margin at all is not "no collisions" — it is a paper
+      // nobody has opened, and a post saying so two hours out would be the
+      // product nagging a lab about their homework.
+      return null;
+    }
+
+    const names = new Map<Id<"users">, string>();
+    for (const authorId of new Set(live.map((a) => a.memberId))) {
+      names.set(authorId, displayName(await ctx.db.get(authorId)));
+    }
+
+    const pool: DigestAnnotation<
+      Id<"papers">,
+      Id<"annotations">,
+      Id<"users">
+    >[] = live.map((a) => ({
+      id: a._id,
+      paperId: a.paperId,
+      memberId: a.memberId,
+      memberName: names.get(a.memberId) ?? "A lab member",
+      type: a.type,
+      pageIndex: a.anchor.pageIndex,
+      start: a.anchor.start,
+      end: a.anchor.end,
+      quote: a.anchor.quote,
+      createdAt: a._creationTime,
+    }));
+
+    // Already ranked newest-first by the engine, and capped at the same five a
+    // digest is capped at — the number the simulation validated, and the number
+    // past which a channel post stops being read.
+    const lines = detectCollisions(pool)
+      .slice(0, MAX_DIGEST_ITEMS)
+      .map((collision) => collisionLine(collision, "", paper.title));
+
+    return {
+      webhookUrl,
+      paperId: paper._id,
+      paperTitle: paper.title,
+      scheduledAt: session.scheduledAt,
+      presenterName: displayName(await ctx.db.get(session.presenterId)),
+      lines,
+      annotationCount: live.length,
+    };
+  },
+});
+
+/** The T−2h post. Logged rather than thrown, as the brief's is. */
+export const deliverBoundary = internalAction({
+  args: { sessionId: v.id("sessions"), expectedScheduledAt: v.number() },
+  returns: v.null(),
+  handler: async (ctx, args): Promise<null> => {
+    const site = siteUrl();
+    if (site === null) {
+      console.error(
+        "SITE_URL is not set on this deployment, so a Slack post would carry a link to nowhere. Nothing was posted; the digests stand in the app.",
+      );
+      return null;
+    }
+
+    const payload = await ctx.runQuery(internal.slack.boundaryPayload, {
+      sessionId: args.sessionId,
+      expectedScheduledAt: args.expectedScheduledAt,
+    });
+    if (payload === null) {
+      return null;
+    }
+
+    try {
+      await postToSlack(
+        payload.webhookUrl,
+        composeBoundaryMessage({
+          paperTitle: payload.paperTitle,
+          when: slackDate(payload.scheduledAt),
+          presenterName: payload.presenterName,
+          lines: payload.lines,
+          annotationCount: payload.annotationCount,
+          url: `${site}/app/library/${payload.paperId}/read`,
+        }),
+      );
+    } catch (caught) {
+      console.error(
+        `Could not post a session boundary to Slack: ${String(caught)}`,
+      );
+    }
+    return null;
+  },
+});
+
+/* -------------------------------------------------------------------------
+ * The write-up
+ * ---------------------------------------------------------------------- */
+
+const synthesisPayloadShape = v.object({
+  webhookUrl: v.string(),
+  sessionId: v.id("sessions"),
+  paperTitle: v.string(),
+  scheduledAt: v.number(),
+  approvedByName: v.string(),
+  markdown: v.string(),
+  citationCount: v.number(),
+  revised: v.boolean(),
+});
+
+/**
+ * The approved write-up, re-read at the moment of sending.
+ *
+ * The prose is posted exactly as the approver stored it — this is the version
+ * of the meeting the lab keeps, and it is not this module's business to edit
+ * it on the way out any more than it was `synthesis.approve`'s to check it.
+ * What is re-read is everything *around* it: the citation count is recomputed
+ * against what is still shared right now, so the footer's claim is true at the
+ * instant it is made rather than at the instant it was queued.
+ *
+ * `approvedAt` guards against posting a superseded version. Two approvals a
+ * minute apart schedule two jobs; without the check the first job could run
+ * second and post the older prose underneath the newer one.
+ *
+ * `approvedBy` rides on the job's arguments rather than being re-read, because
+ * there is nowhere to re-read it from — `sessions` records *when* a write-up was
+ * approved and not by whom, and the name belongs in the post. It is immutable
+ * history in any case: who approved a given `approvedAt` is a fact that cannot
+ * change, and the `approvedAt` check is what pins the pair together.
+ */
+export const synthesisPayload = internalQuery({
+  args: {
+    sessionId: v.id("sessions"),
+    approvedAt: v.number(),
+    approvedBy: v.id("users"),
+    revised: v.boolean(),
+  },
+  returns: v.union(v.null(), synthesisPayloadShape),
+  handler: async (ctx, args) => {
+    const session = await ctx.db.get(args.sessionId);
+    if (session === null) {
+      return null;
+    }
+    if (
+      session.synthesis === undefined ||
+      session.synthesisApprovedAt !== args.approvedAt
+    ) {
+      return null;
+    }
+    const webhookUrl = await destinationFor(ctx, session.labId);
+    if (webhookUrl === null) {
+      return null;
+    }
+    const paper = await ctx.db.get(session.paperId);
+    if (paper === null) {
+      return null;
+    }
+
+    const stillShared = await stillSharedAmong(
+      ctx,
+      session.labId,
+      session.synthesisCitedAnnotationIds ?? [],
+    );
+
+    return {
+      webhookUrl,
+      sessionId: session._id,
+      paperTitle: paper.title,
+      scheduledAt: session.scheduledAt,
+      approvedByName: displayName(await ctx.db.get(args.approvedBy)),
+      markdown: session.synthesis,
+      citationCount: stillShared.size,
+      revised: args.revised,
+    };
+  },
+});
+
+/** The write-up post. Logged rather than thrown, as the other two are. */
+export const deliverSynthesis = internalAction({
+  args: {
+    sessionId: v.id("sessions"),
+    approvedAt: v.number(),
+    approvedBy: v.id("users"),
+    revised: v.boolean(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args): Promise<null> => {
+    const site = siteUrl();
+    if (site === null) {
+      console.error(
+        "SITE_URL is not set on this deployment, so a Slack post would carry a link to nowhere. Nothing was posted; the write-up stands in the app.",
+      );
+      return null;
+    }
+
+    const payload = await ctx.runQuery(internal.slack.synthesisPayload, {
+      sessionId: args.sessionId,
+      approvedAt: args.approvedAt,
+      approvedBy: args.approvedBy,
+      revised: args.revised,
+    });
+    if (payload === null) {
+      return null;
+    }
+
+    try {
+      await postToSlack(
+        payload.webhookUrl,
+        composeSynthesisMessage({
+          paperTitle: payload.paperTitle,
+          when: slackDate(payload.scheduledAt),
+          approvedByName: payload.approvedByName,
+          markdown: payload.markdown,
+          citationCount: payload.citationCount,
+          revised: payload.revised,
+          url: `${site}/app/sessions/${payload.sessionId}`,
+        }),
+      );
+    } catch (caught) {
+      console.error(`Could not post a write-up to Slack: ${String(caught)}`);
+    }
+    return null;
+  },
+});

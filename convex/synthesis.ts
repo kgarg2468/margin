@@ -13,6 +13,7 @@ import {
 import { annotationType, synthesisSectionKey } from "./schema";
 import { getMembership, requireUserId } from "./lib/authz";
 import { recordEvent } from "./lib/ledger";
+import { slackIsConfigured } from "./lib/slack";
 import { canApprove } from "./sessions";
 
 /**
@@ -1628,9 +1629,10 @@ export const approve = mutation({
     const snapshot = approvalSnapshot(citations, stillShared);
     const reapproved = session.synthesisApprovedAt !== undefined;
 
+    const approvedAt = Date.now();
     await ctx.db.patch(args.sessionId, {
       synthesis: text,
-      synthesisApprovedAt: Date.now(),
+      synthesisApprovedAt: approvedAt,
       synthesisCitedAnnotationIds: snapshot,
     });
 
@@ -1643,6 +1645,25 @@ export const approve = mutation({
       citationCount: snapshot.length,
       reapproved,
     });
+
+    // The write-up is the lab's distribution artifact — the thing that outlives
+    // the hour and the thing the person who missed Thursday actually reads — so
+    // a lab with a Slack channel gets it there, at the moment a person put
+    // their name on it. A revision goes too: the channel holding last week's
+    // version of the record should hold the correction to it.
+    //
+    // `approvedBy` travels on the job because `sessions` records when a
+    // write-up was approved and not by whom, and the post names the person.
+    // `approvedAt` travels with it so the send can refuse to post underneath a
+    // newer approval that has landed in the meantime.
+    if (slackIsConfigured(await ctx.db.get(session.labId))) {
+      await ctx.scheduler.runAfter(0, internal.slack.deliverSynthesis, {
+        sessionId: args.sessionId,
+        approvedAt,
+        approvedBy: userId,
+        revised: reapproved,
+      });
+    }
     return null;
   },
 });

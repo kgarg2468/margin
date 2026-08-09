@@ -1,4 +1,5 @@
 import { ConvexError, v } from "convex/values";
+import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import {
   internalMutation,
@@ -9,6 +10,7 @@ import {
 } from "./_generated/server";
 import { getMembership, requireUserId } from "./lib/authz";
 import { recordEvent } from "./lib/ledger";
+import { slackIsConfigured } from "./lib/slack";
 import { briefSectionKey } from "./schema";
 import { canApprove } from "./sessions";
 import { isStillShared, WITHDRAWN_ITEM_TEXT } from "./synthesis";
@@ -623,10 +625,8 @@ export const approve = mutation({
       collectCitations(brief.sections),
     );
 
-    await ctx.db.patch(brief._id, {
-      approvedAt: Date.now(),
-      approvedBy: userId,
-    });
+    const approvedAt = Date.now();
+    await ctx.db.patch(brief._id, { approvedAt, approvedBy: userId });
 
     await recordEvent(ctx, {
       labId: session.labId,
@@ -638,6 +638,25 @@ export const approve = mutation({
       generation: brief.generation,
       citationCount: stillShared.size,
     });
+
+    // Slack delivery hangs off *approval* rather than off assembly, and that is
+    // a privacy decision rather than a scheduling one. `getForSession` above
+    // answers `null` to everyone but the presenter and the PI, because a brief
+    // is somebody's prep; posting an assembly nobody had signed off into the
+    // lab's channel would step straight around that. Approving it is the
+    // presenter saying "this is the meeting's agenda", which is the act that
+    // makes it the lab's to read.
+    //
+    // Scheduled rather than posted inline: a mutation cannot fetch, and a lab
+    // whose webhook has gone stale must not be the reason a presenter cannot
+    // mark their own brief reviewed. `runAfter` also means nothing is posted
+    // for an approval that then failed to commit.
+    if (slackIsConfigured(await ctx.db.get(session.labId))) {
+      await ctx.scheduler.runAfter(0, internal.slack.deliverBrief, {
+        sessionId: args.sessionId,
+        approvedAt,
+      });
+    }
     return null;
   },
 });
