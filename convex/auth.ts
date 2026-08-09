@@ -26,6 +26,28 @@ import type { DataModel, Doc } from "./_generated/dataModel";
  * The link matters more than it looks. A postdoc handed a Margin invitation
  * should go click link → reading the paper, with no password ceremony in
  * between; that is the whole reason this file grew past `Password`.
+ *
+ * ## What a deployment that sends mail has to have set
+ *
+ * `RESEND_API_KEY` switches sending on. Two more are not optional in practice
+ * and neither of them announces itself when it is wrong:
+ *
+ *   AUTH_EMAIL_FROM   an address on a domain verified in Resend. Left unset,
+ *                     mail comes from the sandbox sender, which delivers only
+ *                     to the Resend account owner and refuses everyone else.
+ *   SITE_URL          the app's real public origin. Every message Margin sends
+ *                     is an envelope around one link, and `siteUrl()` below
+ *                     refuses to build that link out of nothing.
+ *
+ * And one thing that lives in Resend rather than here: open tracking and click
+ * tracking are per-domain switches in their dashboard, and they must both be
+ * off. Open tracking inserts a pixel into the HTML on the way out; click
+ * tracking rewrites every `href` to a redirector that records the press. Both
+ * would be added *after* this code has finished writing the message, and both
+ * are exactly the thing `renderEmail` refuses to do. A product that promises
+ * never to track what you read cannot ship either one, and no assertion in
+ * this repository can see them — only an operator looking at the domain's
+ * settings can.
  */
 
 /** An hour is long enough to walk to a laptop, short enough that a forwarded mail is stale. */
@@ -51,6 +73,34 @@ export function emailIsConfigured(): boolean {
   return typeof key === "string" && key.length > 0;
 }
 
+/**
+ * Where the one link in every message points, or `null` if nowhere.
+ *
+ * Every email Margin sends is an envelope around a single link — sign in here,
+ * join this lab, open this margin — so an email with a dead link is not a
+ * degraded email, it is a wasted one. `SITE_URL` is set by
+ * `npx @convex-dev/auth` on a development deployment and by hand on a
+ * production one, which means it is exactly the sort of variable a new
+ * deployment has never heard of.
+ *
+ * The old spelling was `(process.env.SITE_URL ?? "")`, which turns a missing
+ * origin into `href="/app/library/…"` — a relative URL, which is a real path
+ * inside a mail client and a real 404 for the reader. Answering `null` instead
+ * makes each caller decide out loud: the invitation refuses to be sent, and the
+ * notification quietly stays in the app where it already is.
+ *
+ * A value that is not an absolute http(s) origin is treated as absent for the
+ * same reason — `margin.example.edu` with no scheme is a relative path too.
+ */
+export function siteUrl(): string | null {
+  const configured = process.env.SITE_URL;
+  if (typeof configured !== "string") {
+    return null;
+  }
+  const trimmed = configured.trim().replace(/\/+$/, "");
+  return /^https?:\/\/[^/]/.test(trimmed) ? trimmed : null;
+}
+
 /** Text is escaped into HTML in three places; one function so it cannot be forgotten in the fourth. */
 function escapeHtml(value: string): string {
   return value
@@ -61,13 +111,43 @@ function escapeHtml(value: string): string {
 }
 
 /**
+ * The invisible tail on the preview line.
+ *
+ * A mail client builds the grey line next to the subject by walking the
+ * document for readable text and stopping when it has about a hundred
+ * characters. Without this, it walks straight past the hidden preheader into
+ * the wordmark and shows "Ana mentioned you on Attention Is All You Need
+ * margin Ana mentioned you…" — the sentence, then the letterhead, then the
+ * sentence again.
+ *
+ * So the preheader is followed by a run of characters that are text to the
+ * scanner and nothing to the eye: a combining grapheme joiner, a zero-width
+ * non-joiner, and a non-breaking space, repeated until the preview is full.
+ * It is a silly trick, it is the only one that works in Gmail and Outlook
+ * both, and it is the reason this constant exists.
+ */
+const PREVIEW_FILLER = "&#847;&zwnj;&nbsp;".repeat(50);
+
+/**
  * Margin's mail, in the same voice as Margin's pages: a sheet of paper with a
  * rule down the left, serif for what you read, and one thing to click.
  *
  * Deliberately hand-written inline CSS with no images, no tracking pixel, and
- * no remote assets. Partly because mail clients strip everything else, and
- * partly because a product that promises never to track what you read has no
- * business knowing whether you opened the envelope.
+ * no remote assets — not a webfont, not a logo, not a one-pixel GIF. Partly
+ * because mail clients strip everything else, and partly because a product
+ * that promises never to track what you read has no business knowing whether
+ * you opened the envelope. `convex/email.guard.test.ts` asserts that
+ * mechanically, the way `convex/privacy.guard.test.ts` asserts the schema's
+ * half of the same promise.
+ *
+ * A whole document rather than a fragment, and that is not pedantry. Every
+ * subject and every snippet Margin sends carries typographic quotes and an
+ * ellipsis — “…” — and a fragment with no `<meta charset>` is decoded by
+ * whatever the client guesses, which for Outlook is often Windows-1252 and
+ * renders a lab's paper title as `â€œAttentionâ€`. `color-scheme: light only`
+ * is here for the neighbouring reason: left to itself a dark-mode client
+ * re-computes the palette, and the paper-and-ink page comes out as grey text
+ * on a muddy brown card.
  */
 export function renderEmail(options: {
   heading: string;
@@ -89,6 +169,17 @@ export function renderEmail(options: {
     .join("");
 
   return [
+    `<!doctype html>`,
+    `<html lang="en">`,
+    `<head>`,
+    `<meta charset="utf-8">`,
+    `<meta name="viewport" content="width=device-width,initial-scale=1">`,
+    `<meta name="color-scheme" content="light only">`,
+    `<meta name="supported-color-schemes" content="light only">`,
+    `<title>${escapeHtml(options.heading)}</title>`,
+    `</head>`,
+    `<body style="margin:0;padding:0;background:#f7f2e9;color-scheme:light only">`,
+    `<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;height:0;width:0">${escapeHtml(options.heading)}${PREVIEW_FILLER}</div>`,
     `<div style="background:#f7f2e9;padding:32px 16px">`,
     `<div style="max-width:512px;margin:0 auto;background:#fdfaf4;border:1px solid #e2d5c1;border-radius:6px;padding:32px;font-family:Georgia,'Times New Roman',serif">`,
     `<p style="margin:0 0 24px;font-family:Georgia,serif;font-size:28px;line-height:1;color:#2a211d">margin</p>`,
@@ -100,7 +191,44 @@ export function renderEmail(options: {
     `</div>`,
     `</div>`,
     `</div>`,
+    `</body>`,
+    `</html>`,
   ].join("");
+}
+
+/**
+ * How many times one message will ask Resend again before giving up.
+ *
+ * Three attempts covers the case this exists for — a burst that momentarily
+ * outruns the account's requests-per-second — without turning a genuinely
+ * broken deployment into a function that sits there retrying for a minute.
+ */
+const SEND_ATTEMPTS = 3;
+
+/** The longest one attempt will wait before the next. */
+const MAX_BACKOFF_MS = 8_000;
+
+/** Sleeping in an action is legal and, for a rate limit, is the entire remedy. */
+function pause(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * How long to wait after a refusal that is worth asking again about.
+ *
+ * Resend answers a rate limit with the headers that say when the window
+ * reopens, so the first choice is simply to believe it. `retry-after` is in
+ * seconds; `ratelimit-reset` is Resend's own spelling of the same idea. Only
+ * when neither is present or parseable does this fall back to doubling.
+ */
+function retryAfterMs(response: Response, attempt: number): number {
+  for (const header of ["retry-after", "ratelimit-reset"]) {
+    const seconds = Number(response.headers.get(header));
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.min(seconds * 1000 + 250, MAX_BACKOFF_MS);
+    }
+  }
+  return Math.min(500 * 2 ** attempt, MAX_BACKOFF_MS);
 }
 
 /**
@@ -110,6 +238,21 @@ export function renderEmail(options: {
  * Convex runtime is not somewhere to be dragging a Node client into. Resend's
  * own error body can quote the API key back, so it goes to the deployment log
  * and never into the ConvexError the browser sees.
+ *
+ * ## Why this retries
+ *
+ * Resend rate-limits per team — ten requests a second by default — and both of
+ * Margin's fan-outs arrive as a burst. A note that names ten people schedules
+ * ten actions at once, and each one is a POST. Without a retry the eleventh
+ * request in a second comes back `429`, `deliverEmail` logs it and returns, and
+ * a mention silently never arrives: the recipient sees it in the app and never
+ * learns that the mail existed. That is the worst failure mode available here,
+ * because nothing anywhere says it happened.
+ *
+ * So a `429`, and a `5xx` — Resend having a bad minute is the same shape of
+ * problem — are waited out and asked again, up to `SEND_ATTEMPTS`. A `4xx` that
+ * is not a rate limit is a bad address or a bad key, and asking twice is just
+ * being told twice.
  *
  * Lives in `auth.ts` because this is where the Resend key is configured and
  * where the sign-in link is composed; `invites.ts` imports it rather than
@@ -128,22 +271,34 @@ export async function sendEmail(message: {
     );
   }
 
-  const response = await fetch(RESEND_ENDPOINT, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      from: emailFrom(),
-      to: [message.to],
-      subject: message.subject,
-      text: message.text,
-      html: message.html,
-    }),
+  const body = JSON.stringify({
+    from: emailFrom(),
+    to: [message.to],
+    subject: message.subject,
+    text: message.text,
+    html: message.html,
   });
 
-  if (!response.ok) {
+  for (let attempt = 0; attempt < SEND_ATTEMPTS; attempt++) {
+    const response = await fetch(RESEND_ENDPOINT, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body,
+    });
+
+    if (response.ok) {
+      return;
+    }
+
+    const worthRetrying = response.status === 429 || response.status >= 500;
+    if (worthRetrying && attempt < SEND_ATTEMPTS - 1) {
+      await pause(retryAfterMs(response, attempt));
+      continue;
+    }
+
     const detail = await response.text().catch(() => "");
     console.error(`Resend refused a message (${response.status}): ${detail}`);
     throw new ConvexError(
@@ -166,6 +321,44 @@ export async function sendEmail(message: {
  * characters over a 62-symbol alphabet — around 190 bits, well past the 24
  * characters the library asks for before a token may travel unaccompanied.
  */
+/**
+ * The sign-in link, as text and as HTML.
+ *
+ * Pure and exported so the shortest message Margin sends is also readable in a
+ * test. It is the one that has to be plainest: somebody who asked for it three
+ * seconds ago is looking for a link and nothing else, and somebody who did not
+ * ask for it needs the second footnote to be the whole story.
+ */
+export function composeSignInEmail(url: string): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  return {
+    subject: "Your sign-in link for Margin",
+    text: [
+      "Open Margin",
+      "",
+      url,
+      "",
+      "The link signs you in and works for an hour. If you didn't ask for it, nothing has happened and you can ignore this.",
+      "",
+      "Margin",
+    ].join("\n"),
+    html: renderEmail({
+      heading: "Open Margin",
+      paragraphs: [
+        "This link signs you in — no password to remember, nothing to type.",
+      ],
+      action: { label: "Sign in to Margin", url },
+      footnotes: [
+        "The link works for an hour, and only once.",
+        "If you didn't ask for it, nothing has happened. You can ignore this.",
+      ],
+    }),
+  };
+}
+
 const SignInLink: EmailConfig<DataModel> = {
   id: "sign-in-link",
   type: "email",
@@ -173,30 +366,7 @@ const SignInLink: EmailConfig<DataModel> = {
   from: emailFrom(),
   maxAge: SIGN_IN_LINK_TTL_S,
   async sendVerificationRequest({ identifier: email, url }) {
-    await sendEmail({
-      to: email,
-      subject: "Your sign-in link for Margin",
-      text: [
-        "Open Margin",
-        "",
-        url,
-        "",
-        "The link signs you in and works for an hour. If you didn't ask for it, nothing has happened and you can ignore this.",
-        "",
-        "Margin",
-      ].join("\n"),
-      html: renderEmail({
-        heading: "Open Margin",
-        paragraphs: [
-          "This link signs you in — no password to remember, nothing to type.",
-        ],
-        action: { label: "Sign in to Margin", url },
-        footnotes: [
-          "The link works for an hour, and only once.",
-          "If you didn't ask for it, nothing has happened. You can ignore this.",
-        ],
-      }),
-    });
+    await sendEmail({ to: email, ...composeSignInEmail(url) });
   },
 };
 
