@@ -8,7 +8,14 @@ import {
   seedLab,
 } from "./delegations.fixtures";
 import type { ScoutEvalReport } from "../lib/eval/scout-eval";
-import { baselineTopSix, questions, retrieve, run } from "./scoutEval";
+import { MAX_SEARCH_LENGTH } from "./search";
+import {
+  MAX_LABS_SCANNED,
+  baselineTopSix,
+  questions,
+  retrieve,
+  run,
+} from "./scoutEval";
 import * as search from "./search";
 
 vi.mock("@convex-dev/auth/server", async (importOriginal) => ({
@@ -147,6 +154,30 @@ describe("ground truth", () => {
     expect(ids).not.toContain(seed.questionId);
   });
 
+  it("does not label a note that another open question cited", async () => {
+    const ctx = new FakeCtx();
+    const seed = await seedSettledQuestion(ctx);
+    const askedAbout = await seedAnnotation(ctx, { ...seed, memberId: seed.pi }, {
+      body: "Cohort B's incubation log is missing a timestamp.",
+    });
+    // A second question citing a note is the room asking something, not the
+    // room answering this question.
+    await ctx.db.insert("actions", {
+      labId: seed.labId,
+      sessionId: seed.sessionId,
+      paperId: seed.paperId,
+      kind: "question",
+      body: "Where did the cohort B timestamps go?",
+      recordedBy: seed.member,
+      citedAnnotationId: askedAbout,
+    });
+    const answered = await seedReply(ctx, seed);
+
+    const found = await askQuestions(ctx);
+    const ids = found.questions[0]!.labels.map((label) => label.annotationId);
+    expect(ids).toEqual([answered]);
+  });
+
   it("drops a label whose note stopped being lab-visible, and counts it", async () => {
     const ctx = new FakeCtx();
     const seed = await seedSettledQuestion(ctx);
@@ -232,6 +263,83 @@ describe("the baseline", () => {
     expect(mine.ranked).toHaveLength(6);
   });
 
+  it("agrees with the drawer when withdrawn notes push the overfetch to work", async () => {
+    const ctx = new FakeCtx();
+    const seed = await seedSettledQuestion(ctx);
+    // More than the drawer's overfetch (6 x 4), with withdrawn rows salted
+    // through the first twenty-four so the six survivors are not the first
+    // six rows the index returned.
+    for (let i = 0; i < 30; i++) {
+      await seedAnnotation(ctx, { ...seed, memberId: seed.member }, {
+        body: i % 3 === 0 ? "" : `Note ${i} about the 4°C incubation step.`,
+        ...(i % 3 === 0 ? { deletedAt: 99 } : {}),
+      });
+    }
+    ctx.auth = { userId: seed.member };
+    const text = "Does the 4°C incubation step explain the gap?";
+
+    const drawer = (await handlerOf(search.everything)(ctx, {
+      labId: seed.labId,
+      text,
+    } as never)) as { annotations: { _id: Id<"annotations"> }[] };
+    const mine = await baselineTopSix(ctx as never, seed.labId, text);
+
+    expect(mine.ranked).toEqual(drawer.annotations.map((row) => row._id));
+    expect(mine.ranked).toHaveLength(6);
+    expect(mine.candidatesConsidered).toBeGreaterThan(6);
+  });
+
+  it("is the drawer's upper bound: a member's own private notes evict lab rows", async () => {
+    const ctx = new FakeCtx();
+    const seed = await seedSettledQuestion(ctx);
+    for (let i = 0; i < 10; i++) {
+      await seedAnnotation(ctx, { ...seed, memberId: seed.pi }, {
+        body: `Shared note ${i} about the incubation step.`,
+      });
+    }
+    const ownPrivate = await seedAnnotation(
+      ctx,
+      { ...seed, memberId: seed.member },
+      { visibility: "private", body: "Privately: I think it is the 4°C step." },
+    );
+    ctx.auth = { userId: seed.member };
+    const text = "Does the 4°C incubation step explain the gap?";
+
+    const drawer = (await handlerOf(search.everything)(ctx, {
+      labId: seed.labId,
+      text,
+    } as never)) as { annotations: { _id: Id<"annotations"> }[] };
+    const mine = await baselineTopSix(ctx as never, seed.labId, text);
+    const shown = drawer.annotations.map((row) => row._id);
+
+    // The interleave branch, exercised: the member's own note takes one of
+    // the six rather than making it seven. Every label in this harness is
+    // lab-visible, so the real drawer shows *fewer* labelled notes than this
+    // baseline — which is why the report calls the baseline an upper bound.
+    expect(shown).toContain(ownPrivate);
+    expect(shown).toHaveLength(6);
+    expect(mine.ranked).not.toContain(ownPrivate);
+    expect(mine.ranked.filter((id) => shown.includes(id)).length).toBeLessThan(
+      mine.ranked.length,
+    );
+  });
+
+  it("truncates a long question exactly where the drawer truncates it", async () => {
+    const ctx = new FakeCtx();
+    const seed = await seedSettledQuestion(ctx);
+    await seedAnnotation(ctx, { ...seed, memberId: seed.member });
+    ctx.auth = { userId: seed.member };
+    const long = `${"incubation temperature reproducibility ".repeat(20)}?`;
+    expect(long.length).toBeGreaterThan(MAX_SEARCH_LENGTH);
+
+    const drawer = (await handlerOf(search.everything)(ctx, {
+      labId: seed.labId,
+      text: long,
+    } as never)) as { annotations: { _id: Id<"annotations"> }[] };
+    const mine = await baselineTopSix(ctx as never, seed.labId, long);
+    expect(mine.ranked).toEqual(drawer.annotations.map((row) => row._id));
+  });
+
   it("returns nothing for a question that reduces to nothing", async () => {
     const ctx = new FakeCtx();
     const seed = await seedLab(ctx);
@@ -298,6 +406,46 @@ describe("the report", () => {
     expect(report.verdict).toMatch(/statement about the data/);
   });
 
+  it("abstains when a bounded read came back full, and names the cap", async () => {
+    const ctx = registered();
+    const seed = await seedSettledQuestion(ctx);
+    await seedReply(ctx, seed);
+    // One more lab than the scan will open. The harness has not seen the
+    // deployment, and a gate cannot be read off the part of it that fit.
+    for (let i = 0; i < MAX_LABS_SCANNED; i++) {
+      await ctx.db.insert("labs", {
+        name: `Lab ${i}`,
+        createdBy: seed.pi,
+        memberCount: 1,
+      });
+    }
+
+    const report = await runReport(ctx);
+    expect(report.population.truncated.length).toBeGreaterThan(0);
+    expect(report.population.truncated.join(" ")).toContain("lab scan");
+    expect(report.verdict).toMatch(/did not see the whole corpus/);
+  });
+
+  it("counts a question that lost its labels mid-run as moved, not as unlabelled", async () => {
+    const ctx = registered();
+    const seed = await seedSettledQuestion(ctx);
+    const reply = await seedReply(ctx, seed);
+    // Take the label private *between* the selection read and the retrieval
+    // read — the window the re-derivation inside `retrieve` exists to close.
+    ctx.register(internal.scoutEval.retrieve, {
+      _handler: async (inner: unknown, args: unknown) => {
+        await ctx.db.patch(reply, { visibility: "private" });
+        return await handlerOf(retrieve)(inner, args as never);
+      },
+    });
+
+    const report = await runReport(ctx);
+    expect(report.population.questionsScored).toBe(0);
+    expect(report.population.questionsUnreadable).toBe(1);
+    expect(report.population.questionsWithoutLabels).toBe(0);
+    expect(JSON.stringify(report)).not.toContain(reply);
+  });
+
   it("keeps a private note out of the report even when the index leaks it", async () => {
     const ctx = registered();
     const seed = await seedSettledQuestion(ctx);
@@ -321,15 +469,55 @@ describe("retrieve", () => {
   it("refuses a question that has been reopened under it", async () => {
     const ctx = new FakeCtx();
     const seed = await seedSettledQuestion(ctx);
+    await seedReply(ctx, seed);
     await ctx.db.patch(seed.actionId, { settledAt: undefined });
     expect(
       await handlerOf(retrieve)(ctx, { actionId: seed.actionId } as never),
     ).toBeNull();
   });
 
+  it("refuses a question whose last surviving label has just gone", async () => {
+    const ctx = new FakeCtx();
+    const seed = await seedSettledQuestion(ctx);
+    const reply = await seedReply(ctx, seed);
+    expect(
+      await handlerOf(retrieve)(ctx, { actionId: seed.actionId } as never),
+    ).not.toBeNull();
+
+    await ctx.db.patch(reply, { visibility: "private" });
+    expect(
+      await handlerOf(retrieve)(ctx, { actionId: seed.actionId } as never),
+    ).toBeNull();
+  });
+
+  it("drops the note the question came out of from both sides", async () => {
+    const ctx = new FakeCtx();
+    const seed = await seedSettledQuestion(ctx);
+    await seedReply(ctx, seed);
+    for (let i = 0; i < 8; i++) {
+      await seedAnnotation(ctx, { ...seed, memberId: seed.member }, {
+        body: `Note ${i} on the incubation step.`,
+      });
+    }
+
+    const got = (await handlerOf(retrieve)(ctx, {
+      actionId: seed.actionId,
+    } as never)) as {
+      candidates: { _id: Id<"annotations"> }[];
+      baselineRanked: Id<"annotations">[];
+    };
+
+    // The seed is `questionId`, and the report claims neither side is
+    // penalised for it. That is only true if neither side spends a slot on it.
+    expect(got.candidates.map((row) => row._id)).not.toContain(seed.questionId);
+    expect(got.baselineRanked).not.toContain(seed.questionId);
+    expect(got.baselineRanked).toHaveLength(6);
+  });
+
   it("takes the lab and the question off the row, not off an argument", async () => {
     const ctx = new FakeCtx();
     const seed = await seedSettledQuestion(ctx);
+    await seedReply(ctx, seed);
     const got = (await handlerOf(retrieve)(ctx, {
       actionId: seed.actionId,
     } as never)) as { labId: Id<"labs">; question: string };

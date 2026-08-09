@@ -56,7 +56,7 @@ const OVERFETCH = 4;
  * Long enough for a title typed out in full, short enough that nobody is
  * pasting a paragraph into the index.
  */
-const MAX_SEARCH_LENGTH = 200;
+export const MAX_SEARCH_LENGTH = 200;
 
 /** Around the matched word, in the preview. */
 const PREVIEW_LENGTH = 180;

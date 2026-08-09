@@ -13,6 +13,7 @@ import {
   sanitizeFindingItems,
   STUB_MODEL,
 } from "./delegations";
+import { MAX_SEARCH_LENGTH } from "./search";
 import { isStillShared } from "./synthesis";
 import {
   EVAL_TOP_N,
@@ -141,8 +142,17 @@ export async function baselineTopSix(
   ctx: QueryCtx,
   labId: Id<"labs">,
   text: string,
+  /**
+   * The note the question came out of, dropped exactly as the scout's own
+   * gather drops its subject. Without this the seed eats a slot on one side
+   * and not the other, and the report's "neither side is penalised for
+   * returning it" would be a sentence about a thing that was not happening.
+   */
+  exclude?: Id<"annotations">,
 ): Promise<{ ranked: Id<"annotations">[]; candidatesConsidered: number }> {
-  const query = text.trim().slice(0, 200);
+  // The drawer's own cap, imported rather than restated: a question longer
+  // than this is truncated for both sides by the same number.
+  const query = text.trim().slice(0, MAX_SEARCH_LENGTH);
   if (query.length === 0) {
     return { ranked: [], candidatesConsidered: 0 };
   }
@@ -162,6 +172,7 @@ export async function baselineTopSix(
     (row) =>
       row.deletedAt === undefined &&
       row.body.length > 0 &&
+      row._id !== exclude &&
       isStillShared(row, labId),
   );
   return {
@@ -198,12 +209,17 @@ function isSettledQuestion(row: Doc<"actions">): boolean {
 async function labelsFor(
   ctx: QueryCtx,
   question: Doc<"actions">,
-): Promise<{ labels: Label<Id<"annotations">>[]; dropped: number }> {
+): Promise<{
+  labels: Label<Id<"annotations">>[];
+  dropped: number;
+  truncated: string[];
+}> {
   const settledAt = question.settledAt ?? 0;
   const askedAt = question._creationTime;
   const seed = question.citedAnnotationId;
 
   const claimed: { id: Id<"annotations">; source: LabelSource }[] = [];
+  const truncated: string[] = [];
 
   // Rule 1. Outcomes on this paper, recorded while the question stood, that
   // point at a note. `by_paper` is the carry-forward index and is already the
@@ -212,8 +228,19 @@ async function labelsFor(
     .query("actions")
     .withIndex("by_paper", (q) => q.eq("paperId", question.paperId))
     .take(MAX_ROWS_SCANNED);
+  if (onPaper.length === MAX_ROWS_SCANNED) {
+    truncated.push(
+      `outcomes on paper ${question.paperId} hit the ${MAX_ROWS_SCANNED}-row read cap, so a citation made while question ${question._id} was open may be missing`,
+    );
+  }
   for (const row of onPaper) {
     if (row._id === question._id) continue;
+    // Another *question* citing a note is the room asking something, not the
+    // room answering anything. The rule is about outcomes that closed
+    // something — a decision, or a task somebody took on — and a question row
+    // is neither. Counting them would label the corpus with what the lab was
+    // still confused about.
+    if (row.kind === "question") continue;
     if (row.citedAnnotationId === undefined) continue;
     if (row._creationTime < askedAt || row._creationTime > settledAt) continue;
     claimed.push({ id: row.citedAnnotationId, source: "co-recorded-citation" });
@@ -225,6 +252,11 @@ async function labelsFor(
       .query("annotations")
       .withIndex("by_parent", (q) => q.eq("parentId", seed))
       .take(MAX_ROWS_SCANNED);
+    if (replies.length === MAX_ROWS_SCANNED) {
+      truncated.push(
+        `replies under note ${seed} hit the ${MAX_ROWS_SCANNED}-row read cap, so an answer to question ${question._id} may be missing`,
+      );
+    }
     for (const reply of replies) {
       if (reply._creationTime > settledAt) continue;
       claimed.push({ id: reply._id, source: "answer-in-thread" });
@@ -247,7 +279,7 @@ async function labelsFor(
     }
     labels.push({ annotationId: one.id, source: one.source });
   }
-  return { labels, dropped };
+  return { labels, dropped, truncated };
 }
 
 /* -------------------------------------------------------------------------
@@ -273,7 +305,10 @@ export const questions = internalQuery({
       questionsSettled: v.number(),
       questionsScored: v.number(),
       questionsWithoutLabels: v.number(),
+      questionsUnreadable: v.number(),
+      questionsBeyondLimit: v.number(),
       labelsDroppedNotLabVisible: v.number(),
+      truncated: v.array(v.string()),
     }),
     questions: v.array(
       v.object({
@@ -282,6 +317,8 @@ export const questions = internalQuery({
         question: v.string(),
         settledAt: v.number(),
         labels: v.array(labelShape),
+        /** Drops already counted in `population`, so `run` adds only what retrieval finds new. */
+        labelsDropped: v.number(),
       }),
     ),
   }),
@@ -296,6 +333,13 @@ export const questions = internalQuery({
         ? await ctx.db.query("labs").take(MAX_LABS_SCANNED)
         : ((row) => (row === null ? [] : [row]))(await ctx.db.get(args.labId));
 
+    const truncated: string[] = [];
+    if (args.labId === undefined && labs.length === MAX_LABS_SCANNED) {
+      truncated.push(
+        `the lab scan hit its ${MAX_LABS_SCANNED}-row cap, so this deployment may hold labs this run never opened`,
+      );
+    }
+
     let questionsSettled = 0;
     let questionsWithoutLabels = 0;
     let labelsDroppedNotLabVisible = 0;
@@ -305,18 +349,32 @@ export const questions = internalQuery({
       question: string;
       settledAt: number;
       labels: Label<Id<"annotations">>[];
+      labelsDropped: number;
     }[] = [];
 
     for (const lab of labs) {
+      // Newest first, so a lab whose outcomes overflow the cap loses its
+      // oldest rows rather than its most recent — and says so either way.
       const rows = await ctx.db
         .query("actions")
         .withIndex("by_lab", (q) => q.eq("labId", lab._id))
+        .order("desc")
         .take(MAX_ROWS_SCANNED);
+      if (rows.length === MAX_ROWS_SCANNED) {
+        truncated.push(
+          `outcomes in lab ${lab._id} hit the ${MAX_ROWS_SCANNED}-row read cap, so older settled questions were never seen`,
+        );
+      }
       for (const row of rows) {
         if (!isSettledQuestion(row)) continue;
         questionsSettled += 1;
-        const { labels, dropped } = await labelsFor(ctx, row);
+        const {
+          labels,
+          dropped,
+          truncated: capped,
+        } = await labelsFor(ctx, row);
         labelsDroppedNotLabVisible += dropped;
+        truncated.push(...capped);
         if (labels.length === 0) {
           questionsWithoutLabels += 1;
           continue;
@@ -327,6 +385,7 @@ export const questions = internalQuery({
           question: row.body,
           settledAt: row.settledAt ?? 0,
           labels,
+          labelsDropped: dropped,
         });
       }
     }
@@ -340,7 +399,10 @@ export const questions = internalQuery({
         questionsSettled,
         questionsScored: kept.length,
         questionsWithoutLabels,
+        questionsUnreadable: 0,
+        questionsBeyondLimit: scoreable.length - kept.length,
         labelsDroppedNotLabVisible,
+        truncated,
       },
       questions: kept,
     };
@@ -355,7 +417,11 @@ export const questions = internalQuery({
  * full, applied here for the same reason: a lab id in a payload is a claim.
  * The subject is re-read rather than trusted, so a question reopened between
  * the two queries drops out instead of being scored against a settlement that
- * no longer exists.
+ * no longer exists. The **labels are re-derived here too**, in the same
+ * transaction as the retrieval they will be scored against: a note withdrawn
+ * between the two queries would otherwise stay in the label set as a miss
+ * neither side could have avoided, which is a wrong number rather than a
+ * harsh one.
  */
 export const retrieve = internalQuery({
   args: { actionId: v.id("actions") },
@@ -366,6 +432,9 @@ export const retrieve = internalQuery({
       candidates: v.array(candidateShape),
       baselineRanked: v.array(v.id("annotations")),
       baselineCandidatesConsidered: v.number(),
+      labels: v.array(labelShape),
+      labelsDropped: v.number(),
+      truncated: v.array(v.string()),
     }),
     v.null(),
   ),
@@ -375,12 +444,29 @@ export const retrieve = internalQuery({
       return null;
     }
 
-    // The scout's own retrieval, called as the run path calls it. An action
-    // subject has no `annotationId`, so nothing is excluded — exactly what
-    // `delegations.gather` passes for this subject kind, and the eval must not
-    // be kinder to the scout than the product is.
-    const gathered = await gatherLabVisible(ctx, action.labId, action.body);
-    const baseline = await baselineTopSix(ctx, action.labId, action.body);
+    const fresh = await labelsFor(ctx, action);
+    if (fresh.labels.length === 0) {
+      return null;
+    }
+
+    // Both sides drop the note the question came out of, and drop it the same
+    // way. `gatherLabVisible`'s fourth argument is what `delegations.gather`
+    // passes for an annotation subject — "a note never cites itself" — and the
+    // baseline gets the same exclusion so that the seed cannot occupy a
+    // scored slot on one side while the report claims neither is penalised.
+    const seed = action.citedAnnotationId;
+    const gathered = await gatherLabVisible(
+      ctx,
+      action.labId,
+      action.body,
+      seed,
+    );
+    const baseline = await baselineTopSix(
+      ctx,
+      action.labId,
+      action.body,
+      seed,
+    );
 
     return {
       question: action.body,
@@ -388,6 +474,9 @@ export const retrieve = internalQuery({
       candidates: gathered.candidates,
       baselineRanked: baseline.ranked,
       baselineCandidatesConsidered: baseline.candidatesConsidered,
+      labels: fresh.labels,
+      labelsDropped: fresh.dropped,
+      truncated: fresh.truncated,
     };
   },
 });
@@ -464,7 +553,10 @@ const reportShape = v.object({
     questionsSettled: v.number(),
     questionsScored: v.number(),
     questionsWithoutLabels: v.number(),
+    questionsUnreadable: v.number(),
+    questionsBeyondLimit: v.number(),
     labelsDroppedNotLabVisible: v.number(),
+    truncated: v.array(v.string()),
   }),
   questions: v.array(
     v.object({
@@ -512,7 +604,7 @@ const reportShape = v.object({
 const GROUND_TRUTH_RULES = [
   "co-recorded-citation: an outcome recorded on the same paper, between this question being asked and being settled, cites this note.",
   "answer-in-thread: this note is a reply, written before settlement, to the note the question came out of.",
-  "Excluded from the labels: the note the question itself cites. It is the question's source, not evidence about it. Neither side is penalised for returning it.",
+  "Excluded everywhere: the note the question itself came out of. It is not a label, and it is dropped from both sides' results before either is scored — the same exclusion the scout's own gather applies to its subject. It is the question's source, not evidence about it, so neither side spends a slot on it.",
 ];
 
 const GROUND_TRUTH_CAVEATS = [
@@ -523,9 +615,10 @@ const GROUND_TRUTH_CAVEATS = [
 
 function asymmetryNotes(ranker: string): string[] {
   return [
-    `Candidate counts are not equal, by construction. The scout ranks the notes its gather returned (up to ${MAX_CANDIDATES}); the search drawer returns the index's own top ${BASELINE_RESULTS} and ranks nothing. Both sides are scored on ${EVAL_TOP_N} results, and the per-question rows print each side's candidate pool.`,
-    "The two sides also send different queries: the scout reduces the question to keywords (stopwords and repeats removed) to fit the 200-character search cap, while the drawer sends the question as a member typed it, truncated. That difference is part of what is being measured, not a defect in the comparison.",
-    "The baseline is the drawer's shared half only. `search.everything` also interleaves the caller's own private notes; an eval has no caller whose private notebook it could legitimately read, and the scout has no private half either. The real drawer is therefore very slightly stronger than the baseline scored here for a member whose own notes match.",
+    `Candidate counts are not equal, by construction. The scout ranks the notes its gather returned (up to ${MAX_CANDIDATES}); the search drawer reads the index's top ${BASELINE_RESULTS * BASELINE_OVERFETCH} and returns the first ${BASELINE_RESULTS} that survive its live filter, ranking nothing further. Both sides are scored on ${EVAL_TOP_N} results, and each per-question row prints the pool its side actually chose from.`,
+    `The two sides also send different queries: the scout reduces the question to keywords (stopwords and repeats removed) to fit the ${MAX_SEARCH_LENGTH}-character search cap, while the drawer sends the question as a member typed it, truncated at the same cap. That difference is part of what is being measured, not a defect in the comparison.`,
+    "The baseline is the drawer's shared half, and that makes it the drawer's *upper* bound rather than a handicap. `search.everything` interleaves the caller's own private notes into the same six slots — a member's private notes evict lab-visible rows rather than extending the list — and every label here is lab-visible by construction. So a real member, sitting in front of the real drawer with private notes of their own that match, would see at most as many labelled notes as this baseline reports and usually fewer. An eval has no caller whose notebook it could legitimately read, and the scout has no private half either.",
+    "Retrieval runs against the corpus as it stands today, not as it stood on the day each question was settled: notes written since are candidates now and were not then. Both sides read the same corpus, so the comparison holds — but absolute recall drifts downward as a lab keeps writing, and two runs made on different dates are not comparable to each other.",
     ranker === STUB_MODEL
       ? `The scout side is the stub ranker (${STUB_MODEL}), which cites its candidates in gather order. Until C3 replaces the model seam, this report measures retrieval and query reduction, not a model's judgement, and it is not the gate the design's §10.2 is asking for.`
       : `The scout side was ranked by ${ranker}.`,
@@ -557,18 +650,30 @@ export const run = internalAction({
     });
 
     const scored: QuestionScore[] = [];
+    const truncated = [...found.population.truncated];
     let unreadable = 0;
+    let droppedAtRetrieval = 0;
 
     for (const one of found.questions) {
       const retrieved = await ctx.runQuery(internal.scoutEval.retrieve, {
         actionId: one.actionId,
       });
       if (retrieved === null) {
-        // The question moved between the two reads. Not scoreable, and not
-        // silently counted as a miss for either side.
+        // The question moved between the two reads — reopened, withdrawn, or
+        // left with no surviving label. Not scoreable, and counted as its own
+        // fact rather than folded in with "nobody cited anything".
         unreadable += 1;
         continue;
       }
+
+      // Labels re-derived inside the retrieval transaction win. Only the
+      // *additional* drops are added, since the selection pass already
+      // reported its own.
+      droppedAtRetrieval += Math.max(
+        0,
+        retrieved.labelsDropped - one.labelsDropped,
+      );
+      truncated.push(...retrieved.truncated);
 
       const ranked = await scoutRanking(
         retrieved.labId,
@@ -582,7 +687,7 @@ export const run = internalAction({
           labId: one.labId,
           question: one.question,
           settledAt: one.settledAt,
-          labels: one.labels,
+          labels: retrieved.labels,
           scout: {
             system: `scout (${STUB_MODEL})`,
             ranked,
@@ -610,12 +715,14 @@ export const run = internalAction({
       population: {
         ...found.population,
         questionsScored: scored.length,
-        questionsWithoutLabels:
-          found.population.questionsWithoutLabels + unreadable,
+        questionsUnreadable: unreadable,
+        labelsDroppedNotLabVisible:
+          found.population.labelsDroppedNotLabVisible + droppedAtRetrieval,
+        truncated: [...new Set(truncated)],
       },
       questions: scored,
       aggregate: totals,
-      verdict: verdictOf(totals),
+      verdict: verdictOf(totals, { truncated: [...new Set(truncated)] }),
     };
 
     console.log(formatScoutEvalReport(report));
