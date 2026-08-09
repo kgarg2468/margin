@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { composerEscape, composerHandlesEscape } from "./composer-escape";
+import {
+  composerEscape,
+  composerHandlesEscape,
+  dismissalAsksFirst,
+} from "./composer-escape";
 
 /**
  * One key, several things it could plausibly mean, and exactly one answer per
@@ -51,6 +55,40 @@ describe("Escape with the mention menu open", () => {
     expect(
       composerEscape({ menuOpen: true, confirming: true, body: "a note" }),
     ).toBe("close-menu");
+  });
+});
+
+/**
+ * The other way a sheet closes: Base UI decided to dismiss it. Escape arrives
+ * here too and is sent on to the ordering above; every other reason is a
+ * dismissal nobody asked for, and the note in the box has to survive it.
+ */
+describe("a dismissal that would take the note with it", () => {
+  it("asks before an outside press throws a written note away", () => {
+    expect(dismissalAsksFirst("outside-press", "the effect size is")).toBe(true);
+  });
+
+  it("asks when focus leaves the sheet, which is the same loss by another name", () => {
+    // The row that shipped without a guard: `focus-out` fell past the two
+    // named reasons and closed the composer, and the note went with it.
+    expect(dismissalAsksFirst("focus-out", "the effect size is")).toBe(true);
+  });
+
+  it("asks for a reason nobody here has heard of", () => {
+    // `reason` is a string as far as this file is concerned, and the cost of
+    // being wrong is somebody's writing. So the rule is stated the safe way
+    // round: everything asks, and Escape is the one exception because it is
+    // already answered above.
+    expect(dismissalAsksFirst("close-press", "a note")).toBe(true);
+  });
+
+  it("leaves Escape to the ordering that already owns it", () => {
+    expect(dismissalAsksFirst("escape-key", "a note")).toBe(false);
+  });
+
+  it("closes without a question when there is nothing to lose", () => {
+    expect(dismissalAsksFirst("outside-press", "")).toBe(false);
+    expect(dismissalAsksFirst("focus-out", "   \n ")).toBe(false);
   });
 });
 

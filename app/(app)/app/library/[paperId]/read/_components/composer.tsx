@@ -11,7 +11,11 @@ import { useMutation } from "convex/react";
 import type { ComponentProps } from "react";
 import { useCallback, useRef, useState } from "react";
 import type { EscapePressedIn } from "./composer-escape";
-import { composerEscape, composerHandlesEscape } from "./composer-escape";
+import {
+  composerEscape,
+  composerHandlesEscape,
+  dismissalAsksFirst,
+} from "./composer-escape";
 import type { PickedMention } from "./mention-field";
 import { MentionField } from "./mention-field";
 import type { AnnotationType } from "./ontology";
@@ -194,7 +198,7 @@ export function Composer({
       escape();
       return;
     }
-    if (details.reason === "outside-press" && body.trim().length > 0) {
+    if (dismissalAsksFirst(details.reason, body)) {
       details.cancel();
       setConfirming(true);
       return;

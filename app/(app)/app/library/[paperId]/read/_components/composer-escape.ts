@@ -57,6 +57,29 @@ export function composerHandlesEscape(pressedIn: EscapePressedIn): boolean {
   return pressedIn !== "surface-above";
 }
 
+/**
+ * Whether a dismissal has to ask before it takes the note with it.
+ *
+ * Base UI dismisses a popover for several reasons and names each one. Escape
+ * is the one this file already has an ordering for; the composer answers it
+ * above and this is never asked about it. Everything else — an outside press,
+ * focus leaving the sheet, a reason shipped in some later version — is a
+ * dismissal the person writing did not ask for, and a half-written note must
+ * not go quietly with it.
+ *
+ * Stated as "everything asks, except the one that is answered elsewhere"
+ * rather than as a list of the reasons that ask, because the reason is a
+ * string: a list would have to be right about names this file does not own,
+ * and being wrong about one of them costs somebody their writing. `focus-out`
+ * is exactly that mistake, already made once.
+ */
+export function dismissalAsksFirst(reason: string, body: string): boolean {
+  if (reason === "escape-key") {
+    return false;
+  }
+  return body.trim().length > 0;
+}
+
 export function composerEscape(state: ComposerEscapeState): ComposerEscapeAction {
   if (state.menuOpen) {
     return "close-menu";
