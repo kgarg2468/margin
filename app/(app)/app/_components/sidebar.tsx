@@ -109,6 +109,8 @@ export function Sidebar() {
         </ul>
       </nav>
 
+      {currentLab !== null && <Collections labId={currentLab._id} />}
+
       <div className="mt-auto flex flex-col gap-2 border-t border-rule pt-5">
         {viewer !== undefined && viewer !== null && (
           <span className="truncate font-sans text-sm text-ink-muted">
@@ -127,5 +129,51 @@ export function Sidebar() {
         </button>
       </div>
     </aside>
+  );
+}
+
+/**
+ * The lab's shelves, under the rooms they are shelves in.
+ *
+ * A collection is not a room of its own — it is the library with a filter on,
+ * so each of these is a link into `/app/library?collection=…` rather than a
+ * route. They are set a size down from the sections and carry no note: a
+ * section needs explaining once, a shelf explains itself by its name.
+ *
+ * No active mark, deliberately. Which collection is showing is a question about
+ * the query string, and the shell reads the URL only on mount (see
+ * `lab-provider.tsx` on why `useSearchParams` is not used here) — a mark that
+ * went stale the moment you picked a second shelf would be worse than none.
+ * The library's own heading takes the collection's name, which is where the
+ * answer belongs.
+ */
+function Collections({ labId }: { labId: LabSummary["_id"] }) {
+  const collections = useQuery(api.collections.listCollections, { labId });
+
+  if (collections === undefined || collections.length === 0) {
+    return null;
+  }
+
+  return (
+    <nav className="flex flex-col gap-3">
+      <span className={eyebrowClass}>Collections</span>
+      <ul className="flex flex-col gap-0.5">
+        {collections.map((collection) => (
+          <li key={collection._id}>
+            <Link
+              href={`/app/library?collection=${collection._id}`}
+              className="-mx-3 flex items-baseline justify-between gap-2 rounded-r-sm border-l-2 border-transparent px-3 py-1 transition-colors hover:border-accent hover:bg-surface/70"
+            >
+              <span className="truncate font-sans text-sm text-ink-muted">
+                {collection.name}
+              </span>
+              <span className="shrink-0 font-sans text-xs tabular-nums text-ink-faint">
+                {collection.paperCount}
+              </span>
+            </Link>
+          </li>
+        ))}
+      </ul>
+    </nav>
   );
 }

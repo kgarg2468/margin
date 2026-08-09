@@ -9,6 +9,7 @@ import Link from "next/link";
 import { use } from "react";
 import { PageSkeleton } from "../../_components/skeletons";
 import { SessionStatusChip } from "../../sessions/_components/session-row";
+import { FiledAs } from "../_components/marks";
 import { StatusChip, byline } from "../_components/paper-meta";
 import { PdfPanel } from "../_components/pdf-panel";
 
@@ -105,6 +106,18 @@ export default function PaperPage({
           </p>
         </section>
       )}
+
+      {/* Where this paper sits in the lab's own filing, on the page that is
+          the paper's record. Above the PDF panel because it is about the
+          paper rather than about the file. */}
+      <section className="flex flex-col gap-4">
+        <h2 className={eyebrowClass}>Filed as</h2>
+        <FiledAs
+          paperId={paper._id}
+          labId={paper.labId}
+          tags={paper.tags}
+        />
+      </section>
 
       <PdfPanel
         paperId={paper._id}
