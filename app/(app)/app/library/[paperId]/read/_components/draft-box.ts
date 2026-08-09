@@ -45,6 +45,31 @@ export function unionOfRects(rects: readonly BoxRect[]): BoxRect | null {
 }
 
 /**
+ * The draft's rectangle in the page's own coordinates, at the size the page is
+ * now rather than the size it was measured at.
+ *
+ * A zoom throws the text layer away and builds a new one asynchronously; a page
+ * that has left the render window does not build one at all. The box is held
+ * through both, because retracting it would strand the composer — and held, it
+ * is a rectangle off a page that has since changed size. A passage twice as far
+ * down a page twice as tall is the same sentence, so the ratio is the whole
+ * correction, and the composer stays on its passage instead of floating over
+ * whatever the new size put where the old one had it.
+ *
+ * The page's own border is the one part of the box that does not scale with
+ * the page, which is worth a pixel at the extremes and nothing anywhere else.
+ */
+export function draftAnchorBox(box: DraftBox, scale: number): BoxRect {
+  const ratio = box.scale > 0 ? scale / box.scale : 1;
+  return {
+    left: box.left * ratio,
+    top: box.top * ratio,
+    width: box.width * ratio,
+    height: box.height * ratio,
+  };
+}
+
+/**
  * The reader's answer to one page reporting where the draft's passage sits.
  *
  * Every page runs the reporting effect, and a page with no draft on it reports
@@ -56,7 +81,7 @@ export function unionOfRects(rects: readonly BoxRect[]): BoxRect | null {
 export function nextDraftBox(
   previous: DraftBox | null,
   pageIndex: number,
-  box: BoxRect | null,
+  box: Omit<DraftBox, "pageIndex"> | null,
 ): DraftBox | null {
   if (box === null) {
     return previous?.pageIndex === pageIndex ? null : previous;

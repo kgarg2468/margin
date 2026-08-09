@@ -35,13 +35,20 @@ export type Draft = {
 };
 
 /**
- * Where the passage a composer is anchored to actually sits, in the reader's
- * content coordinates.
+ * Where the passage a composer is anchored to actually sits, in its own page's
+ * coordinates.
  *
  * Reported by the page rather than remembered from the selection, and
  * re-reported whenever the page re-lays its text — which is what lets the
  * composer stay beside its passage across a zoom, where the coordinates frozen
  * at selection time would have stranded it.
+ *
+ * The page's, not the reader's, and stamped with the size it was measured at.
+ * Between a zoom and the new text layer landing — or forever, for a page that
+ * left the render window on the way — this is the only rectangle the composer
+ * has, and a rectangle in the reader's coordinates would by then be pointing at
+ * a place the page has moved away from. Against the page, the correction is
+ * arithmetic: see `draftAnchorBox`.
  */
 export type DraftBox = {
   pageIndex: number;
@@ -49,6 +56,8 @@ export type DraftBox = {
   left: number;
   width: number;
   height: number;
+  /** The scale the page was drawn at when this was measured. */
+  scale: number;
 };
 
 /**

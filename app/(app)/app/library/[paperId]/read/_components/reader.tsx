@@ -25,7 +25,7 @@ import {
   useState,
 } from "react";
 import { Composer } from "./composer";
-import { nextDraftBox } from "./draft-box";
+import { draftAnchorBox, nextDraftBox } from "./draft-box";
 import type { RailCard } from "./margin-rail";
 import { MarginRail } from "./margin-rail";
 import type { AnnotationType } from "./ontology";
@@ -153,10 +153,7 @@ export function Reader({
   }, []);
 
   const handleDraftBox = useCallback(
-    (
-      pageIndex: number,
-      box: { top: number; left: number; width: number; height: number } | null,
-    ) => {
+    (pageIndex: number, box: Omit<DraftBox, "pageIndex"> | null) => {
       // Only the page the composer is anchored to may retract the box; the
       // other thirty-six report null on every mount and would otherwise
       // clobber it. See `draft-box.ts`.
@@ -171,41 +168,6 @@ export function Reader({
     }
   }, [draft]);
 
-  /**
-   * The passage the composer points at.
-   *
-   * The page reports where it drew the draft mark (see `DraftBox`), which is
-   * re-measured whenever the page re-lays its text — so this survives a zoom,
-   * where the coordinates frozen at selection time did not. Before the first
-   * report lands, the selection's own y/x stand in as a zero-width point.
-   *
-   * The scroll container goes along as the anchor's context element: without it
-   * the positioner tracks the window and not the box the reader is scrolling,
-   * and the sheet drifts off its passage on the first flick of the wheel.
-   */
-  const composerAnchor = useMemo(() => {
-    if (draft === null) {
-      return undefined;
-    }
-    const box = draftBox ?? {
-      top: draft.top,
-      left: draft.left,
-      width: 0,
-      height: 0,
-    };
-    return boxAnchor(
-      box,
-      () => {
-        const content = contentRef.current;
-        if (content === null) {
-          return null;
-        }
-        const at = content.getBoundingClientRect();
-        return { left: at.left, top: at.top };
-      },
-      scrollRef.current,
-    );
-  }, [draft, draftBox]);
 
   // Every activation in the reader goes through this rather than through
   // `setActiveId`, so that the gutter — which fires nobody's `mouseenter` —
@@ -360,6 +322,62 @@ export function Reader({
   const pageCount = doc?.numPages ?? 0;
   const pageWidth = baseSize === null ? 0 : Math.floor(baseSize.width * scale);
   const pageHeight = baseSize === null ? 0 : Math.floor(baseSize.height * scale);
+
+  /**
+   * The passage the composer points at.
+   *
+   * The page reports where it drew the draft mark (see `DraftBox`), which is
+   * re-measured whenever the page re-lays its text — so this survives a zoom,
+   * where the coordinates frozen at selection time did not.
+   *
+   * Measured against the page itself, and corrected for any size change since
+   * the measurement was taken. A zoom rebuilds the text layer asynchronously
+   * and a page that has scrolled out of the window never rebuilds it at all, so
+   * between the two there is nothing to re-measure with — and a rectangle in
+   * the reader's own coordinates would by then be pointing at a place the page
+   * has moved off. Against the page, where it moved to does not matter and
+   * what size it is now is arithmetic.
+   *
+   * Before the first report lands there is no page rectangle at all, only the
+   * selection's own y/x in the reader's coordinates, which stand in as a
+   * zero-width point for the frame or two until one arrives.
+   *
+   * The scroll container goes along as the anchor's context element: without it
+   * the positioner tracks the window and not the box the reader is scrolling,
+   * and the sheet drifts off its passage on the first flick of the wheel.
+   */
+  const composerAnchor = useMemo(() => {
+    if (draft === null) {
+      return undefined;
+    }
+    if (draftBox === null) {
+      return boxAnchor(
+        { top: draft.top, left: draft.left, width: 0, height: 0 },
+        () => {
+          const content = contentRef.current;
+          if (content === null) {
+            return null;
+          }
+          const at = content.getBoundingClientRect();
+          return { left: at.left, top: at.top };
+        },
+        scrollRef.current,
+      );
+    }
+    const page = draftBox.pageIndex;
+    return boxAnchor(
+      draftAnchorBox(draftBox, scale),
+      () => {
+        const element = pageElements.current.get(page);
+        if (element === undefined) {
+          return null;
+        }
+        const at = element.getBoundingClientRect();
+        return { left: at.left, top: at.top };
+      },
+      scrollRef.current,
+    );
+  }, [draft, draftBox, scale]);
 
   /**
    * Where the reader was when the scale changed.

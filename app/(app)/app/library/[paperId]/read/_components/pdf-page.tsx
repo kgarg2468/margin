@@ -28,6 +28,7 @@ import type {
   AnnotationId,
   AnnotationView,
   Draft,
+  DraftBox,
   PageResolution,
   PassagePoint,
 } from "./types";
@@ -163,7 +164,7 @@ export type PdfPageProps = {
   draft: Draft | null;
   onDraftBox: (
     pageIndex: number,
-    box: { top: number; left: number; width: number; height: number } | null,
+    box: Omit<DraftBox, "pageIndex"> | null,
   ) => void;
   onActivate: (id: AnnotationId | null) => void;
   onResolved: (pageIndex: number, resolution: PageResolution) => void;
@@ -470,8 +471,9 @@ export function PdfPage({
       // either this page scrolled out of the render window, or a zoom is
       // rebuilding the layer at a new scale. Drop the rectangles — they are
       // stale pixels and would be drawn over a page that has moved — but do
-      // *not* retract the box. Held, it is exactly right through an unload and
-      // one frame stale through a zoom; retracted, it is null, and the
+      // *not* retract the box. Held, it is the page's own rectangle stamped
+      // with the size it was taken at, which the reader can put back where the
+      // page is now for as long as this takes; retracted, it is null, and the
       // composer anchored to it would jump on every zoom step.
       setDraftRects((previous) => (previous.length === 0 ? previous : []));
       return;
@@ -512,12 +514,10 @@ export function PdfPage({
       return;
     }
     reported.current = true;
-    onDraftBox(pageIndex, {
-      left: wrapper.offsetLeft + union.left,
-      top: wrapper.offsetTop + union.top,
-      width: union.width,
-      height: union.height,
-    });
+    // In the page's own coordinates. The reader puts it back where the page
+    // currently is, which is the only version of that sum that survives a zoom
+    // — see `draftAnchorBox`.
+    onDraftBox(pageIndex, { ...union, scale: layerScale.current });
   }, [draft, layer, pageIndex, onDraftBox]);
 
   // --- selection ---------------------------------------------------------

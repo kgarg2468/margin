@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { nextDraftBox, unionOfRects } from "./draft-box";
+import { draftAnchorBox, nextDraftBox, unionOfRects } from "./draft-box";
 import type { DraftBox } from "./types";
 
 /**
@@ -47,7 +47,7 @@ describe("the rectangle a wrapped passage occupies", () => {
 });
 
 describe("which page may retract the composer's box", () => {
-  const box = { left: 40, top: 100, width: 320, height: 44 };
+  const box = { left: 40, top: 100, width: 320, height: 44, scale: 1 };
   const held: DraftBox = { pageIndex: 4, ...box };
 
   it("takes a box from the page that measured one", () => {
@@ -69,5 +69,75 @@ describe("which page may retract the composer's box", () => {
 
   it("lets a new page take the box over from the old one", () => {
     expect(nextDraftBox(held, 7, box)).toEqual({ pageIndex: 7, ...box });
+  });
+});
+
+/**
+ * The third silent one, and the reason the box carries the size it was
+ * measured at. A zoom throws the text layer away and rebuilds it
+ * asynchronously; a page that has left the render window never rebuilds it at
+ * all. In between, the last rectangle the page reported is the only thing the
+ * composer has to sit beside, and it is a rectangle from a page that is no
+ * longer that size.
+ */
+describe("a rectangle measured at one size, read at another", () => {
+  const box: DraftBox = {
+    pageIndex: 4,
+    left: 40,
+    top: 100,
+    width: 320,
+    height: 44,
+    scale: 1,
+  };
+
+  it("hands back exactly what was measured while the size is unchanged", () => {
+    expect(draftAnchorBox(box, 1)).toEqual({
+      left: 40,
+      top: 100,
+      width: 320,
+      height: 44,
+    });
+  });
+
+  it("carries the passage along when the page doubles", () => {
+    // Twice as far down a page that is twice as tall is the same sentence.
+    expect(draftAnchorBox(box, 2)).toEqual({
+      left: 80,
+      top: 200,
+      width: 640,
+      height: 88,
+    });
+  });
+
+  it("carries it back the other way", () => {
+    expect(draftAnchorBox({ ...box, scale: 2 }, 1)).toEqual({
+      left: 20,
+      top: 50,
+      width: 160,
+      height: 22,
+    });
+  });
+
+  it("round-trips through a zoom and back", () => {
+    for (const from of [0.4, 1, 1.47, 2]) {
+      for (const to of [0.5, 1.25, 1.9]) {
+        const zoomed = draftAnchorBox({ ...box, scale: from }, to);
+        const back = draftAnchorBox(
+          { ...box, ...zoomed, scale: to },
+          from,
+        );
+        expect(back.top).toBeCloseTo(box.top, 10);
+        expect(back.left).toBeCloseTo(box.left, 10);
+      }
+    }
+  });
+
+  it("does not divide by a size that was never measured", () => {
+    expect(draftAnchorBox({ ...box, scale: 0 }, 1.5)).toEqual({
+      left: 40,
+      top: 100,
+      width: 320,
+      height: 44,
+    });
   });
 });
