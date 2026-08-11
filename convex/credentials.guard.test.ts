@@ -244,7 +244,7 @@ function eventVariant(typeName: string): Record<string, Json> {
  * the same non-reason. `apikey` matches `apiKey` and matches neither.
  */
 const CREDENTIAL_ISH =
-  /webhook|hook|slack|deliver|destination|endpoint|channel|post|apikey|token|secret|credential/i;
+  /webhook|hook|slack|deliver|destination|endpoint|channel|post|apikey|zoterokey|token|secret|credential/i;
 
 /**
  * The pattern, held to the names it claims to cover.
@@ -253,8 +253,10 @@ const CREDENTIAL_ISH =
  * says it matches — which is precisely how the first version of it shipped.
  * This list is the review's own; `channel`/`post` are here because two of the
  * names on it still walked past the widened pattern until they were added,
- * and the last four are here because a Zotero key is a credential this file
- * did not cover at all until it was told to.
+ * and the key-and-token spellings are here because a Zotero key is a
+ * credential this file did not cover at all until it was told to —
+ * `zoteroKey` among them, the audit's third spelling, which walked past
+ * the first widening too.
  */
 const PLAUSIBLE_NAMES = [
   "webhookUrl",
@@ -268,6 +270,7 @@ const PLAUSIBLE_NAMES = [
   "incomingWebhook",
   "apiKey",
   "zoteroApiKey",
+  "zoteroKey",
   "accessToken",
   "clientSecret",
 ] as const;
@@ -354,7 +357,7 @@ const registered: Registered[] = loaded.flatMap(({ name, exports }) =>
 
 const publicFunctions = registered.filter((fn) => fn.isPublic);
 
-describe("the webhook URL never reaches a client", () => {
+describe("no credential ever reaches a client", () => {
   it("found the functions it means to be checking", () => {
     // A walk that matched nothing would make every assertion below vacuous.
     expect(loaded.length).toBeGreaterThan(15);
@@ -424,23 +427,36 @@ describe("the webhook URL never reaches a client", () => {
     ).toEqual([]);
   });
 
-  it("declares no webhook-shaped field in any public returns validator", () => {
+  it("declares no credential-shaped field in any public returns validator", () => {
     const offenders = publicFunctions.flatMap((fn) =>
       credentialShaped(fn.returns).map((path) => `${fn.name} → ${path}`),
     );
 
     expect(
       offenders,
-      "A Slack webhook URL is a credential. It has no business in a query result, a browser cache, or a devtools pane — not even the PI's, who already has it in Slack.",
+      "A Slack webhook URL and a Zotero API key are credentials. Neither has any business in a query result, a browser cache, or a devtools pane — not even the PI's.",
     ).toEqual([]);
   });
 
-  // Un-skipped by B5 Task 3, which creates `zotero.syncPayload`. Skipped and
-  // not deleted so that the inverse check — the one that proves this whole
-  // walk is not blind — cannot be forgotten on the way.
-  it.skip("does put them in the internal queries that need them, so the check is real", () => {
+  it("does put them in the internal queries that need them, so the check is real", () => {
     // The inverse assertion. If the walk could not see a credential field at
-    // all, the one above would pass for the wrong reason forever.
+    // all, the one above would pass for the wrong reason forever. The Slack
+    // payloads exist today, so this half keeps the walk provably sighted
+    // while the exhaustive list below waits for Task 3's module.
+    const internalWithCredential = registered
+      .filter((fn) => !fn.isPublic && credentialShaped(fn.returns).length > 0)
+      .map((fn) => fn.name)
+      .sort();
+
+    expect(internalWithCredential).toContain("slack.boundaryPayload");
+    expect(internalWithCredential).toContain("slack.briefPayload");
+    expect(internalWithCredential).toContain("slack.synthesisPayload");
+  });
+
+  // Un-skipped by B5 Task 3, which creates `zotero.syncPayload`. Skipped and
+  // not deleted so that the exhaustive inverse list cannot be forgotten on
+  // the way.
+  it.skip("names zotero.syncPayload as the only Zotero carrier", () => {
     const internalWithCredential = registered
       .filter((fn) => !fn.isPublic && credentialShaped(fn.returns).length > 0)
       .map((fn) => fn.name)
@@ -472,7 +488,7 @@ describe("the webhook URL never reaches a client", () => {
 });
 
 /* -------------------------------------------------------------------------
- * 2. And no table but `labs` holds it
+ * 2. And only the tables that must hold one, hold one
  * ---------------------------------------------------------------------- */
 
 describe("where the credential is stored", () => {
@@ -480,10 +496,15 @@ describe("where the credential is stored", () => {
     ([name, table]) => [name, wireForm(table.validator)] as const,
   );
 
-  it("lives on the two tables that hold a credential, and no others", () => {
-    const holders = tables.flatMap(([table, validator]) =>
-      credentialShaped(validator).length > 0 ? [table] : [],
-    );
+  it("lives on the tables that hold a credential, and no others", () => {
+    // Sorted so the assertion is about *where credentials live*, not about
+    // declaration order — reordering `schema.ts` for readability must not
+    // read as a credential regression.
+    const holders = tables
+      .flatMap(([table, validator]) =>
+        credentialShaped(validator).length > 0 ? [table] : [],
+      )
+      .sort();
     // Anchored in both directions: they are here, and nothing else is. A
     // fourth holder would be a fourth lifetime to reason about and a fourth
     // read path to forget to gate. `labs` carries the lab's Slack webhook;
