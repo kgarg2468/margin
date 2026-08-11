@@ -945,6 +945,62 @@ describe("whole-item redaction", () => {
     ).toBeNull();
   });
 
+  it("kills a two-citation item at store time when only one citation went", async () => {
+    // The store-time twin of the rule at the top of this section, and the
+    // case a single-citation fixture cannot see: relax `every` to `some` here
+    // and an item drawn from a withdrawn note and a surviving one is written
+    // to the table, carrying the withdrawn note's substance in a sentence
+    // that will render. The item beside it is what proves the finding still
+    // lands — this is whole-item redaction, not fail-the-batch.
+    const ctx = new FakeCtx();
+    const seed = await seedLab(ctx);
+    const kept = await seedAnnotation(ctx, { ...seed, memberId: seed.pi });
+    const taken = await seedAnnotation(ctx, { ...seed, memberId: seed.member });
+    const now = Date.now();
+    const delegationId = await ctx.db.insert("delegations", {
+      labId: seed.labId,
+      agentKind: "scout.corpus",
+      trigger: "manual",
+      annotationId: seed.questionId,
+      requestedBy: seed.pi,
+      requestedAt: now,
+      status: "running",
+      lease: "lease-1",
+      leaseAcquiredAt: now,
+    });
+    await ctx.db.patch(taken as string, { visibility: "private" });
+
+    await handlerOf(store)(ctx, {
+      delegationId,
+      lease: "lease-1",
+      items: [
+        {
+          text: "Resting on the note that survived.",
+          citedAnnotationIds: [kept],
+          citedPaperIds: [seed.paperId],
+        },
+        {
+          text: "Resting on both, one of which has gone.",
+          citedAnnotationIds: [kept, taken],
+          citedPaperIds: [seed.paperId],
+        },
+      ],
+      coverage: { annotationsSearched: 2, papersTouched: 1, queriesRun: 1 },
+      droppedForCitation: 0,
+      model: "stub.scout.v0",
+    } as never);
+
+    const finding = rowAt(ctx.db.all("findings"));
+    expect(finding.items.map((item) => item.text)).toEqual([
+      "Resting on the note that survived.",
+    ]);
+    expect(finding.droppedForCitation).toBe(1);
+    // And the join table never learns the withdrawn id either.
+    expect(
+      ctx.db.all("findingCitations").map((row) => row.annotationId),
+    ).toEqual([kept]);
+  });
+
   it("refuses to store an item whose citation went private mid-run", async () => {
     const ctx = new FakeCtx();
     const seed = await seedLab(ctx);

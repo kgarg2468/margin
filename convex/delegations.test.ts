@@ -12,6 +12,7 @@ import {
   MAX_BATCH_CANDIDATES,
   MAX_BATCH_QUESTIONS,
   MAX_CANDIDATES,
+  MAX_SUBJECT_HISTORY,
   MAX_COLLISION_LINES,
   MAX_COLLISION_LINE_CHARS,
   MAX_SEARCH_LENGTH,
@@ -937,14 +938,14 @@ describe("the batch's candidate cap", () => {
     }
   });
 
-  it("offers a collision line no label its own question may not cite", () => {
-    // A line's notes are merged into its own question's gather, so normally
-    // both ends are citable. Not when one of them falls off `MAX_CANDIDATES`
-    // and a *neighbour* puts it in the layout anyway — the state this batch
-    // stands in for by pointing the line at the other question's note. The
-    // label exists, this question may not use it, and offering it would
-    // promise a citation the gate drops as invented: the item lost and the
-    // reason invisible.
+  it("drops a whole line when one of its sources is not this question's to cite", () => {
+    // The prompt-scope half of whole-item redaction. A line derived from X and
+    // Y whose X is not citable here can only be cited against Y, so the
+    // finding it produces would name Y alone — and X going private afterwards
+    // would move nothing, because both the store-time re-check and read-time
+    // redaction inspect cited ids. The line carries no note body, but it
+    // carries that X's author engaged with this passage, which is what going
+    // private takes back.
     const mine = question(0, 2);
     const neighbour = question(1, 2);
     const ours = rowAt(mine.candidates)._id;
@@ -960,19 +961,39 @@ describe("the batch's candidate cap", () => {
     ]);
 
     const asked = rowAt(materialOf(gate.prompt).questions);
-    const line = rowAt(asked.collisions);
-    // The end this question gathered, named, and nothing else.
-    expect(line.labels).toHaveLength(1);
-    expect(gate.byLabel.get(rowAt(line.labels))?._id).toBe(ours);
-    expect(asked.labels).toContain(rowAt(line.labels));
+    expect(asked.collisions).toEqual([]);
+    // Not a labelling problem: `theirs` is in the batch's vocabulary, and the
+    // half of the line this question *could* cite is in its own. Being able
+    // to name one end is exactly what makes shipping the line unsafe.
+    expect(
+      [...gate.byLabel].some(([, candidate]) => candidate._id === theirs),
+    ).toBe(true);
+    expect(asked.labels).toContain(
+      [...gate.byLabel].find(([, candidate]) => candidate._id === ours)?.[0],
+    );
+  });
 
-    // The neighbour's note is in the batch's vocabulary all the same. Being
-    // labelled is what makes it worth withholding here.
-    const theirLabel = [...gate.byLabel].find(
-      ([, candidate]) => candidate._id === theirs,
-    )?.[0];
-    expect(theirLabel).toBeDefined();
-    expect(line.labels).not.toContain(theirLabel);
+  it("keeps a line whose every source the layout labelled", () => {
+    // The other side of the same rule: the gate is a filter on a rare edge,
+    // not a deletion of the section. Both ends of this line are the
+    // question's own, so both are laid out and the line travels.
+    const mine = question(0, 2);
+    const [first, second] = [
+      rowAt(mine.candidates)._id,
+      rowAt(mine.candidates, 1)._id,
+    ];
+    const gate = buildBatchPrompt(labId, [
+      {
+        ...mine,
+        collisionLines: [
+          { text: "Two members, one passage.", annotationIds: [first, second] },
+        ],
+      },
+    ]);
+
+    const line = rowAt(rowAt(materialOf(gate.prompt).questions).collisions);
+    expect(line.labels).toHaveLength(2);
+    expect(line.text).toBe("Two members, one passage.");
   });
 
   it("counts the brief read in `queriesRun`, so coverage cannot overstate either", async () => {
@@ -995,6 +1016,52 @@ describe("the batch's candidate cap", () => {
 
     await run(ctx, await queue(ctx, seed, { briefId }));
     expect(rowAt(ctx.db.all("findings")).coverage.queriesRun).toBe(2);
+  });
+
+  it("labels a collision's sources even when the search fills the budget", async () => {
+    // The reserve, doing the job it exists for. A lab with enough written
+    // down to spend the whole candidate budget on search hits is exactly the
+    // lab with collisions worth reading, so an unreserved budget would delete
+    // the section on the labs it matters most to — deterministically, every
+    // brief, since the corpus that produced it is the same one next time.
+    const { ctx, seed, calls } = await seeded();
+    for (let index = 0; index < MAX_CANDIDATES; index += 1) {
+      await seedAnnotation(
+        ctx,
+        { ...seed, memberId: seed.pi },
+        { type: "note", body: `Note ${index} on the incubation step` },
+      );
+    }
+    const x = await seedAnnotation(
+      ctx,
+      { ...seed, memberId: seed.pi },
+      { body: "Ana on the cold chain." },
+    );
+    const y = await seedAnnotation(
+      ctx,
+      { ...seed, memberId: seed.member },
+      { body: "Ben on the cold chain." },
+    );
+
+    await run(
+      ctx,
+      await queue(ctx, seed, {
+        briefId: await brief(ctx, seed, {
+          items: [
+            {
+              text: "Ana and Ben both left a hypothesis on the same passage.",
+              annotationIds: [x, y],
+            },
+          ],
+        }),
+      }),
+    );
+
+    const asked = rowAt(materialOf(rowAt(calls).prompt).questions);
+    expect(rowAt(asked.collisions).labels).toHaveLength(2);
+    // And the budget really was full: the reserve took its slice out of a
+    // full page rather than out of slack.
+    expect(asked.labels).toHaveLength(MAX_CANDIDATES);
   });
 
   it("carries no more of the brief's lines than the brief's own section holds", async () => {
@@ -1692,6 +1759,66 @@ describe("the cascade", () => {
     // The note *was* the question, so the reason is that the subject went —
     // not that a citation under it moved.
     expect((await ctx.db.get(inFlight))?.cancellation).toBe("subject-withdrawn");
+  });
+
+  it("supersedes the newest older finding on a long-scouted question", async () => {
+    // The same ascending-read bug on the other subject scan. It only shows
+    // past `MAX_SUBJECT_HISTORY` *older* findings: below that the window
+    // covers everything and either direction works, and above it an ascending
+    // read stops exactly short of the one finding that was the current answer
+    // — leaving two rows claiming to be it.
+    const { ctx, seed } = await seeded();
+    await corpus(ctx, seed);
+    const olds: Id<"findings">[] = [];
+    for (let index = 0; index < MAX_SUBJECT_HISTORY + 1; index += 1) {
+      olds.push(
+        await ctx.db.insert("findings", {
+          labId: seed.labId,
+          delegationId: await queue(ctx, seed, { status: "returned" }),
+          agentKind: "scout.corpus",
+          annotationId: seed.questionId,
+          items: [
+            {
+              text: `An older answer (${index}).`,
+              citedAnnotationIds: [],
+              citedPaperIds: [],
+            },
+          ],
+          coverage: { annotationsSearched: 1, papersTouched: 1, queriesRun: 1 },
+          droppedForCitation: 0,
+          model: "stub.scout.v0",
+          generatedAt: index + 1,
+        }),
+      );
+    }
+
+    await run(ctx, await queue(ctx, seed));
+
+    const newestOld = rowAt(olds, olds.length - 1);
+    expect((await ctx.db.get(newestOld))?.supersededAt).toBeDefined();
+  });
+
+  it("still reaches the live run on a question with a long history behind it", async () => {
+    // Convex orders an index read ascending by default, so an unordered
+    // `take(MAX_SUBJECT_HISTORY)` reads the *oldest* fifty. Past that many
+    // finished runs, the row this has to reach — the one still going, which
+    // is always the newest — falls outside the window, and taking the note
+    // back would leave a machine working on it holding a live lease, with
+    // nothing in the record to say so.
+    const { ctx, seed } = await seeded();
+    for (let index = 0; index < MAX_SUBJECT_HISTORY; index += 1) {
+      await queue(ctx, seed, { status: "returned", settledAt: 1 });
+    }
+    const inFlight = await queue(ctx, seed);
+
+    const result = await cascadeForAnnotation(
+      ctx as never,
+      seed.questionId,
+      seed.pi,
+    );
+
+    expect(result.cancelled).toBe(1);
+    expect((await ctx.db.get(inFlight))?.status).toBe("cancelled");
   });
 
   it("writes one join row per distinct note, however many items cite it", () => {

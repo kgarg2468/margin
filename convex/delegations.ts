@@ -86,18 +86,29 @@ import {
  * (`convex/delegations.privacy.test.ts`) hands the prompt builder a hostile
  * result set to make sure it still says no.
  *
- * The brief's collision lines get one of the two *today*, and the gap is named
- * rather than argued away. Both shipped gates test **rows**, and a line is
- * prose: `gatherBriefCollisions` resolves its citations and drops the line if
- * any of them has moved, so the rule holds where the rows are, and the notes
- * behind a surviving line are then read fresh and pass through both gates like
- * any other candidate. What is missing is a prompt-scope check — refuse a line
- * unless every id it names resolves to a label the question may cite — and it
- * is missing because it is only safe *paired* with a reserved slice of
- * `MAX_CANDIDATES` for collision notes. Unpaired, it would silently delete
- * every line on a lab whose search already fills the candidate budget, which
- * is the majority case and the wrong failure. One follow-up, both halves or
- * neither.
+ * The brief's collision lines are held to the same two, at the scope a line
+ * has. The retrieval half is `gatherBriefCollisions`, which re-resolves every
+ * citation and drops a line whose notes have moved. The prompt half is in
+ * `buildBatchPrompt`: a line travels only if **every** source it names
+ * resolves to a label this question may cite, and is dropped whole otherwise.
+ *
+ * That second gate exists because a line is prose and the rest of this feature
+ * protects *cited ids*. A line derived from X and Y whose X never made the
+ * layout can only be cited against Y, so the stored finding names Y alone —
+ * and X privatizing afterwards moves nothing, because both the store-time
+ * re-check and read-time redaction look at citations. The line carries no note
+ * body, but it carries that X's author engaged with this passage, which is
+ * what going private takes back. It is paired with `MAX_COLLISION_CANDIDATES`,
+ * a reserved slice of the candidate budget, for the reason a gate like this
+ * usually fails: unreserved, it would delete every collision line on any lab
+ * whose search already fills forty rows — which is most of them, and the labs
+ * with the most written down first.
+ *
+ * One channel this does not close, named so nobody has to rediscover it: a
+ * batch shares one layout of material, so a question can be *influenced* by a
+ * note only its neighbour gathered even though it can never *cite* one. The
+ * bound on that is `runForBrief`'s single-lab refusal, not the label gate —
+ * every note in a batch is already the same lab's to read.
  *
  * ## Nothing here writes human speech
  *
@@ -176,11 +187,22 @@ export const MAX_BATCH_QUESTIONS = MAX_ACTIVE_PER_LAB;
  * notes however many its neighbours brought.
  *
  * What this bounds is the *count*, and it is worth being exact about what that
- * buys. Eighty notes at the 4,000-character ceiling is 320,000 characters,
- * which at `CHARS_PER_TOKEN` is around 107,000 tokens — a real number rather
- * than an unbounded one, comfortable for the default model's context, and
- * nowhere near the megabyte the union could reach on its own. It is not a
- * character budget: a lab that writes at the ceiling still produces a much
+ * buys — including the parts this constant does not bound, which an earlier
+ * version of this comment left out and thereby understated the ceiling by a
+ * sixth. Three things go into one input, and only the first is counted here:
+ *
+ * - the laid-out notes, `MAX_BATCH_CANDIDATES` at the 4,000-character body
+ *   ceiling (`annotations.MAX_BODY_LENGTH`) — 320,000 characters;
+ * - the questions themselves, `MAX_BATCH_QUESTIONS` bodies at the same
+ *   ceiling, since a question is an annotation too — 32,000;
+ * - the brief's collision prose, `MAX_COLLISION_LINES` lines of
+ *   `MAX_COLLISION_LINE_CHARS` per question — 19,200.
+ *
+ * 371,200 characters, which at `CHARS_PER_TOKEN` is about **124,000 tokens**.
+ * A real number rather than an unbounded one, and nowhere near the megabyte
+ * the union could reach on its own, but it is the number an operator has to
+ * size a context against. It is not a character
+ * budget: a lab that writes at the ceiling still produces a much
  * larger prompt than one that writes in sentences, and an operator who points
  * `SCOUT_MODEL` at a smaller-context model has to account for that worst case
  * themselves. A budget measured in characters is a design change, not a
@@ -211,6 +233,34 @@ export const MAX_COLLISION_LINES = 6;
  * this module is entitled to assume about a string it puts in a prompt.
  */
 export const MAX_COLLISION_LINE_CHARS = 400;
+
+/**
+ * How much of one run's candidate budget the brief's lines may claim.
+ *
+ * Derived, not chosen. A collision is a **pair** — `detectCollisions` joins
+ * exactly two annotations — so `MAX_COLLISION_LINES` lines name at most
+ * `MAX_COLLISION_LINES * 2` distinct notes. Twelve. Reserving exactly that
+ * many means a line's sources can always be labelled, however many rows the
+ * search brought, and the twenty-eight left over is still two thirds of the
+ * budget for a source that is doing the other job.
+ *
+ * The reserve is what makes the line gate in `buildBatchPrompt` a filter on a
+ * rare edge instead of a deletion of the whole section. Without it, any lab
+ * whose search fills forty rows loses every collision line — deterministically,
+ * every brief, and precisely on the labs with enough written down to have
+ * collisions worth reading.
+ *
+ * These candidates are also placed **first**, which is the half that is easy
+ * to miss: the batch layout is round-robin by rank over
+ * `MAX_BATCH_CANDIDATES`, so a note sitting at rank 39 of a question's list
+ * is one the prompt may never lay out whatever the gather decided. At the
+ * front they are inside the ten-per-question floor that layout guarantees.
+ * Twelve is two past that floor, so an eight-question batch whose union
+ * overflows can still crowd out a line's twelfth source — the gate then drops
+ * that line whole, which is the safe direction and the reason the gate is not
+ * optional.
+ */
+export const MAX_COLLISION_CANDIDATES = MAX_COLLISION_LINES * 2;
 
 /** The search index's own limit, which the question text is reduced to fit. */
 export const MAX_SEARCH_LENGTH = 200;
@@ -884,7 +934,15 @@ async function gatherBriefCollisions(
   return {
     lines: kept.map((item) => ({
       text: item.text.slice(0, MAX_COLLISION_LINE_CHARS),
-      annotationIds: [...item.annotationIds],
+      // The subject is not one of its own sources. It is kept out of the
+      // candidates above, so leaving it named here would fail every line
+      // against the run's own question at the prompt gate — which is most of
+      // the `possible answer` lines, the ones worth reading. It loses nothing:
+      // the subject's privacy is carried by a *stronger* mechanism than a
+      // citation is. A question taken private stops the whole finding being
+      // served (`resolveSubject`, and `findings.newestForSubject` with it),
+      // where a withdrawn citation only redacts the items resting on it.
+      annotationIds: item.annotationIds.filter((id) => id !== exclude),
     })),
     candidates,
     read: true,
@@ -897,19 +955,32 @@ async function gatherBriefCollisions(
  * Deduped by `_id` because the same note is often both a search hit and half a
  * collision, and a note laid out twice would be one piece of material under
  * two labels — the ambiguity the batch's single label space exists to prevent.
- * The search's ranking leads, and `MAX_CANDIDATES` is unmoved: a second source
- * is a better answer out of the same budget, not a reason to raise it.
+ * `MAX_CANDIDATES` is unmoved: a second source is a better answer out of the
+ * same budget, not a reason to raise it.
+ *
+ * The brief's notes go first, up to `MAX_COLLISION_CANDIDATES`. Not because
+ * they are better material — because a line whose sources are not all
+ * labelled is a line the prompt gate drops whole, and a collision is the one
+ * signal here the search cannot produce. Order is the mechanism: it decides
+ * both what survives this cap and what the batch's round-robin lays out.
  */
-function mergeCandidates(...sources: readonly Candidate[][]): Candidate[] {
+function mergeCandidates(
+  fromBrief: readonly Candidate[],
+  searched: readonly Candidate[],
+): Candidate[] {
   const merged: Candidate[] = [];
   const seen = new Set<Id<"annotations">>();
-  for (const source of sources) {
-    for (const candidate of source) {
-      if (merged.length >= MAX_CANDIDATES) return merged;
-      if (seen.has(candidate._id)) continue;
-      seen.add(candidate._id);
-      merged.push(candidate);
-    }
+  const add = (candidate: Candidate) => {
+    if (seen.has(candidate._id)) return;
+    seen.add(candidate._id);
+    merged.push(candidate);
+  };
+  for (const candidate of fromBrief.slice(0, MAX_COLLISION_CANDIDATES)) {
+    add(candidate);
+  }
+  for (const candidate of searched) {
+    if (merged.length >= MAX_CANDIDATES) break;
+    add(candidate);
   }
   return merged;
 }
@@ -1013,9 +1084,20 @@ export const SOLE_QUESTION_REF = "Q1";
  * Labels are issued once over the deduped union of everything gathered, not
  * per question: the same note retrieved for two questions is one piece of
  * material, and giving it two names in one prompt would make every citation
- * ambiguous. What is *not* shared is the right to cite — each question may
- * only cite the labels its own gather returned, so a finding still rests on
- * the retrieval whose coverage the reader is shown.
+ * ambiguous. What is *not* shared is the right to **cite** — each question may
+ * only cite the labels its own gather returned, so a stored finding rests on
+ * ids the retrieval whose coverage the reader is shown actually produced.
+ *
+ * Say the limit of that plainly, because it is easy to read as more than it
+ * is. The right to cite is per question; the *text* is not. `annotations` is
+ * one batch-global layout, so the model answering Q2 has read every note Q1
+ * gathered and can be influenced by it — it simply cannot attribute to it, and
+ * an item that tries is dropped as invented. That is a real channel, not a
+ * closed one, and what makes it acceptable is scope rather than filtering: a
+ * batch is one brief's questions and a brief belongs to one lab, so every note
+ * in the layout is material the same lab already shares with itself. It would
+ * *not* be acceptable across labs, which is why `runForBrief` refuses a batch
+ * spanning two rather than splitting it.
  *
  * The union is laid out round-robin by rank and capped at
  * `MAX_BATCH_CANDIDATES`. Concatenating the questions instead would spend the
@@ -1074,20 +1156,33 @@ export function buildBatchPrompt(
         ref: one.ref,
         question: one.question,
         labels: [...citable],
-        // A line travels with the labels of the notes it was drawn from —
-        // through the same set the question may cite, not through the batch's
-        // whole vocabulary. A note that fell off `MAX_CANDIDATES` can still
-        // carry a label a *neighbour* put in the layout, and offering it here
-        // would promise this question a citation the gate drops as invented:
-        // the item lost and the reason invisible. Unlabelled, the line is
-        // prose the model may read and not cite, which is what it is.
-        collisions: (one.collisionLines ?? []).map((line) => ({
-          text: line.text,
-          labels: line.annotationIds.flatMap((id) => {
+        // Every source labelled and citable by *this* question, or the line
+        // does not travel. The second privacy gate, at line scope, and it is
+        // here rather than in the gather because only the layout knows which
+        // notes ended up with a label.
+        //
+        // The rule is the same whole-item rule the rest of this feature runs
+        // on, applied one level up. A line derived from X and Y whose X was
+        // crowded out of the layout is prose about X that can only be cited
+        // against Y — so the finding it produces records Y alone, and X's
+        // later privatization is invisible to the store-time re-check and to
+        // read-time redaction, both of which inspect cited ids. The line
+        // carries no note body, but it carries that X's author engaged with
+        // this passage, and engagement is exactly what going private
+        // withdraws. Dropping the line whole is the only remedy that survives
+        // X changing its mind afterwards.
+        //
+        // A line naming no sources at all is dropped for the same reason: it
+        // is prose with nothing to re-resolve it against.
+        collisions: (one.collisionLines ?? []).flatMap((line) => {
+          const labels: string[] = [];
+          for (const id of line.annotationIds) {
             const label = labelOf.get(id);
-            return label === undefined || !citable.has(label) ? [] : [label];
-          }),
-        })),
+            if (label === undefined || !citable.has(label)) return [];
+            labels.push(label);
+          }
+          return labels.length === 0 ? [] : [{ text: line.text, labels }];
+        }),
       };
     }),
     annotations: labelled.map((one) => ({
@@ -1582,8 +1677,8 @@ export const gather = internalQuery({
       delegation.annotationId,
     );
     const candidates = mergeCandidates(
-      searched.candidates,
       fromBrief.candidates,
+      searched.candidates,
     );
     return {
       question: subject.question,
@@ -1679,7 +1774,7 @@ const REASONING_TOKENS_PER_QUESTION = 4_000;
  * common — answers 400 rather than truncating, which fails the whole brief as
  * `model-unavailable`, identically, every time. So the scout's model must
  * accept at least ~44,000 output tokens and hold a context large enough for
- * the input beside it (see `MAX_BATCH_CANDIDATES`: ~107,000 tokens at the
+ * the input beside it (see `MAX_BATCH_CANDIDATES`: ~124,000 tokens at the
  * absolute worst). The default satisfies both; `SCOUT_MODEL` is an override an
  * operator has to check against them, and `.env.example` says so.
  */
@@ -1804,7 +1899,12 @@ export function readModelPayload(
     .flatMap((item) => item.content ?? []);
   if (parts.some((part) => part.type === "refusal")) {
     // A refusal is not output this gate can read, and it is not the reader's
-    // business what the model said about why.
+    // business what the model said about why. The operator still gets a
+    // breadcrumb — every other terminal branch here leaves one, and a failure
+    // class that logs nothing is the one nobody can diagnose. The refusal
+    // *text* stays out of it: it is model output, and untrusted output does
+    // not go in a format position.
+    console.error("Scout call refused by the model; no items were read.");
     return { ok: false, failure: "model-output-invalid" };
   }
   const text = parts
@@ -1813,9 +1913,17 @@ export function readModelPayload(
     )
     .map((part) => part.text)
     .join("");
-  return text.trim().length === 0
-    ? { ok: false, failure: "model-output-invalid" }
-    : { ok: true, text };
+  if (text.trim().length === 0) {
+    // Counts, never content: how many output items came back and how many of
+    // them were message parts is enough to tell "spent it all on reasoning"
+    // from "answered with an empty string", and neither number is somebody's
+    // writing.
+    console.error(
+      `Scout call returned no readable text: ${(body.output ?? []).length} output items, ${parts.length} message parts.`,
+    );
+    return { ok: false, failure: "model-output-invalid" };
+  }
+  return { ok: true, text };
 }
 
 /**
@@ -2255,8 +2363,13 @@ export const store = internalMutation({
       delegation.labId,
       args.items.flatMap((item) => item.citedAnnotationIds),
     );
+    // `allCitationsShared`, not a hand-rolled `.every`. This is the fourth
+    // site of the whole-item rule, and the three that consume `lib/citations`
+    // are why the fourth must: a rule spelled out twice is a rule that can be
+    // relaxed in one place, and the relaxation here — `.some` for `.every` —
+    // is invisible to any test whose items carry a single citation.
     const surviving = args.items.filter((item) =>
-      item.citedAnnotationIds.every((id) => live.has(id)),
+      allCitationsShared(item.citedAnnotationIds, live),
     );
     const dropped =
       args.droppedForCitation + (args.items.length - surviving.length);
@@ -2560,6 +2673,12 @@ async function supersedeOlderFindings(
   at: number,
   except: Id<"findings">,
 ): Promise<number> {
+  // Newest first. Convex orders an index read ascending by default, so an
+  // unordered `take` reads the *oldest* fifty — and a subject with fifty
+  // terminal runs behind it would supersede nothing from its fifty-second
+  // finding on, because the window it read stopped before the rows that
+  // matter. The bound is "the newest few are still the newest few"
+  // (`MAX_SUBJECT_HISTORY`), which is only true read in that direction.
   const rows =
     ref.kind === "annotation"
       ? await ctx.db
@@ -2567,10 +2686,12 @@ async function supersedeOlderFindings(
           .withIndex("by_annotation", (q) =>
             q.eq("annotationId", ref.annotationId),
           )
+          .order("desc")
           .take(MAX_SUBJECT_HISTORY)
       : await ctx.db
           .query("findings")
           .withIndex("by_action", (q) => q.eq("actionId", ref.actionId))
+          .order("desc")
           .take(MAX_SUBJECT_HISTORY);
   let superseded = 0;
   for (const finding of rows) {
@@ -2588,6 +2709,13 @@ async function cancelActiveFor(
   reason: Doc<"delegations">["cancellation"] & string,
   actorId: Id<"users">,
 ): Promise<number> {
+  // Newest first, and here the direction is load-bearing for the privacy
+  // promise rather than for tidiness. The row this has to reach is the run
+  // that is *still going*, which is by construction the newest one — and an
+  // ascending read of a subject with fifty finished runs behind it returns
+  // fifty terminal rows and never sees it. Taking a note back would then
+  // leave a machine working on it, holding a live lease, with nothing in the
+  // record to say so.
   const rows =
     ref.kind === "annotation"
       ? await ctx.db
@@ -2595,10 +2723,12 @@ async function cancelActiveFor(
           .withIndex("by_annotation", (q) =>
             q.eq("annotationId", ref.annotationId),
           )
+          .order("desc")
           .take(MAX_SUBJECT_HISTORY)
       : await ctx.db
           .query("delegations")
           .withIndex("by_action", (q) => q.eq("actionId", ref.actionId))
+          .order("desc")
           .take(MAX_SUBJECT_HISTORY);
   let cancelled = 0;
   for (const delegation of rows) {
