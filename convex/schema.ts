@@ -400,6 +400,48 @@ export const eventDoc = v.union(
     statusCode: v.number(),
     deliveryAt: v.number(),
   }),
+  /**
+   * A member linked their own Zotero library to this lab, or unlinked it.
+   *
+   * The lab's counterpart to `slack.delivery_changed`, and filed for the same
+   * reason: papers arriving on the shelf from somewhere outside Margin is a
+   * collective fact, and the record should say when that started and whose
+   * decision it was. `actorId` is the member themselves — this is the one
+   * integration nobody can turn on for anybody else.
+   *
+   * The key is not carried, and could not be. It is a bearer credential that
+   * reads a person's whole personal library, and `events` rows are never
+   * deleted, so a copy here would outlive every disconnection. `connected`
+   * says which way the switch moved, which is the whole fact.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("zotero.link_changed"),
+    connected: v.boolean(),
+  }),
+  /**
+   * A sync run put papers on the shelf.
+   *
+   * Counts, never content — not a title, not an item key, not the name of the
+   * library they came from. What the ledger is for here is the answer to "why
+   * are there forty papers I didn't add", and a number plus an actor answers
+   * it; the papers themselves each file their own `paper.added` with the
+   * member as actor, which is where the titles live.
+   *
+   * **Only filed when `imported > 0`.** The hourly sweep asks every linked
+   * library whether anything changed, and for most members on most hours the
+   * answer is no. A row per poll would be an append-only table growing at
+   * one row per member per hour to record that nothing happened, which is not
+   * a fact about the lab — it is a fact about the scheduler.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("zotero.synced"),
+    /** Papers newly on the shelf. */
+    imported: v.number(),
+    /** Items this run recognised as already here. */
+    skipped: v.number(),
+  }),
   v.object({
     ...eventBase,
     type: v.literal("paper.added"),
@@ -980,8 +1022,9 @@ export default defineSchema({
      * every one of them is an `internalQuery` or a mutation that writes it —
      * no public query returns it, not even to the PI who pasted it, because a
      * webhook URL in a query result is a webhook URL in the browser's cache and
-     * in every dev tools pane it is ever opened in. `convex/slack.guard.test.ts`
-     * asserts that structurally against the schema's own validators.
+     * in every dev tools pane it is ever opened in.
+     * `convex/credentials.guard.test.ts` asserts that structurally against the
+     * schema's own validators.
      *
      * Absent means Slack delivery is off, and that is the only representation
      * of "off" there is: clearing the field is what disconnecting does. A
@@ -1122,9 +1165,34 @@ export default defineSchema({
      * revisit both together.
      */
     tags: v.optional(v.array(v.string())),
+    /**
+     * Which Zotero item this paper came from, for the member who synced it.
+     *
+     * The identity dedupe key, and the only way a *metadata edit* in Zotero
+     * can find the row it should patch rather than inserting a near-duplicate:
+     * a member fixing a typo'd title upstream would otherwise get a second
+     * paper in Margin, with the lab's annotations still on the first one.
+     *
+     * Opaque and not a secret — it names an item in a library, the way a DOI
+     * names a paper, and it is safe to hold beside one. It is deliberately
+     * *not* qualified by which library it came from: two members syncing the
+     * same paper from two different Zotero libraries produce two different
+     * item keys, and the DOI and title-identity passes below are what collapse
+     * those into one row. Collisions across libraries are not a concern —
+     * Zotero item keys are eight random base-32 characters.
+     */
+    zoteroItemKey: v.optional(v.string()),
   })
     .index("by_lab", ["labId"])
     .index("by_lab_and_doi", ["labId", "doi"])
+    /**
+     * "Have I already imported this Zotero item into this lab?" — asked once
+     * per candidate on every sync run. Without it the question is a read of
+     * the lab's whole library per item, which is the shape
+     * `createFromMetadata` has and the one a sync run at 25 items a go cannot
+     * afford to inherit.
+     */
+    .index("by_lab_and_zotero_item", ["labId", "zoteroItemKey"])
     /**
      * "Is any paper using this blob?" — the question `discardUpload` asks
      * before deleting a file the browser uploaded and then failed to attach.
@@ -1221,6 +1289,211 @@ export default defineSchema({
   })
     .index("by_user", ["userId"])
     .index("by_user_and_lab", ["userId", "labId"]),
+
+  /**
+   * One member's Zotero library, wired to one lab. Read-only, one direction.
+   *
+   * ## Why this is per-member and the Slack webhook is per-lab
+   *
+   * `labs.slackWebhookUrl` is the lab's, because a channel is the lab's and a
+   * PI deciding the lab posts to it is a decision about the lab. A Zotero
+   * personal library is one person's, and it is a *reading history* — which
+   * of the two things `convex/privacy.guard.test.ts` exists to keep Margin
+   * out of. A single lab-wide key would let any member read the PI's entire
+   * library, so the key is keyed `(userId, labId)` and nobody can see or
+   * manage anybody else's. `savedFilters` above is the schema precedent for
+   * exactly that shape, and for the same reason: some things in a lab are one
+   * person's working life rather than lab property.
+   *
+   * The *destination* is still the lab. Papers land on the lab's shelf, file
+   * a `paper.added` with this member as actor, and stay there when the link
+   * goes — exactly as a `.bib` paste does today. Unlinking removes the way in,
+   * not the papers, and the confirm copy says so.
+   *
+   * ## One library, one counter
+   *
+   * One row is one library. Two would be two version counters, two rate-limit
+   * budgets, and a settings row that can be half-broken — and there is no
+   * question a second library answers that a group library does not.
+   */
+  zoteroLinks: defineTable({
+    userId: v.id("users"),
+    labId: v.id("labs"),
+    /**
+     * The member's Zotero API key. A bearer credential, held under the same
+     * constitution as `labs.slackWebhookUrl` and one clause stricter.
+     *
+     * It never leaves the server. `convex/zotero.ts` holds the only reads, and
+     * the only function that hands it anywhere is `zotero.syncPayload`, an
+     * `internalQuery` — no public function returns it, not even to the member
+     * who pasted it, because a key in a query result is a key in the browser's
+     * cache and in every dev tools pane that cache is ever opened in.
+     * `convex/credentials.guard.test.ts` asserts that structurally, by walking
+     * every returns validator in the codebase rather than by trusting this
+     * paragraph.
+     *
+     * The stricter clause is about redirects. Zotero answers a file download
+     * with a `302` to a presigned Amazon URL, and `fetch` following a redirect
+     * strips `Authorization` but **not** a custom `Zotero-API-Key` header — so
+     * the obvious spelling of a download hands a member's key to a third-party
+     * host. Every request this module makes therefore sets
+     * `redirect: "manual"`, and the second hop is re-issued with no credential
+     * on it at all.
+     *
+     * Margin asks for a **read-only** key and verifies it: `GET /keys/current`
+     * reports the key's scopes and a write-scoped one is refused at connect
+     * time, in front of the person pasting it. The worst case of a breach is
+     * then disclosure of what somebody reads, not the destruction of a
+     * fifteen-year bibliography.
+     *
+     * Absent is impossible — the row is deleted rather than blanked, so
+     * "linked" and "not linked" have one representation between them.
+     */
+    apiKey: v.string(),
+    /**
+     * When the key above was pasted — the credential's non-secret identity.
+     *
+     * The `labs.slackConnectedAt` role, for the same reason and against the
+     * same race. A sync outcome is written by a mutation the action scheduled,
+     * and nothing orders that against a member in the settings page: a failure
+     * from a key replaced two seconds ago would otherwise have the row
+     * reporting a dead key against a live one. This is what travels with a run
+     * instead of the key. It is safe to hand around precisely because it is
+     * not the secret — it says *which* key, never what it was.
+     */
+    connectedAt: v.number(),
+    /**
+     * Which library. `"user"` carries the member's Zotero userID, `"group"` a
+     * groupID; together with the type it builds the `/users/<id>` or
+     * `/groups/<id>` prefix every request hangs off.
+     *
+     * A string rather than a number because it is an opaque path segment as
+     * far as Margin is concerned, and parsing it into an integer only to
+     * print it back would be an opportunity to be wrong about a library
+     * nobody can then reach.
+     */
+    libraryType: v.union(v.literal("user"), v.literal("group")),
+    libraryId: v.string(),
+    /**
+     * The library's display name, for the settings row. Display only, never
+     * matched on: a member who renames a group library in Zotero has not
+     * changed which library this is, and code that believed otherwise would
+     * silently start syncing nothing.
+     */
+    libraryName: v.optional(v.string()),
+    /**
+     * One Zotero collection, when the member picked one. This is the cap.
+     *
+     * `listPapers` reads the lab's library under one bounded `take(200)` and
+     * says so at `papers.tags` above. A real Zotero library is 1,000–10,000
+     * items, so syncing a whole one detonates the library page on its first
+     * run — the shelf would hold papers the shelf cannot list. Scoping to one
+     * collection is what makes the first version honest rather than
+     * impressive, and the connect copy says why in those words.
+     *
+     * Absent means the whole library, which is allowed for the member who
+     * genuinely keeps a small one. The per-run cap and the progress line hold
+     * either way.
+     */
+    collectionKey: v.optional(v.string()),
+    /** The collection's display name, for the settings row. Display only. */
+    collectionName: v.optional(v.string()),
+    /**
+     * Zotero's `Last-Modified-Version` as of the last **completed** walk.
+     * Absent means this library has never been fully walked.
+     *
+     * The whole incremental story is this number. `?since=<lastVersion>`
+     * returns only what changed after it, and `If-Modified-Since-Version:
+     * <lastVersion>` gets a bare `304` when nothing has — which is what makes
+     * the hourly sweep cost one small request per link per hour instead of a
+     * library walk.
+     *
+     * It advances only when a walk finishes, and it advances to the version
+     * the walk *started* at rather than to whatever the library says now. A
+     * walk spans several runs, and anything edited during it has a version
+     * above that mark, so the next walk sees it again. The cost is re-reading
+     * a handful of items; the alternative is silently losing an edit that
+     * happened while Margin was three pages into the previous walk.
+     */
+    lastVersion: v.optional(v.number()),
+    /**
+     * Where the walk in progress has got to, or absent when there is none.
+     *
+     * This field is the bounded-sync guarantee made durable. Every run — a
+     * member pressing Sync now, or the hourly sweep — imports at most
+     * `SYNC_PAGE_ITEMS` items and writes back where it stopped, so no single
+     * run is unbounded however large the library is, and a member who links a
+     * 4,000-item collection gets a shelf that fills over the afternoon instead
+     * of an action the platform kills halfway through.
+     *
+     * `targetVersion` pins the walk: it is the library version the walk began
+     * at, held fixed across every continuation so the `?since=` window does
+     * not move under the offset. `start` is the Zotero `start` offset of the
+     * next page. `total` is `Total-Results` from the first page — approximate
+     * by the time the last page is fetched, and shown to members with an
+     * "about" in front of it for exactly that reason. `imported` counts the
+     * papers this walk has actually added, which is not the same as `start`:
+     * `start` counts items looked at, and most of them on a re-walk are
+     * already here.
+     */
+    syncCursor: v.optional(
+      v.object({
+        targetVersion: v.number(),
+        start: v.number(),
+        total: v.number(),
+        imported: v.number(),
+      }),
+    ),
+    /**
+     * When a run last finished, whatever it found. Drives the sweep's `by_due`
+     * ordering and the "last checked" line in settings.
+     *
+     * Named for the sync and not for the member: this records that Margin
+     * asked Zotero a question, not that anybody read anything. The privacy
+     * guard's field patterns (`convex/privacy.guard.test.ts:169-193`) forbid
+     * `lastReadAt` and its family, and rightly — this is the other thing.
+     */
+    lastSyncAt: v.optional(v.number()),
+    /**
+     * How the most recent run went. The `labs.slackLastDelivery` role.
+     *
+     * A key can die without anybody touching this row — revoked at
+     * zotero.org, or a group the member left — and Zotero then answers `403`
+     * forever while the settings row still says "linked", because it is. This
+     * is what lets the row say the true thing instead.
+     *
+     * `statusCode` present means refused, absent means it worked.
+     * `connectedAt` says which key did the asking, so an outcome naming a key
+     * the member has since replaced is recognised and dropped. A derived,
+     * self-healing summary of facts the ledger holds permanently — not a
+     * second source of truth — so that reading it costs one document get on a
+     * page every member loads.
+     */
+    lastSync: v.optional(
+      v.object({
+        at: v.number(),
+        connectedAt: v.number(),
+        statusCode: v.optional(v.number()),
+        imported: v.number(),
+        skipped: v.number(),
+      }),
+    ),
+  })
+    .index("by_user_and_lab", ["userId", "labId"])
+    /** Every link in a lab — for the lab-wide reads a future digest might want. */
+    .index("by_lab", ["labId"])
+    /**
+     * The hourly sweep's index. A cron that found its work by scanning this
+     * table would be a full-table scan on a schedule, which is the argument
+     * `papers.by_pdf_storage` makes for itself and the same answer.
+     *
+     * Ordered by `lastSyncAt` ascending, so the sweep takes the most overdue
+     * links first and a library that is mid-walk keeps its place in the queue.
+     * A row that has never synced sorts first, because Convex orders an absent
+     * indexed field before every present one — which is the behaviour wanted:
+     * a member who linked their library thirty seconds ago should be first.
+     */
+    .index("by_due", ["lastSyncAt"]),
 
   /**
    * One journal-club meeting: a lab reads one paper, someone presents, then it
