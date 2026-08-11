@@ -11,6 +11,9 @@ import {
   type QueryCtx,
 } from "./_generated/server";
 import { annotationType, synthesisSectionKey } from "./schema";
+import { resolveCitations } from "../lib/citations/gate";
+import { issueLabels, normalizeLabel } from "../lib/citations/labels";
+import { isStillShared } from "../lib/citations/visibility";
 import { getMembership, requireUserId } from "./lib/authz";
 import { recordEvent } from "./lib/ledger";
 import { slackIsConfigured } from "./lib/slack";
@@ -469,6 +472,11 @@ export type MaterialRef<A extends string = string> = {
  * attribution is derived from citations rather than taken on trust. One
  * function so the two can never drift, which is the only reason the resolved
  * ids mean anything.
+ *
+ * The numbering itself is `lib/citations/labels.ts`, shared with the scout:
+ * two surfaces that both say `[A1]` to a model have to mean the same thing by
+ * it. What stays here is the pairing with the author, which is synthesis's own
+ * — the scout resolves a label to a paper instead.
  */
 export function annotationRefs<A extends string>(
   annotations: readonly { _id: A; author: string }[],
@@ -476,14 +484,13 @@ export function annotationRefs<A extends string>(
   labelOf: Map<A, string>;
   byLabel: Map<string, MaterialRef<A>>;
 } {
-  const labelOf = new Map<A, string>();
-  const byLabel = new Map<string, MaterialRef<A>>();
-  annotations.forEach((a, index) => {
-    const label = `A${index + 1}`;
-    labelOf.set(a._id, label);
-    byLabel.set(label, { id: a._id, author: a.author });
-  });
-  return { labelOf, byLabel };
+  const labelled = issueLabels(annotations);
+  return {
+    labelOf: new Map(labelled.map((one) => [one._id, one.label])),
+    byLabel: new Map(
+      labelled.map((one) => [one.label, { id: one._id, author: one.author }]),
+    ),
+  };
 }
 
 /** The material, laid out so a reference like `[A12]` is unambiguous. */
@@ -619,14 +626,6 @@ export function nameIndex(memberNames: readonly string[]): Map<string, string> {
   return known;
 }
 
-/** `[A12]`, `a12`, ` A12 ` → `A12`. Anything else → `undefined`. */
-function normalizeRef(raw: unknown): string | undefined {
-  if (typeof raw !== "string") return undefined;
-  const match = /^\[?\s*a\s*(\d{1,4})\s*\]?$/i.exec(raw.trim());
-  const digits = match?.[1];
-  return digits === undefined ? undefined : `A${Number(digits)}`;
-}
-
 /**
  * Turn whatever the model returned into the five sections, and enforce the
  * citation and attribution rules mechanically.
@@ -706,22 +705,26 @@ export function sanitizeSections<A extends string = string>(
       }
       if (claimed.length === 0) continue;
 
-      const cited = Array.isArray(refs) ? refs : [];
-      const annotationIds: A[] = [];
+      const { resolved, sawUnknown } = resolveCitations(
+        (Array.isArray(refs) ? refs : []).flatMap((ref) => {
+          const label = normalizeLabel(ref);
+          // An unreadable ref is not "no citation": it is a citation that
+          // cannot be checked, which fails the item the same way an invented
+          // one does. A label no prompt could have issued stands in, so the
+          // resolver reaches the same verdict on both.
+          return [label ?? "(unreadable)"];
+        }),
+        (label) => material.get(label),
+        // By the annotation, not by the ref object: two labels for one note
+        // are one citation, which is what this counted before it was shared.
+        (one) => one.id,
+      );
+      const annotationIds = resolved.map((one) => one.id);
       const authors: string[] = [];
-      let citesOutside = cited.length === 0;
-      for (const ref of cited) {
-        const resolved = material.get(normalizeRef(ref) ?? "");
-        if (resolved === undefined) {
-          citesOutside = true;
-          break;
-        }
-        if (!annotationIds.includes(resolved.id)) {
-          annotationIds.push(resolved.id);
-          if (!authors.includes(resolved.author)) authors.push(resolved.author);
-        }
+      for (const one of resolved) {
+        if (!authors.includes(one.author)) authors.push(one.author);
       }
-      if (citesOutside || annotationIds.length === 0) {
+      if (sawUnknown || annotationIds.length === 0) {
         droppedForRefs += 1;
         continue;
       }
@@ -1158,30 +1161,6 @@ export const store = internalMutation({
  */
 export const WITHDRAWN_ITEM_TEXT =
   "A line here rested on notes that are no longer shared.";
-
-/**
- * Is this citation still something the lab is allowed to be shown?
- *
- * Three ways a note stops counting, and they are one condition rather than
- * three because the write-up cannot tell them apart and should not try: the
- * row is gone, it was withdrawn (`deletedAt`), or its author flipped it back
- * to `private`. The lab check is the same one the caller passed to get here —
- * a stored id is a claim about a row, and a claim is worth re-reading.
- */
-export function isStillShared(
-  annotation: Pick<
-    Doc<"annotations">,
-    "labId" | "visibility" | "deletedAt"
-  > | null,
-  labId: Id<"labs">,
-): boolean {
-  return (
-    annotation !== null &&
-    annotation.deletedAt === undefined &&
-    annotation.visibility === "lab" &&
-    annotation.labId === labId
-  );
-}
 
 /**
  * Re-apply the margin's current state to a write-up that was frozen when it

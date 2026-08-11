@@ -3,13 +3,22 @@ import { describe, expect, it, vi } from "vitest";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import * as actions from "./actions";
+import * as annotations from "./annotations";
 import {
   DAILY_RUN_BUDGET,
   DELEGATION_LEASE_MS,
+  FAILURE_SENTENCES,
   MAX_ACTIVE_PER_LAB,
+  MAX_BATCH_CANDIDATES,
+  MAX_BATCH_QUESTIONS,
+  MAX_CANDIDATES,
+  MAX_SUBJECT_HISTORY,
+  MAX_COLLISION_LINES,
+  MAX_COLLISION_LINE_CHARS,
   MAX_SEARCH_LENGTH,
   actionSubjectIsOpen,
   annotationSubjectIsOpen,
+  buildBatchPrompt,
   cancel,
   capVerdict,
   cascadeForAnnotation,
@@ -22,16 +31,20 @@ import {
   holdsLease,
   leaseExpired,
   listForSubject,
+  parseScoutJson,
+  readModelPayload,
   reduceToSearchQuery,
   request,
   runForBrief,
   store,
   storeEmpty,
   subjectOf,
+  type DelegationModelFailure,
 } from "./delegations";
 import {
   FakeCtx,
   handlerOf,
+  registerFakeScoutModel,
   rowAt,
   seedAnnotation,
   seedLab,
@@ -58,7 +71,7 @@ vi.mock("@convex-dev/auth/server", async (importOriginal) => ({
 
 type Seed = Awaited<ReturnType<typeof seedLab>>;
 
-async function seeded() {
+async function seeded(options: { modelFailure?: DelegationModelFailure } = {}) {
   const ctx = new FakeCtx();
   const seed = await seedLab(ctx);
   ctx
@@ -67,7 +80,8 @@ async function seeded() {
     .register(internal.delegations.store, store)
     .register(internal.delegations.storeEmpty, storeEmpty)
     .register(internal.delegations.fail, fail);
-  return { ctx, seed };
+  const calls = registerFakeScoutModel(ctx, options);
+  return { ctx, seed, calls };
 }
 
 /** A lab-visible note the stub scout will find and cite. */
@@ -99,6 +113,31 @@ async function queue(
 
 const run = (ctx: FakeCtx, delegationId: Id<"delegations">) =>
   handlerOf(runForBrief)(ctx, { delegationIds: [delegationId] } as never);
+
+/** A brief row carrying the collisions section, for a run to read back. */
+async function brief(
+  ctx: FakeCtx,
+  seed: Seed,
+  section: { items: { text: string; annotationIds: Id<"annotations">[] }[] },
+): Promise<Id<"briefs">> {
+  return await ctx.db.insert("briefs", {
+    sessionId: seed.sessionId,
+    labId: seed.labId,
+    paperId: seed.paperId,
+    generation: 1,
+    generatedAt: 1,
+    generatedBy: seed.pi,
+    trigger: "scheduled",
+    sections: [
+      {
+        key: "collisions",
+        heading: "Where the lab collided",
+        droppedCount: 0,
+        items: section.items,
+      },
+    ],
+  });
+}
 
 /* -------------------------------------------------------------------------
  * Query reduction
@@ -567,7 +606,7 @@ describe("a run, start to finish", () => {
     expect(rowAt(stored).supersededAt).toBeTypeOf("number");
   });
 
-  it("runs a batch sequentially and lets one failure not stop the rest", async () => {
+  it("cancels a row whose subject has gone and keeps the rest of the batch", async () => {
     const { ctx, seed } = await seeded();
     await corpus(ctx, seed);
     const good = await queue(ctx, seed);
@@ -582,6 +621,643 @@ describe("a run, start to finish", () => {
 
     expect((await ctx.db.get(orphan))?.status).toBe("cancelled");
     expect((await ctx.db.get(good))?.status).toBe("returned");
+  });
+});
+
+/* -------------------------------------------------------------------------
+ * One call for the whole brief
+ * ---------------------------------------------------------------------- */
+
+/** The material the prompt actually carries, read back the way a model would. */
+function materialOf(prompt: string): {
+  questions: {
+    ref: string;
+    question: string;
+    labels: string[];
+    collisions: { text: string; labels: string[] }[];
+  }[];
+  annotations: { label: string; body: string }[];
+} {
+  const marker = "MATERIAL (JSON):\n";
+  return JSON.parse(prompt.slice(prompt.indexOf(marker) + marker.length)) as {
+    questions: {
+      ref: string;
+      question: string;
+      labels: string[];
+      collisions: { text: string; labels: string[] }[];
+    }[];
+    annotations: { label: string; body: string }[];
+  };
+}
+
+describe("a brief's questions, in one call", () => {
+  it("asks the model once for the whole batch and stores a finding each", async () => {
+    const { ctx, seed, calls } = await seeded();
+    await corpus(ctx, seed);
+    const second = await seedAnnotation(
+      ctx,
+      { ...seed, memberId: seed.member },
+      { type: "open-question", body: "Which cohort ran the second replicate?" },
+    );
+    const first = await queue(ctx, seed);
+    const other = await queue(ctx, seed, { annotationId: second });
+
+    await handlerOf(runForBrief)(ctx, {
+      delegationIds: [first, other],
+    } as never);
+
+    // The cost bound the design asks for: one brief, one call.
+    expect(calls).toHaveLength(1);
+    expect(ctx.db.all("findings")).toHaveLength(2);
+    for (const row of ctx.db.all("delegations")) {
+      expect(row.status).toBe("returned");
+    }
+  });
+
+  it("labels one note once, however many questions retrieved it", async () => {
+    const { ctx, seed, calls } = await seeded();
+    const noteId = await corpus(ctx, seed);
+    const second = await seedAnnotation(
+      ctx,
+      { ...seed, memberId: seed.member },
+      { type: "open-question", body: "Does the 4°C incubation step matter?" },
+    );
+    await handlerOf(runForBrief)(ctx, {
+      delegationIds: [
+        await queue(ctx, seed),
+        await queue(ctx, seed, { annotationId: second }),
+      ],
+    } as never);
+
+    // Two labels for one note would be two names for one thing in a prompt
+    // that has to be unambiguous — and two rows in the join table.
+    const payload = materialOf(rowAt(calls).prompt);
+    const body = (await ctx.db.get(noteId))?.body;
+    const labels = payload.annotations
+      .filter((one) => one.body === body)
+      .map((one) => one.label);
+    expect(labels).toHaveLength(1);
+    // The label space is batch-global, so the one name is a name both
+    // questions may use — that is what makes sharing the layout safe.
+    for (const question of payload.questions) {
+      expect(question.labels).toContain(rowAt(labels));
+    }
+    expect(new Set(payload.annotations.map((one) => one.label)).size).toBe(
+      payload.annotations.length,
+    );
+
+    const stored = ctx.db.all("findings");
+    expect(stored).toHaveLength(2);
+    for (const finding of stored) {
+      expect(finding.items.flatMap((item) => item.citedAnnotationIds)).toContain(
+        noteId,
+      );
+      expect(
+        ctx.db
+          .all("findingCitations")
+          .filter(
+            (row) =>
+              row.findingId === finding._id && row.annotationId === noteId,
+          ),
+      ).toHaveLength(1);
+    }
+  });
+
+  it("fails every claimed row when the one call fails, and only those", async () => {
+    const { ctx, seed } = await seeded({ modelFailure: "model-timeout" });
+    await corpus(ctx, seed);
+    const withCorpus = await queue(ctx, seed);
+    // A row whose subject has gone never reaches the call and is cancelled.
+    const orphan = await queue(ctx, seed, {
+      annotationId: "annotations_404" as Id<"annotations">,
+    });
+
+    await handlerOf(runForBrief)(ctx, {
+      delegationIds: [withCorpus, orphan],
+    } as never);
+
+    expect((await ctx.db.get(withCorpus))?.failure).toBe("model-timeout");
+    expect((await ctx.db.get(orphan))?.status).toBe("cancelled");
+  });
+
+  it("strands no claimed row when a gather throws mid-batch", async () => {
+    // The per-row wrapper this batch replaced caught exactly this. Without a
+    // catch here the action rejects while holding live leases on every row it
+    // had already taken: they sit `running` with nothing coming back, holding
+    // the lab's slots until the sweep notices, and the questions behind them
+    // never start.
+    const { ctx, seed, calls } = await seeded();
+    await corpus(ctx, seed);
+    const second = await seedAnnotation(
+      ctx,
+      { ...seed, memberId: seed.member },
+      { type: "open-question", body: "Which cohort ran the second replicate?" },
+    );
+    const first = await queue(ctx, seed);
+    const other = await queue(ctx, seed, { annotationId: second });
+
+    // A read limit on a lab with a long history, a conflict, a transient
+    // failure — the second row's gather does not come back.
+    let reads = 0;
+    const real = handlerOf(gather);
+    ctx.register(internal.delegations.gather, {
+      _handler: async (inner: unknown, args: unknown) => {
+        reads += 1;
+        if (reads === 2) throw new Error("too many reads in this query");
+        return await real(inner, args as never);
+      },
+    });
+
+    await handlerOf(runForBrief)(ctx, {
+      delegationIds: [first, other],
+    } as never);
+
+    expect(calls).toEqual([]);
+    for (const delegationId of [first, other]) {
+      const row = await ctx.db.get(delegationId);
+      expect(row?.status).toBe("failed");
+      expect(row?.failure).toBe("run-error");
+      // Failing is not stranding: the slot goes back either way.
+      expect(row?.lease).toBeUndefined();
+    }
+  });
+
+  it("still spends nothing on a batch that gathered nothing", async () => {
+    const { ctx, seed, calls } = await seeded();
+    await run(ctx, await queue(ctx, seed));
+    // The refusal belongs before the money is spent: an empty corpus is an
+    // answer, and `storeEmpty` is where it is recorded.
+    expect(calls).toEqual([]);
+    expect(rowAt(ctx.db.all("delegations")).status).toBe("empty");
+  });
+});
+
+/* -------------------------------------------------------------------------
+ * How big one prompt is allowed to get
+ * ---------------------------------------------------------------------- */
+
+describe("the batch's candidate cap", () => {
+  const labId = "labs_1" as Id<"labs">;
+
+  /** A question with `count` lab-visible notes of its own, in rank order. */
+  const question = (index: number, count: number) => ({
+    ref: `Q${index + 1}`,
+    question: `Question ${index}`,
+    candidates: Array.from({ length: count }, (_, rank) => ({
+      _id: `annotations_${index}_${rank}` as Id<"annotations">,
+      labId,
+      paperId: "papers_1" as Id<"papers">,
+      visibility: "lab" as const,
+      type: "note",
+      body: `note ${index}/${rank}`,
+    })),
+  });
+
+  /** The largest batch the caps allow, each question at its own ceiling. */
+  const fullBatch = () =>
+    Array.from({ length: MAX_BATCH_QUESTIONS }, (_, index) =>
+      question(index, MAX_CANDIDATES),
+    );
+
+  it("truncates a union past the cap and still gives every question its best", () => {
+    // The batch the budgets are derived for: eight questions at the
+    // per-question ceiling is 320 distinct notes, and a lab whose notes run
+    // long would put a megabyte in one input.
+    const questions = fullBatch();
+    const gate = buildBatchPrompt(labId, questions);
+    const payload = materialOf(gate.prompt);
+
+    expect(payload.annotations).toHaveLength(MAX_BATCH_CANDIDATES);
+    // Round-robin by rank: every question's best note is laid out before any
+    // question's second, so a cap that bites takes the tail off all of them
+    // rather than the whole of the last one.
+    expect(
+      payload.annotations
+        .slice(0, MAX_BATCH_QUESTIONS)
+        .map((one) => one.body),
+    ).toEqual(questions.map((_, index) => `note ${index}/0`));
+    for (const [index, one] of payload.questions.entries()) {
+      expect(one.labels).toContain(`A${index + 1}`);
+      // The ten the constant's comment promises, at the size it promises it
+      // for — a guarantee derived at eight questions and tested at three is a
+      // guarantee about a batch nobody runs.
+      expect(one.labels.length).toBeGreaterThanOrEqual(
+        Math.floor(MAX_BATCH_CANDIDATES / MAX_BATCH_QUESTIONS),
+      );
+    }
+  });
+
+  it("promises no question a label the prompt does not carry", () => {
+    // The right to cite is derived from the layout, not from the gather. A
+    // question told it may cite a note that fell off the end would be a
+    // question whose every citation of it is dropped as invented — the item
+    // lost and the reason invisible.
+    const gate = buildBatchPrompt(labId, fullBatch());
+    const payload = materialOf(gate.prompt);
+    const laid = new Set(payload.annotations.map((one) => one.label));
+
+    expect(gate.byLabel.size).toBe(payload.annotations.length);
+    for (const one of payload.questions) {
+      for (const label of one.labels) {
+        expect(laid.has(label)).toBe(true);
+        expect(gate.byLabel.has(label)).toBe(true);
+      }
+      expect([...(gate.allowed.get(one.ref) ?? [])]).toEqual(one.labels);
+    }
+  });
+
+  it("counts a finding's coverage off what its question was shown", async () => {
+    // The number the reader is given has to be one the code can stand behind.
+    // Until the cap, "searched" and "shown" were the same set; a truncated
+    // question's gather count is a claim about material the model never saw.
+    const { ctx, seed, calls } = await seeded();
+    const notes: Id<"annotations">[] = [];
+    for (let index = 0; index < 3 * MAX_CANDIDATES; index += 1) {
+      notes.push(
+        await seedAnnotation(
+          ctx,
+          { ...seed, memberId: seed.pi },
+          { type: "note", body: `Note ${index} on the incubation step` },
+        ),
+      );
+    }
+    const subjects = [seed.questionId];
+    for (const which of ["second", "third"]) {
+      subjects.push(
+        await seedAnnotation(
+          ctx,
+          { ...seed, memberId: seed.member },
+          {
+            type: "open-question",
+            body: `Which cohort ran the ${which} replicate?`,
+          },
+        ),
+      );
+    }
+    const delegationIds = [];
+    for (const annotationId of subjects) {
+      delegationIds.push(await queue(ctx, seed, { annotationId }));
+    }
+
+    // Three full gathers, disjoint, so the union really is 120 — which the
+    // in-memory search index cannot produce on its own, since every question
+    // reads the same rows out of it.
+    const rows = await Promise.all(notes.map((id) => ctx.db.get(id)));
+    const slices = new Map(
+      delegationIds.map((id, index) => [
+        id,
+        rows
+          .slice(index * MAX_CANDIDATES, (index + 1) * MAX_CANDIDATES)
+          .flatMap((row) => (row === null ? [] : [row])),
+      ]),
+    );
+    ctx.register(internal.delegations.gather, {
+      _handler: (_inner: unknown, args: { delegationId: Id<"delegations"> }) => ({
+        question: "Does the 4°C incubation step matter?",
+        candidates: slices.get(args.delegationId) ?? [],
+        coverage: {
+          annotationsSearched: MAX_CANDIDATES,
+          papersTouched: 1,
+          queriesRun: 1,
+        },
+      }),
+    });
+
+    await handlerOf(runForBrief)(ctx, { delegationIds } as never);
+
+    const payload = materialOf(rowAt(calls).prompt);
+    expect(payload.annotations).toHaveLength(MAX_BATCH_CANDIDATES);
+    for (const [index, annotationId] of subjects.entries()) {
+      const finding = ctx.db
+        .all("findings")
+        .find((row) => row.annotationId === annotationId);
+      const shown = rowAt(payload.questions, index).labels.length;
+      // Each question gathered forty and was shown a share of eighty.
+      expect(shown).toBeLessThan(MAX_CANDIDATES);
+      expect(finding?.coverage.annotationsSearched).toBe(shown);
+    }
+  });
+
+  it("drops a whole line when one of its sources is not this question's to cite", () => {
+    // The prompt-scope half of whole-item redaction. A line derived from X and
+    // Y whose X is not citable here can only be cited against Y, so the
+    // finding it produces would name Y alone — and X going private afterwards
+    // would move nothing, because both the store-time re-check and read-time
+    // redaction inspect cited ids. The line carries no note body, but it
+    // carries that X's author engaged with this passage, which is what going
+    // private takes back.
+    const mine = question(0, 2);
+    const neighbour = question(1, 2);
+    const ours = rowAt(mine.candidates)._id;
+    const theirs = rowAt(neighbour.candidates)._id;
+    const gate = buildBatchPrompt(labId, [
+      {
+        ...mine,
+        collisionLines: [
+          { text: "Two members, one passage.", annotationIds: [ours, theirs] },
+        ],
+      },
+      neighbour,
+    ]);
+
+    const asked = rowAt(materialOf(gate.prompt).questions);
+    expect(asked.collisions).toEqual([]);
+    // Not a labelling problem: `theirs` is in the batch's vocabulary, and the
+    // half of the line this question *could* cite is in its own. Being able
+    // to name one end is exactly what makes shipping the line unsafe.
+    expect(
+      [...gate.byLabel].some(([, candidate]) => candidate._id === theirs),
+    ).toBe(true);
+    expect(asked.labels).toContain(
+      [...gate.byLabel].find(([, candidate]) => candidate._id === ours)?.[0],
+    );
+  });
+
+  it("keeps a line whose every source the layout labelled", () => {
+    // The other side of the same rule: the gate is a filter on a rare edge,
+    // not a deletion of the section. Both ends of this line are the
+    // question's own, so both are laid out and the line travels.
+    const mine = question(0, 2);
+    const [first, second] = [
+      rowAt(mine.candidates)._id,
+      rowAt(mine.candidates, 1)._id,
+    ];
+    const gate = buildBatchPrompt(labId, [
+      {
+        ...mine,
+        collisionLines: [
+          { text: "Two members, one passage.", annotationIds: [first, second] },
+        ],
+      },
+    ]);
+
+    const line = rowAt(rowAt(materialOf(gate.prompt).questions).collisions);
+    expect(line.labels).toHaveLength(2);
+    expect(line.text).toBe("Two members, one passage.");
+  });
+
+  it("counts the brief read in `queriesRun`, so coverage cannot overstate either", async () => {
+    // `coverage` is the honest null's whole credibility: a reader who is told
+    // nothing was found has to be able to see how hard the machine looked.
+    // Two sources means two queries, and a hardcoded 1 would make the number
+    // a decoration.
+    const { ctx, seed } = await seeded();
+    await corpus(ctx, seed);
+    const briefId = await ctx.db.insert("briefs", {
+      sessionId: seed.sessionId,
+      labId: seed.labId,
+      paperId: seed.paperId,
+      generation: 1,
+      generatedAt: 1,
+      generatedBy: seed.pi,
+      trigger: "scheduled",
+      sections: [],
+    });
+
+    await run(ctx, await queue(ctx, seed, { briefId }));
+    expect(rowAt(ctx.db.all("findings")).coverage.queriesRun).toBe(2);
+  });
+
+  it("labels a collision's sources even when the search fills the budget", async () => {
+    // The reserve, doing the job it exists for. A lab with enough written
+    // down to spend the whole candidate budget on search hits is exactly the
+    // lab with collisions worth reading, so an unreserved budget would delete
+    // the section on the labs it matters most to — deterministically, every
+    // brief, since the corpus that produced it is the same one next time.
+    const { ctx, seed, calls } = await seeded();
+    for (let index = 0; index < MAX_CANDIDATES; index += 1) {
+      await seedAnnotation(
+        ctx,
+        { ...seed, memberId: seed.pi },
+        { type: "note", body: `Note ${index} on the incubation step` },
+      );
+    }
+    const x = await seedAnnotation(
+      ctx,
+      { ...seed, memberId: seed.pi },
+      { body: "Ana on the cold chain." },
+    );
+    const y = await seedAnnotation(
+      ctx,
+      { ...seed, memberId: seed.member },
+      { body: "Ben on the cold chain." },
+    );
+
+    await run(
+      ctx,
+      await queue(ctx, seed, {
+        briefId: await brief(ctx, seed, {
+          items: [
+            {
+              text: "Ana and Ben both left a hypothesis on the same passage.",
+              annotationIds: [x, y],
+            },
+          ],
+        }),
+      }),
+    );
+
+    const asked = rowAt(materialOf(rowAt(calls).prompt).questions);
+    expect(rowAt(asked.collisions).labels).toHaveLength(2);
+    // And the budget really was full: the reserve took its slice out of a
+    // full page rather than out of slack.
+    expect(asked.labels).toHaveLength(MAX_CANDIDATES);
+  });
+
+  it("carries no more of the brief's lines than the brief's own section holds", async () => {
+    // `MAX_COLLISION_LINES` is a bound on what a *stored* row may spend a
+    // prompt on. The assembler caps its own section at six, and this does not
+    // take its word for it — a row is untrusted whatever wrote it.
+    const { ctx, seed, calls } = await seeded();
+    const note = await corpus(ctx, seed);
+    await run(
+      ctx,
+      await queue(ctx, seed, {
+        briefId: await brief(ctx, seed, {
+          items: Array.from({ length: MAX_COLLISION_LINES + 3 }, (_, index) => ({
+            text: `Two members, one passage (${index}).`,
+            annotationIds: [note],
+          })),
+        }),
+      }),
+    );
+
+    expect(
+      rowAt(materialOf(rowAt(calls).prompt).questions).collisions,
+    ).toHaveLength(MAX_COLLISION_LINES);
+  });
+
+  it("cuts a line that arrived longer than a line has any business being", async () => {
+    const { ctx, seed, calls } = await seeded();
+    const note = await corpus(ctx, seed);
+    await run(
+      ctx,
+      await queue(ctx, seed, {
+        briefId: await brief(ctx, seed, {
+          items: [{ text: "x".repeat(2_000), annotationIds: [note] }],
+        }),
+      }),
+    );
+
+    const line = rowAt(rowAt(materialOf(rowAt(calls).prompt).questions).collisions);
+    expect(line.text).toHaveLength(MAX_COLLISION_LINE_CHARS);
+  });
+
+  it("counts one query for a run with no brief behind it", async () => {
+    // The on-demand path (v1.5) has no brief to read, and a run that claimed
+    // two queries on the strength of a source it never had would be lying in
+    // the one field the reader is asked to trust.
+    const { ctx, seed } = await seeded();
+    await corpus(ctx, seed);
+
+    await run(ctx, await queue(ctx, seed));
+    expect(rowAt(ctx.db.all("findings")).coverage.queriesRun).toBe(1);
+  });
+
+  it("leaves a union that fits alone, however many questions share it", () => {
+    const questions = [0, 1].map((index) => question(index, 3));
+    const payload = materialOf(buildBatchPrompt(labId, questions).prompt);
+    expect(payload.annotations).toHaveLength(6);
+    for (const one of payload.questions) expect(one.labels).toHaveLength(3);
+  });
+});
+
+/* -------------------------------------------------------------------------
+ * What a model can do to a run
+ * ---------------------------------------------------------------------- */
+
+describe("readModelPayload", () => {
+  it("reads the text out of the output array, not out of output_text", () => {
+    // A run that spends its whole budget reasoning comes back with an
+    // `output` array and no message in it. The flat convenience property is
+    // something the SDKs assemble, and there is no SDK here.
+    expect(
+      readModelPayload({
+        status: "completed",
+        output: [
+          { type: "reasoning", content: [] },
+          { type: "message", content: [{ type: "output_text", text: "{}" }] },
+        ],
+      }),
+    ).toEqual({ ok: true, text: "{}" });
+  });
+
+  it("refuses a truncated answer rather than storing half of one", () => {
+    expect(
+      readModelPayload({
+        status: "incomplete",
+        incomplete_details: { reason: "max_output_tokens" },
+      }),
+    ).toEqual({ ok: false, failure: "over-budget" });
+  });
+
+  it("calls a failed run and a refusal what they are", () => {
+    expect(
+      readModelPayload({ status: "failed", error: { message: "boom" } }),
+    ).toEqual({ ok: false, failure: "model-unavailable" });
+    expect(
+      readModelPayload({
+        status: "completed",
+        output: [
+          { type: "message", content: [{ type: "refusal", refusal: "no" }] },
+        ],
+      }),
+    ).toEqual({ ok: false, failure: "model-output-invalid" });
+  });
+
+  it("takes the refusal over the answer the same message also wrote", () => {
+    // A model may refuse *and* write something. Without the refusal branch
+    // this payload comes back `{ok: true, text: "The lab has written…"}` and
+    // a refusal walks into the citation gate dressed as an answer — so the
+    // branch needs a case where the two parts disagree, not one where the
+    // refusal is the only thing there.
+    expect(
+      readModelPayload({
+        status: "completed",
+        output: [
+          {
+            type: "message",
+            content: [
+              { type: "refusal", refusal: "no" },
+              { type: "output_text", text: '{"items":[]}' },
+            ],
+          },
+        ],
+      }),
+    ).toEqual({ ok: false, failure: "model-output-invalid" });
+  });
+
+  it("treats an empty answer as unreadable output", () => {
+    expect(readModelPayload({ status: "completed", output: [] })).toEqual({
+      ok: false,
+      failure: "model-output-invalid",
+    });
+  });
+});
+
+describe("parseScoutJson", () => {
+  it("survives a fenced answer, because a model that was told bare JSON may fence anyway", () => {
+    expect(parseScoutJson('```json\n{"items":[]}\n```')).toEqual({ items: [] });
+  });
+
+  it("is null for anything that is not an object", () => {
+    expect(parseScoutJson("not json")).toBeNull();
+    expect(parseScoutJson("[1,2]")).toBeNull();
+  });
+});
+
+describe("a model call that does not come back with items", () => {
+  const cases = [
+    ["model-unavailable", "couldn't reach"],
+    ["model-timeout", "in time"],
+    ["model-output-invalid", "couldn't read"],
+    ["over-budget", "more to read"],
+  ] as const;
+
+  for (const [failure] of cases) {
+    it(`fails the run as ${failure}, stores nothing, and frees the slot`, async () => {
+      const { ctx, seed } = await seeded({ modelFailure: failure });
+      await corpus(ctx, seed);
+
+      await run(ctx, await queue(ctx, seed));
+
+      const row = rowAt(ctx.db.all("delegations"));
+      expect(row.status).toBe("failed");
+      expect(row.failure).toBe(failure);
+      // The sentence the reader gets is ours, not the model's.
+      expect(row.failureReason).toBe(FAILURE_SENTENCES[failure]);
+      expect(row.lease).toBeUndefined();
+      expect(ctx.db.all("findings")).toEqual([]);
+      // The ledger gets the vocabulary, never the sentence.
+      const failed = ctx.db
+        .all("events")
+        .find((event) => event.type === "delegation.failed");
+      expect(failed?.reason).toBe(failure);
+      expect(JSON.stringify(failed)).not.toContain(FAILURE_SENTENCES[failure]);
+    });
+  }
+
+  it("gives every new failure a sentence written by us", () => {
+    for (const [failure] of cases) {
+      const sentence = FAILURE_SENTENCES[failure];
+      expect(sentence.length).toBeGreaterThan(0);
+      // C4 renders these verbatim, and a reader is owed what happened to
+      // their question and what to do about it.
+      expect(sentence).toMatch(/Nothing was stored/);
+    }
+  });
+
+  it("does not call the model twice when the run is retried", async () => {
+    // §6.2, structurally: the second attempt finds the row `running` with a
+    // live lease and exits before the seam.
+    const { ctx, seed, calls } = await seeded();
+    await corpus(ctx, seed);
+    const delegationId = await queue(ctx, seed);
+
+    await run(ctx, delegationId);
+    await run(ctx, delegationId);
+
+    expect(calls).toHaveLength(1);
   });
 });
 
@@ -1085,6 +1761,66 @@ describe("the cascade", () => {
     expect((await ctx.db.get(inFlight))?.cancellation).toBe("subject-withdrawn");
   });
 
+  it("supersedes the newest older finding on a long-scouted question", async () => {
+    // The same ascending-read bug on the other subject scan. It only shows
+    // past `MAX_SUBJECT_HISTORY` *older* findings: below that the window
+    // covers everything and either direction works, and above it an ascending
+    // read stops exactly short of the one finding that was the current answer
+    // — leaving two rows claiming to be it.
+    const { ctx, seed } = await seeded();
+    await corpus(ctx, seed);
+    const olds: Id<"findings">[] = [];
+    for (let index = 0; index < MAX_SUBJECT_HISTORY + 1; index += 1) {
+      olds.push(
+        await ctx.db.insert("findings", {
+          labId: seed.labId,
+          delegationId: await queue(ctx, seed, { status: "returned" }),
+          agentKind: "scout.corpus",
+          annotationId: seed.questionId,
+          items: [
+            {
+              text: `An older answer (${index}).`,
+              citedAnnotationIds: [],
+              citedPaperIds: [],
+            },
+          ],
+          coverage: { annotationsSearched: 1, papersTouched: 1, queriesRun: 1 },
+          droppedForCitation: 0,
+          model: "stub.scout.v0",
+          generatedAt: index + 1,
+        }),
+      );
+    }
+
+    await run(ctx, await queue(ctx, seed));
+
+    const newestOld = rowAt(olds, olds.length - 1);
+    expect((await ctx.db.get(newestOld))?.supersededAt).toBeDefined();
+  });
+
+  it("still reaches the live run on a question with a long history behind it", async () => {
+    // Convex orders an index read ascending by default, so an unordered
+    // `take(MAX_SUBJECT_HISTORY)` reads the *oldest* fifty. Past that many
+    // finished runs, the row this has to reach — the one still going, which
+    // is always the newest — falls outside the window, and taking the note
+    // back would leave a machine working on it holding a live lease, with
+    // nothing in the record to say so.
+    const { ctx, seed } = await seeded();
+    for (let index = 0; index < MAX_SUBJECT_HISTORY; index += 1) {
+      await queue(ctx, seed, { status: "returned", settledAt: 1 });
+    }
+    const inFlight = await queue(ctx, seed);
+
+    const result = await cascadeForAnnotation(
+      ctx as never,
+      seed.questionId,
+      seed.pi,
+    );
+
+    expect(result.cancelled).toBe(1);
+    expect((await ctx.db.get(inFlight))?.status).toBe("cancelled");
+  });
+
   it("writes one join row per distinct note, however many items cite it", () => {
     const a = "annotations_1" as Id<"annotations">;
     const b = "annotations_2" as Id<"annotations">;
@@ -1094,5 +1830,83 @@ describe("the cascade", () => {
         { text: "", citedAnnotationIds: [a], citedPaperIds: [] },
       ]),
     ).toEqual([a, b]);
+  });
+});
+
+describe("a note taken back stops the run on it", () => {
+  it("cancels the active delegation when its subject is made private", async () => {
+    const { ctx, seed } = await seeded();
+    ctx.auth = { userId: seed.pi };
+    const delegationId = await queue(ctx, seed);
+
+    await handlerOf(annotations.setVisibility)(ctx, {
+      annotationId: seed.questionId,
+      visibility: "private",
+    } as never);
+
+    const row = rowAt(ctx.db.all("delegations"));
+    expect(row.status).toBe("cancelled");
+    expect(row.cancellation).toBe("subject-withdrawn");
+    // The lease is cleared, which is what makes the in-flight run's store a
+    // no-op rather than a race.
+    expect(row.lease).toBeUndefined();
+    expect((await ctx.db.get(delegationId))?.settledAt).toBeTypeOf("number");
+  });
+
+  it("cancels it when the note is withdrawn outright", async () => {
+    // `annotations.remove` hard-deletes a note that has no replies, so the
+    // cascade has to run *before* the delete — after it there is no row for
+    // `cancelRow` to read a placement out of.
+    const { ctx, seed } = await seeded();
+    ctx.auth = { userId: seed.pi };
+    await queue(ctx, seed);
+
+    await handlerOf(annotations.remove)(ctx, {
+      annotationId: seed.questionId,
+    } as never);
+
+    expect(ctx.db.all("annotations").map((one) => one._id)).not.toContain(
+      seed.questionId,
+    );
+    expect(rowAt(ctx.db.all("delegations")).status).toBe("cancelled");
+    // Placement is what the before-the-delete ordering buys: run the cascade
+    // after the delete and the event still records, but with nowhere to read
+    // a paper out of.
+    expect(
+      ctx.db.all("events").find((e) => e.type === "delegation.cancelled")
+        ?.paperId,
+    ).toBe(seed.paperId);
+  });
+
+  it("leaves a finding that already returned alone", async () => {
+    // A finding that informed a settlement is exactly the artifact somebody
+    // will want to read afterwards, and read-time whole-item redaction is what
+    // protects the withdrawn note inside it. `supersededAt` means "a newer run
+    // returned" and nothing else; overloading it here would make the one field
+    // that dates a finding mean two things.
+    const { ctx, seed } = await seeded();
+    await corpus(ctx, seed);
+    await run(ctx, await queue(ctx, seed));
+    // Requested by someone other than the acting PI, so the actor assertion
+    // below can tell "the human who acted" from `requestedBy` — cancelRow
+    // falls back to the requester when no actor is passed, and with both set
+    // to the PI that fallback would satisfy the assertion for the wrong
+    // reason.
+    const pending = await queue(ctx, seed, { requestedBy: seed.member });
+    ctx.auth = { userId: seed.pi };
+
+    await handlerOf(annotations.setVisibility)(ctx, {
+      annotationId: seed.questionId,
+      visibility: "private",
+    } as never);
+
+    expect(rowAt(ctx.db.all("findings")).supersededAt).toBeUndefined();
+    expect((await ctx.db.get(pending))?.status).toBe("cancelled");
+    // The ledger records the cancellation with the human who took the note
+    // back, not with the machine that noticed.
+    const cancelled = ctx.db
+      .all("events")
+      .find((event) => event.type === "delegation.cancelled");
+    expect(cancelled?.actorId).toBe(seed.pi);
   });
 });

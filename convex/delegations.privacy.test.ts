@@ -5,6 +5,7 @@ import type { Id } from "./_generated/dataModel";
 import {
   FakeCtx,
   handlerOf,
+  registerFakeScoutModel,
   rowAt,
   seedAnnotation,
   seedLab,
@@ -137,8 +138,17 @@ async function world() {
   };
 }
 
-/** The five internal steps a run is made of, wired to the real references. */
+/**
+ * The steps a run is made of, wired to the real references — including the
+ * model, which is the only one of them that is faked.
+ *
+ * Every assertion in this file was written against a run whose model was a
+ * function call inside the action. They all still hold against a run whose
+ * model is a network call behind an action boundary, and that is the point:
+ * the seam moved and the constitution did not.
+ */
 function wire(ctx: FakeCtx): FakeCtx {
+  registerFakeScoutModel(ctx);
   return ctx
     .register(internal.delegations.claim, claim)
     .register(internal.delegations.gather, gather)
@@ -226,6 +236,226 @@ describe("the retrieval gate", () => {
     // the honest-null render depends on this being true.
     expect(gathered.coverage.annotationsSearched).toBe(1);
     expect(gathered.coverage.papersTouched).toBe(1);
+  });
+});
+
+/* -------------------------------------------------------------------------
+ * 1b. The brief the run came from
+ * ---------------------------------------------------------------------- */
+
+describe("the brief's collision lines", () => {
+  /** The payload the prompt carries, read back the way a model would. */
+  function materialOf(prompt: string): {
+    questions: {
+      labels: string[];
+      collisions: { text: string; labels: string[] }[];
+    }[];
+    annotations: { label: string; body: string }[];
+  } {
+    const marker = "MATERIAL (JSON):\n";
+    return JSON.parse(prompt.slice(prompt.indexOf(marker) + marker.length)) as {
+      questions: {
+        labels: string[];
+        collisions: { text: string; labels: string[] }[];
+      }[];
+      annotations: { label: string; body: string }[];
+    };
+  }
+
+  /** A brief whose collision line was built from two notes, one of which has since gone private. */
+  async function briefed(over: { secondVisibility: "private" | "lab" }) {
+    const built = await world();
+    const { ctx, seed, shared } = built;
+    // A paper of its own, so a candidate that arrived through the brief is
+    // distinguishable in `coverage` from one the search found: the collision
+    // is a signal about the *lab*, and the passages it joins need not be in
+    // the document this run's question sits on.
+    const otherPaperId = await ctx.db.insert("papers", {
+      labId: seed.labId,
+      title: "The preprint the method came from",
+      addedBy: seed.pi,
+      ingestStatus: "ready",
+    });
+    const partner = await seedAnnotation(
+      ctx,
+      { ...seed, memberId: seed.member },
+      {
+        body: `${SECRET} in a collision`,
+        visibility: over.secondVisibility,
+        paperId: otherPaperId,
+      },
+    );
+    const briefId = await ctx.db.insert("briefs", {
+      sessionId: seed.sessionId,
+      labId: seed.labId,
+      paperId: seed.paperId,
+      generation: 1,
+      generatedAt: 1,
+      generatedBy: seed.pi,
+      trigger: "scheduled",
+      sections: [
+        {
+          key: "collisions",
+          heading: "Where the lab disagrees",
+          droppedCount: 0,
+          items: [
+            {
+              // Composed prose: it carries both members' names and both
+              // bodies. This is the string the row holds and the string
+              // `briefs.getForSession` redacts on read.
+              text: `Ana Ruiz on the incubation step, against Ben Okafor: ${SECRET} in a collision`,
+              annotationIds: [shared, partner],
+              pairType: "possible answer",
+            },
+          ],
+        },
+      ],
+    });
+    return { ...built, partner, briefId };
+  }
+
+  /** A queued run pointed at the seeded question, carrying the brief it came from. */
+  async function queueFrom(
+    ctx: FakeCtx,
+    seed: Awaited<ReturnType<typeof seedLab>>,
+    briefId: Id<"briefs">,
+    annotationId: Id<"annotations"> = seed.questionId,
+  ) {
+    return ctx.db.insert("delegations", {
+      labId: seed.labId,
+      agentKind: "scout.corpus",
+      trigger: "brief",
+      briefId,
+      annotationId,
+      requestedBy: seed.pi,
+      requestedAt: Date.now(),
+      status: "queued",
+    });
+  }
+
+  /** The line the brief drew, rewritten to name whichever notes a test wants. */
+  async function lineAgainst(
+    ctx: FakeCtx,
+    briefId: Id<"briefs">,
+    annotationIds: Id<"annotations">[],
+  ) {
+    const brief = await ctx.db.get(briefId);
+    const section = rowAt(brief?.sections ?? []);
+    await ctx.db.patch(briefId, {
+      sections: [
+        { ...section, items: [{ ...rowAt(section.items), annotationIds }] },
+      ],
+    });
+  }
+
+  it("drops a whole line when one of its notes has stopped being shared", async () => {
+    const { ctx, seed, briefId } = await briefed({ secondVisibility: "private" });
+    wire(ctx);
+    const delegationId = await queueFrom(ctx, seed, briefId);
+    const calls = registerFakeScoutModel(ctx);
+
+    await handlerOf(runForBrief)(ctx, { delegationIds: [delegationId] } as never);
+
+    // The line is the leak: the row still holds prose built out of a note its
+    // author has taken back, and reading the row without re-checking the
+    // citations is exactly the way around `visibility: "private"` that
+    // `briefs.getForSession` closes on every read.
+    expect(JSON.stringify(calls)).not.toContain(SECRET);
+    expect(
+      JSON.stringify([ctx.db.all("findings"), ctx.db.all("events")]),
+    ).not.toContain(SECRET);
+  });
+
+  it("carries a line whose notes are all still shared, and makes them citable", async () => {
+    const { ctx, seed, briefId, partner } = await briefed({ secondVisibility: "lab" });
+    wire(ctx);
+    const delegationId = await queueFrom(ctx, seed, briefId);
+    const calls = registerFakeScoutModel(ctx);
+
+    await handlerOf(runForBrief)(ctx, { delegationIds: [delegationId] } as never);
+
+    // The collision is a signal the search index cannot produce: two members
+    // wrote on the same passage. Its notes are labelled material like any
+    // other, so a finding can rest on them.
+    expect(rowAt(calls).prompt).toContain("against Ben Okafor");
+    const cited = ctx.db
+      .all("findings")
+      .flatMap((finding) => finding.items.flatMap((item) => item.citedAnnotationIds));
+    expect(cited).toContain(partner);
+  });
+
+  it("keeps a line drawn against the run's own question", async () => {
+    // The gold pair type — `possible answer`, a definition against an open
+    // question — routinely has the carried-forward question this run *is*
+    // as one of its two ends. Dropping those lines would delete precisely the
+    // collisions §6.3 wants read. "A note never cites itself" is a rule about
+    // rows and does not transfer: `collisionLine` composes names, a phrase,
+    // the paper's title, a page and a quote from the *paper*, so the line
+    // carries no word of the subject's own body.
+    const { ctx, seed, briefId, partner } = await briefed({ secondVisibility: "lab" });
+    wire(ctx);
+    await lineAgainst(ctx, briefId, [seed.questionId, partner]);
+    const delegationId = await queueFrom(ctx, seed, briefId);
+    const calls = registerFakeScoutModel(ctx);
+
+    await handlerOf(runForBrief)(ctx, { delegationIds: [delegationId] } as never);
+
+    const asked = rowAt(materialOf(rowAt(calls).prompt).questions);
+    const line = rowAt(asked.collisions);
+    expect(line.text).toContain("against Ben Okafor");
+    // The other end, and only the other end: the question is still not
+    // offered to the model as evidence about itself.
+    expect(line.labels).toHaveLength(1);
+    const cited = ctx.db
+      .all("findings")
+      .flatMap((finding) => finding.items.flatMap((item) => item.citedAnnotationIds));
+    expect(cited).toContain(partner);
+    expect(cited).not.toContain(seed.questionId);
+  });
+
+  it("brings in a note the search itself never returned", async () => {
+    const { ctx, seed, briefId, partner } = await briefed({ secondVisibility: "lab" });
+    wire(ctx);
+    // A subject made entirely of stopwords reduces to no query at all, which
+    // is `gatherLabVisible`'s own documented early return. The search
+    // therefore contributes nothing and every candidate this run holds came
+    // off the brief — without which the collision is a line the model can
+    // read and never cite.
+    const mute = await seedAnnotation(
+      ctx,
+      { ...seed, memberId: seed.pi },
+      { type: "open-question", body: "Why is it that they are what they are?" },
+    );
+    const delegationId = await queueFrom(ctx, seed, briefId, mute);
+    const calls = registerFakeScoutModel(ctx);
+
+    await handlerOf(runForBrief)(ctx, { delegationIds: [delegationId] } as never);
+
+    expect(ctx.db.reads.some((read) => read.index === "search_body")).toBe(false);
+    expect(materialOf(rowAt(calls).prompt).annotations).toHaveLength(2);
+    const finding = rowAt(ctx.db.all("findings"));
+    expect(
+      finding.items.flatMap((item) => item.citedAnnotationIds),
+    ).toContain(partner);
+    // A paper the search never touched, counted honestly, and one query for
+    // the brief where the search ran none.
+    expect(finding.coverage.papersTouched).toBe(2);
+    expect(finding.coverage.queriesRun).toBe(1);
+  });
+
+  it("does not read a brief belonging to another lab", async () => {
+    // A stored `briefId` is a claim about a row, like every other stored id,
+    // and this one crosses a table. A run whose `briefId` points somewhere
+    // else reads nothing rather than reading it.
+    const { ctx, seed, briefId } = await briefed({ secondVisibility: "lab" });
+    wire(ctx);
+    await ctx.db.patch(briefId, { labId: "labs_999" as Id<"labs"> });
+    const delegationId = await queueFrom(ctx, seed, briefId);
+    const calls = registerFakeScoutModel(ctx);
+
+    await handlerOf(runForBrief)(ctx, { delegationIds: [delegationId] } as never);
+
+    expect(rowAt(calls).prompt).not.toContain("against Ben Okafor");
   });
 });
 
@@ -454,6 +684,120 @@ describe("a full run over a corpus containing private notes", () => {
 });
 
 /* -------------------------------------------------------------------------
+ * 3b. One prompt, and still one question's material per finding
+ * ---------------------------------------------------------------------- */
+
+describe("a batch of two questions", () => {
+  /** Queue a run whose subject is `annotationId`, in `labId`. */
+  async function queueIn(
+    ctx: FakeCtx,
+    seed: Awaited<ReturnType<typeof seedLab>>,
+    labId: Id<"labs">,
+    annotationId: Id<"annotations">,
+  ) {
+    return ctx.db.insert("delegations", {
+      labId,
+      agentKind: "scout.corpus",
+      trigger: "brief",
+      annotationId,
+      requestedBy: seed.pi,
+      requestedAt: Date.now(),
+      status: "queued",
+    });
+  }
+
+  it("lets no question cite the material only the other one gathered", async () => {
+    // Labels are batch-global so the prompt is unambiguous; the right to cite
+    // is per-question, because a finding's `coverage` describes *its* gather
+    // and an item resting on somebody else's retrieval would make that number
+    // one the code cannot stand behind.
+    const { ctx, seed } = await world();
+    wire(ctx);
+    const secondQuestion = await seedAnnotation(
+      ctx,
+      { ...seed, memberId: seed.member },
+      { type: "open-question", body: "Which cohort ran the second replicate?" },
+    );
+    // The gather excludes each run's own subject, so each question's material
+    // contains the *other* question's note and not its own.
+    const first = await queueIn(ctx, seed, seed.labId, seed.questionId);
+    const second = await queueIn(ctx, seed, seed.labId, secondQuestion);
+
+    ctx.register(internal.delegations.callScoutModel, {
+      _handler: (_c: unknown, args: { prompt: string }) => {
+        const payload = JSON.parse(
+          args.prompt.slice(
+            args.prompt.indexOf("MATERIAL (JSON):\n") + "MATERIAL (JSON):\n".length,
+          ),
+        ) as { questions: { ref: string; labels: string[] }[] };
+        const [q1, q2] = payload.questions;
+        if (q1 === undefined || q2 === undefined) throw new Error("expected two questions");
+        // Found rather than hardcoded: which label lands on which note is the
+        // batch's business, and a test that guessed would be asserting the
+        // ordering instead of the gate.
+        const onlyTheOthers = q2.labels.find((label) => !q1.labels.includes(label));
+        return {
+          ok: true,
+          model: "test",
+          text: JSON.stringify({
+            answers: [
+              { ref: q1.ref, items: [{ text: `Borrowed [${onlyTheOthers}].`, citations: [onlyTheOthers] }] },
+              { ref: q2.ref, items: [{ text: `Honest [${q2.labels[0]}].`, citations: [q2.labels[0]] }] },
+            ],
+          }),
+        };
+      },
+    });
+
+    await handlerOf(runForBrief)(ctx, {
+      delegationIds: [first, second],
+    } as never);
+
+    expect(ctx.db.all("findings")).toHaveLength(1);
+    expect((await ctx.db.get(first))?.failure).toBe("nothing-citable");
+    expect((await ctx.db.get(second))?.status).toBe("returned");
+  });
+
+  it("refuses a batch whose rows are not all one lab's", async () => {
+    // A batch is one brief's questions and a brief belongs to one lab. Two
+    // labs' writing in one prompt is the disclosure this whole file exists to
+    // prevent, so the batch stops rather than being quietly split in two.
+    const { ctx, seed } = await world();
+    wire(ctx);
+    const strangersQuestion = await seedAnnotation(
+      ctx,
+      { ...seed, memberId: seed.member },
+      {
+        type: "open-question",
+        body: "Whose incubation protocol is this?",
+        labId: "labs_999" as Id<"labs">,
+      },
+    );
+    const mine = await queueIn(ctx, seed, seed.labId, seed.questionId);
+    const theirs = await queueIn(
+      ctx,
+      seed,
+      "labs_999" as Id<"labs">,
+      strangersQuestion,
+    );
+    const calls = registerFakeScoutModel(ctx);
+
+    await handlerOf(runForBrief)(ctx, {
+      delegationIds: [mine, theirs],
+    } as never);
+
+    expect(calls).toEqual([]);
+    for (const id of [mine, theirs]) {
+      const row = await ctx.db.get(id);
+      expect(row?.status).toBe("failed");
+      expect(row?.failure).toBe("run-error");
+      // Failing does not mean stranding: the lease is cleared either way.
+      expect(row?.lease).toBeUndefined();
+    }
+  });
+});
+
+/* -------------------------------------------------------------------------
  * 4. Whole-item redaction
  * ---------------------------------------------------------------------- */
 
@@ -601,6 +945,62 @@ describe("whole-item redaction", () => {
     ).toBeNull();
   });
 
+  it("kills a two-citation item at store time when only one citation went", async () => {
+    // The store-time twin of the rule at the top of this section, and the
+    // case a single-citation fixture cannot see: relax `every` to `some` here
+    // and an item drawn from a withdrawn note and a surviving one is written
+    // to the table, carrying the withdrawn note's substance in a sentence
+    // that will render. The item beside it is what proves the finding still
+    // lands — this is whole-item redaction, not fail-the-batch.
+    const ctx = new FakeCtx();
+    const seed = await seedLab(ctx);
+    const kept = await seedAnnotation(ctx, { ...seed, memberId: seed.pi });
+    const taken = await seedAnnotation(ctx, { ...seed, memberId: seed.member });
+    const now = Date.now();
+    const delegationId = await ctx.db.insert("delegations", {
+      labId: seed.labId,
+      agentKind: "scout.corpus",
+      trigger: "manual",
+      annotationId: seed.questionId,
+      requestedBy: seed.pi,
+      requestedAt: now,
+      status: "running",
+      lease: "lease-1",
+      leaseAcquiredAt: now,
+    });
+    await ctx.db.patch(taken as string, { visibility: "private" });
+
+    await handlerOf(store)(ctx, {
+      delegationId,
+      lease: "lease-1",
+      items: [
+        {
+          text: "Resting on the note that survived.",
+          citedAnnotationIds: [kept],
+          citedPaperIds: [seed.paperId],
+        },
+        {
+          text: "Resting on both, one of which has gone.",
+          citedAnnotationIds: [kept, taken],
+          citedPaperIds: [seed.paperId],
+        },
+      ],
+      coverage: { annotationsSearched: 2, papersTouched: 1, queriesRun: 1 },
+      droppedForCitation: 0,
+      model: "stub.scout.v0",
+    } as never);
+
+    const finding = rowAt(ctx.db.all("findings"));
+    expect(finding.items.map((item) => item.text)).toEqual([
+      "Resting on the note that survived.",
+    ]);
+    expect(finding.droppedForCitation).toBe(1);
+    // And the join table never learns the withdrawn id either.
+    expect(
+      ctx.db.all("findingCitations").map((row) => row.annotationId),
+    ).toEqual([kept]);
+  });
+
   it("refuses to store an item whose citation went private mid-run", async () => {
     const ctx = new FakeCtx();
     const seed = await seedLab(ctx);
@@ -738,6 +1138,21 @@ describe("the citation gate", () => {
     expect(() => sanitizeFindingItems(null, byLabel)).toThrow(
       MALFORMED_OUTPUT_REFUSAL,
     );
+  });
+
+  it("gates a bare list of items as well as the envelope one arrives in", () => {
+    // A batched answer arrives as each question's `items` array, taken out of
+    // the envelope before it gets here; a wrapper around the same array is the
+    // other shape a model might send. Both are the same claim about the same
+    // material, and only the packaging differs — a gate that read one shape
+    // would make the batching decision for the caller.
+    const { byLabel } = material(2);
+    const result = sanitizeFindingItems(
+      [{ text: "Straight off the batch [A1].", citations: ["A1"] }],
+      byLabel,
+    );
+    expect(rowAt(result.items).citedAnnotationIds).toEqual(["annotations_1"]);
+    expect(result.droppedForCitation).toBe(0);
   });
 
   it("records a label the sentence leans on but the citation list forgot", () => {

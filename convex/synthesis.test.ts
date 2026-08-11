@@ -13,7 +13,6 @@ import {
   fence,
   isSameApproval,
   isSameDraft,
-  isStillShared,
   nameIndex,
   sanitizeSections,
 } from "./synthesis";
@@ -26,9 +25,10 @@ import {
  * These tests are the guarantee, since nothing downstream re-checks any of it.
  *
  * And the read back out: a stored write-up is a snapshot of a margin that
- * keeps moving, so `isStillShared` and `applyWithdrawals` decide what a
- * synthesis is still allowed to say once the notes behind it have been
- * withdrawn or made private.
+ * keeps moving, so `applyWithdrawals` decides what a synthesis is still
+ * allowed to say once the notes behind it have been withdrawn or made
+ * private. The predicate it is asked with is shared by every surface and
+ * pinned next to it, in `lib/citations/visibility.test.ts`.
  *
  * Then the handover to a person: `assembleMarkdown` is the one-way door from
  * checkable sections to editable prose, and `countWithdrawn` is what tells a
@@ -282,33 +282,6 @@ describe("sanitizeSections", () => {
       "First.",
       "Second.",
     ]);
-  });
-});
-
-describe("isStillShared", () => {
-  const labId = "lab_1" as Id<"labs">;
-  const shared = { labId, visibility: "lab" as const, deletedAt: undefined };
-
-  it("keeps a note that is still there and still lab-visible", () => {
-    expect(isStillShared(shared, labId)).toBe(true);
-  });
-
-  it("treats a withdrawn note as gone", () => {
-    expect(isStillShared({ ...shared, deletedAt: 1 }, labId)).toBe(false);
-  });
-
-  it("treats a note flipped back to private exactly like a withdrawn one", () => {
-    expect(isStillShared({ ...shared, visibility: "private" }, labId)).toBe(
-      false,
-    );
-  });
-
-  it("treats a row that no longer exists as gone", () => {
-    expect(isStillShared(null, labId)).toBe(false);
-  });
-
-  it("refuses a citation that points outside the reader's lab", () => {
-    expect(isStillShared(shared, "lab_2" as Id<"labs">)).toBe(false);
   });
 });
 
