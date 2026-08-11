@@ -40,10 +40,15 @@ import Link from "next/link";
  * ## The check this does not repeat
  *
  * `brief.tsx` re-applies the server's redaction rule against the margin it can
- * see, because every brief citation is on this paper. A finding's are not: the
- * gather searches the lab's whole corpus, so "not in my rows" here means
- * "another paper" far more often than it means "withdrawn", and a client
- * running that test would blank the feature. `findings.toView` re-resolves
+ * see, because a brief citation is nearly always on this paper — the exception
+ * being the far half of a cross-paper collision, which the panel defers on and
+ * takes the server's own verdict for, one line at a time
+ * (`lib/brief/prep.ts`). A finding's citations are the opposite case, not the
+ * exceptional one: the gather searches the lab's whole corpus, so "not in my
+ * rows" here means "another paper" far more often than it means "withdrawn",
+ * and a client running that test would blank the feature. There is no
+ * per-citation deferral to fall back on and nothing worth re-checking, so this
+ * side runs no test at all. `findings.toView` re-resolves
  * every citation on every read and is documented as the defense of record;
  * this renders what it was handed and counts what it cannot name.
  */

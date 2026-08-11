@@ -219,4 +219,28 @@ describe("lineCitations", () => {
       ),
     ).toEqual({ withdrawn: true, cited: [] });
   });
+
+  it("holds the line back when the far half has gone and the near one has not", () => {
+    // The case deferral cannot see. Every citation this page can judge is
+    // still there, so the local test has nothing to object to — and the line's
+    // text is already the redaction sentence, because the server judged the
+    // far note lab-wide and held the line back. Without its verdict the panel
+    // would draw a gold-pair label and citation numbers around it.
+    expect(
+      lineCitations(
+        {
+          annotationIds: ["a1", "far"],
+          crossPaperIds: ["far"],
+          redacted: true,
+        },
+        visible,
+      ),
+    ).toEqual({ withdrawn: true, cited: [] });
+  });
+
+  it("takes the server's verdict on a line whose citations are all on this paper", () => {
+    expect(
+      lineCitations({ annotationIds: ["a1", "a2"], redacted: true }, visible),
+    ).toEqual({ withdrawn: true, cited: [] });
+  });
 });

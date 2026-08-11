@@ -44,8 +44,11 @@ import { isStillShared } from "../lib/citations/visibility";
  *
  * A stored citation is a claim about a row, and the margin moves underneath it:
  * notes get withdrawn and members flip one back to private. So `getForSession`
- * re-resolves every cited id on read and redacts a line whose notes have all
- * gone, using the same `isStillShared` predicate every other surface applies
+ * re-resolves every cited id on read and redacts a line the moment *any* one
+ * of its notes has gone — whole-item redaction, the stricter of this
+ * codebase's two rules (`lib/citations/redaction.ts`), because a brief line is
+ * the notes themselves and not a paraphrase of them. It uses the same
+ * `isStillShared` predicate every other surface applies
  * (`lib/citations/visibility.ts`) — imported rather than restated, because a
  * privacy rule with two definitions has one that is out of date.
  *
@@ -115,6 +118,25 @@ const briefItem = v.object({
   pairType: v.optional(v.string()),
   /** See the schema — the far half of a cross-paper line. */
   crossPaperIds: v.optional(v.array(v.id("annotations"))),
+  /**
+   * This read's own verdict: the line was held back, and its `text` is the
+   * marker rather than the lab's writing.
+   *
+   * Computed on the way out and never stored — the row is not redacted, the
+   * *answer* is. It exists because the client cannot reach the verdict on its
+   * own: a cross-paper line cites a note on a paper the panel has no
+   * subscription to, so a browser re-running the redaction test sees "not in
+   * my rows" for a note that may be perfectly live or long withdrawn, and has
+   * to defer (`lib/brief/prep.ts`). Deferring on the id while trusting the
+   * text is how a redacted line comes to be drawn with its gold-pair label and
+   * its citation numbers around a sentence saying the notes are gone. So the
+   * server says so in a field, rather than leaving a reader to infer it from
+   * prose it would have to match by hand.
+   *
+   * Set only when true, the way `crossPaperCapped` is: absent means the line
+   * stands, which is the same thing `false` would mean.
+   */
+  redacted: v.optional(v.boolean()),
   fromSessionId: v.optional(v.id("sessions")),
   fromSessionAt: v.optional(v.number()),
 });
@@ -565,6 +587,17 @@ async function stillSharedAmong(
 type StoredSection = Doc<"briefs">["sections"][number];
 
 /**
+ * A section on its way to a reader: the stored shape, plus this read's verdict.
+ *
+ * The extra field is view-only by construction — nothing writes it, and a
+ * section that came off the row simply doesn't have it yet. See `briefItem`
+ * above for why the verdict travels as a field rather than as a sentence the
+ * client would have to recognise.
+ */
+type ViewItem = StoredSection["items"][number] & { redacted?: true };
+type ViewSection = Omit<StoredSection, "items"> & { items: ViewItem[] };
+
+/**
  * Re-apply the margin's current state to an assembly that was frozen when it
  * was written.
  *
@@ -586,18 +619,24 @@ type StoredSection = Doc<"briefs">["sections"][number];
  * The ids are left in place. The citations are what a redacted line still
  * honestly is — a line was here, resting on these — and the caller counts
  * withdrawals off them.
+ *
+ * The verdict is left in place too, on `redacted`. This function is the one
+ * authority on whether a line survives — it is the only reader that can see
+ * every citation, including the half of a cross-paper line that lives on
+ * another paper — so it states its answer instead of encoding it in the text
+ * and hoping the next layer reads the sentence the same way.
  */
 export function redactWithdrawn(
   sections: readonly StoredSection[],
   stillShared: ReadonlySet<Id<"annotations">>,
-): StoredSection[] {
+): ViewSection[] {
   return sections.map((section) => ({
     ...section,
-    items: redactWhenAnyWithdrawn(
+    items: redactWhenAnyWithdrawn<Id<"annotations">, ViewItem>(
       section.items,
       stillShared,
       (item) => item.annotationIds,
-      (item) => ({ ...item, text: WITHDRAWN_ITEM_TEXT }),
+      (item) => ({ ...item, text: WITHDRAWN_ITEM_TEXT, redacted: true }),
     ).items,
   }));
 }

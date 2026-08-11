@@ -990,20 +990,33 @@ export function Reader({
     pageOf,
   ]);
 
+  /**
+   * The note the adopt link points at, as an id this page has actually seen.
+   *
+   * `?note=` on its own is only ever matched against loaded rows, so whatever
+   * a URL carries stays in the browser and a nonsense value simply finds
+   * nothing. `adopt=1` is the first parameter that reaches a *query*, and a
+   * query argument is validated: casting arbitrary query-string text to an
+   * annotation id and sending it would turn a mistyped or crafted link into a
+   * validation error thrown on mount, taking the whole reader down over a note
+   * that was never real. Resolving it against `rows` first means the query is
+   * only ever asked about a note that exists, and anything else degrades to
+   * the plain jump — which is the behaviour of a bad `?note=` anyway.
+   */
+  const adoptId = useMemo(
+    () => rows.find((row) => row._id === adoptFor)?._id ?? null,
+    [rows, adoptFor],
+  );
+
   const adoptFinding = useQuery(
     api.findings.newestForSubject,
-    adoptFor === null
+    adoptId === null
       ? "skip"
-      : {
-          subject: {
-            kind: "annotation",
-            annotationId: adoptFor as Id<"annotations">,
-          },
-        },
+      : { subject: { kind: "annotation", annotationId: adoptId } },
   );
 
   const seedReply = useMemo(() => {
-    if (adoptFor === null || adoptFinding === undefined || adoptFinding === null) {
+    if (adoptId === null || adoptFinding === undefined || adoptFinding === null) {
       return undefined;
     }
     const byId = new Map(rows.map((row) => [row._id, row]));
@@ -1029,10 +1042,8 @@ export function Reader({
             ];
       }),
     );
-    return body.length === 0
-      ? undefined
-      : { annotationId: adoptFor as Id<"annotations">, body };
-  }, [adoptFor, adoptFinding, rows]);
+    return body.length === 0 ? undefined : { annotationId: adoptId, body };
+  }, [adoptId, adoptFinding, rows]);
 
   const counts = useMemo(() => {
     const map = new Map<AnnotationType, number>();

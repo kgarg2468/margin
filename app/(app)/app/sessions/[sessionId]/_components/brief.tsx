@@ -92,6 +92,11 @@ type Item = Section["items"][number];
  * one, or the client would draw a live citation link and an ontology label
  * around text the server had already replaced.
  *
+ * Checked here, but not decided here. The check this side can run is blind to
+ * half of a cross-paper line by construction, so the server's verdict arrives
+ * as `item.redacted` and outranks it (`lib/brief/prep.ts`). One redaction
+ * authority, one field, and no sentence-matching in the browser.
+ *
  * ## The numbers, and which of them are links
  *
  * A citation is numbered once for the whole running order, by first appearance
@@ -202,8 +207,16 @@ export function PresenterBrief({
 
   // The running order is one sequence across the stored sections and the two
   // live ones, because that is how it is read.
+  //
+  // Empty sections are left out — an agenda lists what is on it — with one
+  // exception, and the exception is the whole point of the flag: a capped scan
+  // that surfaced nothing looks identical to a complete scan that found
+  // nothing, and only one of those two is a fact about the lab. Dropping the
+  // section here would throw away the sentence `Entry` draws for exactly that
+  // case ("the search stopped at its limit"), so a section whose search ran
+  // out of budget is kept and says so, even with no lines under it.
   const stored = (brief?.sections ?? []).filter(
-    (section) => section.items.length > 0,
+    (section) => section.items.length > 0 || section.crossPaperCapped === true,
   );
   let position = 0;
 
@@ -588,7 +601,10 @@ function BriefLine({
   // One rule, two call sites (the registry above folds the same function over
   // the same lines), and it lives in `lib/` because the interesting half is
   // the deferral: a cross-paper citation is not on this page's paper, so this
-  // page has no standing to call it withdrawn.
+  // page has no standing to call it withdrawn — and therefore no standing to
+  // call the line live either, which is why the server's `redacted` verdict
+  // goes in with it. A line held back is drawn as its sentence and nothing
+  // else: no label, no numbers.
   const { withdrawn, cited } = lineCitations(item, visibleAnnotationIds);
   const firstId = item.annotationIds[0];
   const label = item.pairType === undefined ? undefined : GOLD_PAIRS[item.pairType];

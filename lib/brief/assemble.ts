@@ -100,9 +100,11 @@ export type BriefItem<
    * The annotations this line was built from.
    *
    * The whole provenance contract in one field: `convex/briefs.ts` re-resolves
-   * every id on read and redacts a line whose notes have all been withdrawn,
-   * exactly as `getForSession` does for a synthesis. A line that cited nothing
-   * could not be checked and is never produced.
+   * every id on read and holds the line back the moment *any* one of them has
+   * been withdrawn — stricter than the synthesis, which keeps a partly
+   * withdrawn item and drops its attribution, because a brief line names its
+   * members and quotes them and there is no true shorter version of it. A line
+   * that cited nothing could not be checked and is never produced.
    */
   annotationIds: AnnotationId[];
   /** The gold matrix cell, on collision items only — e.g. `"critique x hypothesis"`. */

@@ -742,8 +742,13 @@ export type AssembledDigest<
  *
  * `crossPaper` is a `detectCrossPaperCollisions(pool)` result, and omitting it
  * is not a degraded mode — it is the one-paper policy the simulation validated,
- * which is what a session's prep and a presenter's brief still want. When it is
- * supplied, its pairs join the same candidate list, are promoted by the same
+ * which is what a session's prep digest still wants: it pools one paper and
+ * has nothing to pair across. The presenter's brief no longer wants it. It is
+ * a different assembler (`lib/brief/assemble.ts`) answering the same question
+ * the other way, because a presenter planning an hour is precisely the reader
+ * who can use "somebody made this claim in another paper" — so `convex/briefs.ts`
+ * reads a budgeted set of neighbouring papers and runs the scan itself. When it
+ * is supplied, its pairs join the same candidate list, are promoted by the same
  * recipient-relative rule, and rank behind every same-paper pair. They are
  * distinguishable in the output without reading the prose: `otherPaperId` is
  * set, and `line` names both papers.

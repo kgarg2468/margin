@@ -2182,10 +2182,11 @@ export default defineSchema({
              * Never empty. Every line in a brief is a rearrangement of notes
              * the lab wrote, so a line that cited nothing would be the one
              * thing this feature exists to refuse — and `briefs.getForSession`
-             * re-resolves each id on read and redacts a line whose notes have
-             * all been withdrawn, the same discipline `synthesis.getForSession`
-             * applies. A stored citation is a claim about a row, and a claim is
-             * worth re-reading.
+             * re-resolves each id on read and redacts the line as soon as
+             * *any* one of them stops being shared, which is stricter than the
+             * discipline `synthesis.getForSession` applies to a paraphrase. A
+             * stored citation is a claim about a row, and a claim is worth
+             * re-reading.
              */
             annotationIds: v.array(v.id("annotations")),
             /** The gold matrix cell, on collision lines only. */
