@@ -155,7 +155,7 @@ findings that cite an annotation, not what makes them safe.
   - *Settle with this* — extends `setSettled` with an optional validated `findingId`, recording provenance of what informed the settlement. Permissions unchanged.
   - *Adopt citations* — prefills a composer with **citation links only, never model prose** (review: prefilled prose is machine speech laundered into the human-speech table). The member writes their own words. Action-row subjects without a `citedAnnotationId` get *Settle with this* only (there is no thread to reply into — subject-specific affordances, per review).
   - *Dismiss* — client-side collapse only in v1 (no per-viewer server state; cut as gold-plating).
-- **Empty/failed:** "Scout searched N annotations across M papers and found nothing citable" rendered as a legitimate answer, from `coverage`, not from the model.
+- **Empty/failed:** one quiet line, rendered as a legitimate answer — and *not* from `coverage`. `coverage` is a field on a **returned** finding, so a run that came back empty or failed has none to render. The empty sentence is composed in `lib/scout/surface.ts` out of the run's status alone ("The scout read the lab's margin and found nothing that bears on this"); the failed one prints the `failureReason` the backend stored from the failure vocabulary (`FAILURE_SENTENCES`, `convex/delegations.ts`), which names the failure in the reader's terms — *"The scout couldn't reach its model…"* — never the API's. `coverage` feeds the other line entirely: "Read N notes across M papers", at the head of a report that exists.
 
 ## 8. Permissions
 
@@ -196,7 +196,7 @@ GroupMemBench's lesson stands: if the scout doesn't beat the search drawer, it d
 1. **PR A — substrate:** tables, ledger events, lifecycle cascade (+ `actions.ts` comment correction), claim/lease/expiry, caps, stub-agent run path, CI invariant tests.
 2. **PR B — eval:** ledger-ground-truth harness + baseline comparison; report format.
 3. **PR C — scout:** `lib/citations/` extraction (synthesis refactored to share it), gather in scheduled-reader mode + guard test, model call, sanitizer, failure states.
-4. **PR D — surfaces:** brief section, outcomes chips, finding card, settle-with-finding.
+4. **PR D — surfaces:** brief section, outcomes chips, finding card, settle-with-finding. **Shipped** as Track C's C4 — and C5 (the brief consuming cross-paper collisions) rode along in the same branch, because both end in `brief.tsx` and the assembler behind it, and splitting them would have meant two passes over the same file for one screen's worth of change. The launch gate (§10.2) is untouched by either: it is a measurement, not a surface.
 
 ## 13. Review log (what the red-team changed)
 
