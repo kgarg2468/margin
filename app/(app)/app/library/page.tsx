@@ -123,9 +123,10 @@ function Library({
 
   const open = useCallback(
     (paper: (typeof shown)[number]) => {
-      const readable = paper.ingestStatus === "ready" && paper.hasPdf;
+      // The ↵ destination is the row's primary destination — the same question
+      // the title answers visually, so the same function answers it here.
       router.push(
-        readable
+        shelfRow(paper).titleOpensReader
           ? `/app/library/${paper._id}/read`
           : `/app/library/${paper._id}`,
       );
