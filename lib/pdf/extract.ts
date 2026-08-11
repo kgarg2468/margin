@@ -38,6 +38,14 @@ export type PdfExtraction = {
 export type ExtractOptions = {
   /** Called after each page. Papers are short but scans are slow; the UI shows a count. */
   onProgress?: (pagesDone: number, pageCount: number) => void;
+  /**
+   * Withdraw the read. Checked between pages, which is the finest grain
+   * available — one page's `getTextContent` is a single worker round trip and
+   * is not interruptible — and honoured by the `finally` below, which destroys
+   * the loading task whichever way this ends. Optional and additive: the two
+   * callers that never cancel are unchanged by it.
+   */
+  signal?: AbortSignal;
 };
 
 /**
@@ -157,6 +165,10 @@ export async function extractPdf(
   data: ArrayBuffer,
   options: ExtractOptions = {},
 ): Promise<PdfExtraction> {
+  // Before the import, not after: `loadPdfjs` pulls ~1 MB over the network on
+  // first use, and a cancel that lands during it should not go on to open the
+  // document it was called off from.
+  options.signal?.throwIfAborted();
   const pdfjs = await loadPdfjs();
 
   // pdf.js transfers ownership of the buffer it is given to its worker, so it
@@ -166,12 +178,23 @@ export async function extractPdf(
   const doc = await loadingTask.promise;
 
   try {
+    // Inside the `try`, so the loading task is still destroyed on the way out:
+    // opening a document is a long await of its own, and a cancel that landed
+    // during it should not go on to read the thing it was called off from.
+    options.signal?.throwIfAborted();
+
     const pageCount = doc.numPages;
     const pages: string[] = [];
     for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) {
+      options.signal?.throwIfAborted();
       pages.push(await extractPageText(doc, pageNumber));
       options.onProgress?.(pageNumber, pageCount);
     }
+    // And once more past the loop. Sampling only at the top of the loop means
+    // a cancel pressed during the last page's `getTextContent` — or during the
+    // only page's, in a one-page PDF — is never looked at again, and the caller
+    // goes on to accept a file the member had just called off.
+    options.signal?.throwIfAborted();
 
     let title: string | undefined;
     let authors: string[] | undefined;
@@ -183,6 +206,12 @@ export async function extractPdf(
     } catch {
       // A malformed metadata dictionary is not a reason to lose the text.
     }
+
+    // The metadata read is one more await after the check above, and the
+    // `catch` around it swallows everything — so a cancel that lands while
+    // `getMetadata` is pending would otherwise sail through as success and
+    // the caller would present the very file the member just called off.
+    options.signal?.throwIfAborted();
 
     return { pageCount, pages, title, authors };
   } finally {

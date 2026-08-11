@@ -17,7 +17,8 @@ import { ListSkeleton, PageSkeleton } from "../_components/skeletons";
 import { AddPaper } from "./_components/add-paper";
 import { FilterStrip } from "./_components/filter-strip";
 import { FiledAs, TagMark } from "./_components/marks";
-import { StatusChip, byline } from "./_components/paper-meta";
+import { byline } from "./_components/paper-meta";
+import { shelfRow } from "./_components/shelf-row";
 import { ShortcutHint } from "./_components/shortcuts";
 
 /**
@@ -95,6 +96,17 @@ function Library({
   });
   const [text, setText] = useState("");
   const [adding, setAdding] = useState(false);
+  /**
+   * Whether the add panel has work in flight, reported up by the panel itself.
+   *
+   * Both of the library's own ways of closing it are a discard, and neither can
+   * see inside it — so both ask first. The panel's own guard is not enough on
+   * its own: the field check below returns early for a caret in an input, but
+   * `ConfirmUpload` disables its fields the moment a save starts, and a
+   * disabled input drops focus to `<body>` — where this handler is exactly what
+   * an Escape reaches.
+   */
+  const [addBusy, setAddBusy] = useState(false);
   /** Which row carries the mark, as an index into what is currently drawn. */
   const [marked, setMarked] = useState<number | null>(null);
   /** The paper whose "filed as" panel is open, if any. */
@@ -122,9 +134,10 @@ function Library({
 
   const open = useCallback(
     (paper: (typeof shown)[number]) => {
-      const readable = paper.ingestStatus === "ready" && paper.hasPdf;
+      // The ↵ destination is the row's primary destination — the same question
+      // the title answers visually, so the same function answers it here.
       router.push(
-        readable
+        shelfRow(paper).titleOpensReader
           ? `/app/library/${paper._id}/read`
           : `/app/library/${paper._id}`,
       );
@@ -181,6 +194,19 @@ function Library({
           setHint(false);
           setFiling(null);
           setMarked(null);
+          // `a` opens the panel and nothing closed it but a link at the bottom
+          // of it. This half only covers an Escape pressed with focus outside a
+          // field — the guard above returns before here otherwise, and the DOI
+          // input has focus the instant the panel opens, so `AddPaper` answers
+          // that case itself (`onDismiss`). On an empty shelf both are a no-op
+          // by design: the panel is rendered by `isEmpty` there, and there is
+          // nothing to put away.
+          //
+          // And never while the panel is working. Closing it does not stop what
+          // it is doing; it only takes away the controls that could.
+          if (!addBusy) {
+            setAdding(false);
+          }
           return;
         case "ArrowDown":
           if (shown.length > 0) {
@@ -208,7 +234,7 @@ function Library({
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [markedPaper, open, shown.length]);
+  }, [addBusy, markedPaper, open, shown.length]);
 
   /**
    * Move the browser's own focus with the mark, so the arrow keys move a
@@ -249,7 +275,7 @@ function Library({
                 "application/x-bibtex;charset=utf-8",
               )
             }
-            className="tap-target self-start font-sans text-xs text-ink-faint underline-offset-4 hover:text-accent hover:underline"
+            className="pressable tap-target self-start font-sans text-xs text-ink-faint underline-offset-4 hover:text-accent hover:underline"
           >
             Download BibTeX
           </button>
@@ -264,15 +290,49 @@ function Library({
           reading. Closing it is now something the reader does. */}
       {isEmpty || adding ? (
         <div className="flex flex-col gap-3">
-          <AddPaper labId={lab._id} onAdded={() => setAdding(true)} />
+          <AddPaper
+            labId={lab._id}
+            onAdded={() => setAdding(true)}
+            onDismiss={() => setAdding(false)}
+            onBusyChange={setAddBusy}
+          />
           {!isEmpty && (
-            <button
-              type="button"
-              onClick={() => setAdding(false)}
-              className="tap-target self-start font-sans text-sm text-accent underline-offset-4 hover:underline"
-            >
-              Done adding
-            </button>
+            <>
+              <button
+                type="button"
+                // Held while the panel is working, for the same reason its own
+                // Escape is: this closes the form without stopping anything,
+                // and the run then reaches back into a page that has moved on.
+                //
+                // `aria-disabled` rather than `disabled`, so the control keeps
+                // its place in the tab order and can carry the sentence saying
+                // why — a `disabled` button is unreachable by the keyboard, and
+                // a `title` needs a pointer that hovers.
+                aria-disabled={addBusy}
+                aria-describedby={addBusy ? "library-add-held" : undefined}
+                onClick={() => {
+                  if (!addBusy) {
+                    setAdding(false);
+                  }
+                }}
+                // The way out of a panel should not be quieter than the way in:
+                // this is the same control as `Add a paper` above, run
+                // backwards.
+                // No cursor utility: the base layer answers the pointer for
+                // `aria-disabled` too, and stating it here would outrank it.
+                className={`${secondaryButtonClass} tap-target self-start aria-disabled:opacity-50`}
+              >
+                Done adding
+              </button>
+              {addBusy && (
+                <p
+                  id="library-add-held"
+                  className="font-sans text-xs text-ink-faint"
+                >
+                  The panel is still working. Stop it there to close this.
+                </p>
+              )}
+            </>
           )}
         </div>
       ) : (
@@ -326,11 +386,13 @@ function Library({
           <ul className="flex flex-col divide-y divide-rule border-y border-rule">
             {shown.map((paper, index) => {
               const line = byline(paper);
-              // A ready paper is one whose text layer is in, which is the only
-              // state the margins can be written in — so the title opens the
-              // reader and the record moves to a second link. Anything else has
-              // something to fix first, and the record is where you fix it.
-              const readable = paper.ingestStatus === "ready" && paper.hasPdf;
+              // A readable paper is one whose text layer is in, which is the only
+              // state the margins can be written in — so its title opens the
+              // reader and its record steps back to a second, quieter link.
+              // Anything else has one place worth going and one thing worth
+              // doing there, and `shelfRow` is where that stays true: the row
+              // must never offer the same URL twice.
+              const row = shelfRow(paper);
               const isMarked = markedIndex === index;
               return (
                 <li
@@ -346,17 +408,22 @@ function Library({
                   }
                 >
                   <span className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                    <Link
-                      href={
-                        readable
-                          ? `/app/library/${paper._id}/read`
-                          : `/app/library/${paper._id}`
-                      }
-                      className="font-serif text-xl leading-snug text-ink-strong underline-offset-4 hover:underline"
-                    >
-                      {paper.title}
-                    </Link>
-                    <StatusChip status={paper.ingestStatus} />
+                    {row.titleOpensReader ? (
+                      <Link
+                        href={`/app/library/${paper._id}/read`}
+                        className="font-serif text-xl leading-snug text-ink-strong underline-offset-4 hover:underline"
+                      >
+                        {paper.title}
+                      </Link>
+                    ) : (
+                      // Not a link, and drawn as one thing rather than two: the
+                      // underline was promising a second route to the record,
+                      // which the named action below already is. The row is
+                      // still focusable and `↵` still opens it.
+                      <span className="font-serif text-xl leading-snug text-ink-strong">
+                        {paper.title}
+                      </span>
+                    )}
                   </span>
                   {line.length > 0 && (
                     <span className="font-sans text-sm text-ink-muted">
@@ -388,18 +455,25 @@ function Library({
 
                   <span className="mt-1 flex flex-wrap items-baseline gap-x-4 gap-y-1">
                     {/* A paper that can't be read yet has exactly one thing
-                        worth doing to it, and "TEXT PENDING" next to a title
-                        does not say what that is or where. One named action,
-                        in the accent, rather than a chip to decode. */}
+                        worth doing to it, and a chip reading "TEXT PENDING"
+                        next to a title says neither what that is nor where.
+                        One named action, in the accent, carrying both — which
+                        is why the chip that used to sit beside the title is
+                        gone rather than sitting above this saying the same
+                        thing quieter. */}
+                    {/* The one anchor in the lane wearing `pressable`: a
+                        named action a thumb lands on, sitting in a row of
+                        controls, not a word inside a sentence. Prose links
+                        stay as they are. */}
                     <Link
                       href={`/app/library/${paper._id}`}
                       className={
-                        readable
-                          ? "tap-target font-sans text-xs text-ink-faint underline-offset-4 hover:text-accent hover:underline"
-                          : "tap-target font-sans text-sm text-accent underline-offset-4 hover:underline"
+                        row.record.tone === "quiet"
+                          ? "pressable tap-target font-sans text-xs text-ink-faint underline-offset-4 hover:text-accent hover:underline"
+                          : "pressable tap-target font-sans text-sm text-accent underline-offset-4 hover:underline"
                       }
                     >
-                      {readable ? "Record" : "Finish preparing this paper →"}
+                      {row.record.label}
                     </Link>
                     <button
                       type="button"
@@ -409,7 +483,7 @@ function Library({
                         setMarked(index);
                         setFiling(filing === paper._id ? null : paper._id);
                       }}
-                      className="tap-target font-sans text-xs text-ink-faint underline-offset-4 hover:text-accent hover:underline"
+                      className="pressable tap-target font-sans text-xs text-ink-faint underline-offset-4 hover:text-accent hover:underline"
                     >
                       {filing === paper._id ? "Close" : "Filed as…"}
                     </button>
