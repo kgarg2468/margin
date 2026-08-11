@@ -160,6 +160,10 @@ export function PdfPanel({
     setError(null);
     const controller = new AbortController();
     setAttaching(controller);
+    // A new run owns the screen from here, so clearing a failed predecessor's
+    // byte count is unconditionally right — otherwise its final `loaded`
+    // lingers as this run's aria-valuenow for the whole read phase.
+    setSending(null);
     // Held outside the `try` so the catch knows whether a file made it into
     // storage before things went wrong.
     let uploaded: Id<"_storage"> | null = null;
