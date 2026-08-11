@@ -190,7 +190,7 @@ export async function extractPdf(
       pages.push(await extractPageText(doc, pageNumber));
       options.onProgress?.(pageNumber, pageCount);
     }
-    // And once more on the way out. Sampling only at the top of the loop means
+    // And once more past the loop. Sampling only at the top of the loop means
     // a cancel pressed during the last page's `getTextContent` — or during the
     // only page's, in a one-page PDF — is never looked at again, and the caller
     // goes on to accept a file the member had just called off.
@@ -206,6 +206,12 @@ export async function extractPdf(
     } catch {
       // A malformed metadata dictionary is not a reason to lose the text.
     }
+
+    // The metadata read is one more await after the check above, and the
+    // `catch` around it swallows everything — so a cancel that lands while
+    // `getMetadata` is pending would otherwise sail through as success and
+    // the caller would present the very file the member just called off.
+    options.signal?.throwIfAborted();
 
     return { pageCount, pages, title, authors };
   } finally {
