@@ -61,17 +61,19 @@ export type ZoteroLibrary = { type: "user" | "group"; id: string };
  * `A?key=SECRET`. A `#` truncates the rest of the URL into a fragment, and a
  * `/` re-targets the request at a path nobody asked for.
  *
- * `encodeURIComponent` is the whole fix: it escapes `?`, `#`, `/`, `%` and
+ * `encodeURIComponent` is most of the fix: it escapes `?`, `#`, `/`, `%` and
  * whitespace, so a hostile segment lands inside the segment it was written
  * into and Zotero answers 404 to it instead of Margin answering something
- * worse. It does not escape `.`, and it cannot — the URL parser resolves a
- * lone `.` or `..` segment before any encoding is visible to it (the WHATWG
- * spec reads `%2E` as a dot for exactly that check). That residue is bounded:
- * traversal *out* of the library prefix needs a `/`, and those are encoded, so
- * the worst a dot segment does is drop the collection scope from a URL that
- * still addresses the same library.
+ * worse. What it cannot fix is a segment that *is* `.` or `..` — the URL
+ * parser resolves those before any encoding is visible to it (the WHATWG spec
+ * reads `%2E` as a dot for exactly that check), and in the library-id
+ * position the prefix itself is what a `..` walks out of. No representation
+ * of a dot segment survives parsing, so the two of them — never a real
+ * Zotero id, which are numbers and alphanumeric keys — are replaced outright:
+ * still one segment, still a 404, never a traversal.
  */
 function encodeSegment(segment: string): string {
+  if (segment === "." || segment === "..") return "-";
   return encodeURIComponent(segment);
 }
 
@@ -239,9 +241,17 @@ function canWrite(scope: unknown): boolean {
   return isRecord(scope) && Boolean(scope.write);
 }
 
-/** A scope grants reading when it says the library is visible through it. */
+/**
+ * `=== true` rather than truthy — the mirror of `canWrite`, because the safe
+ * direction runs the other way here. For `write`, an unexpected value must
+ * read as "it writes" so the key is refused; for `library`, an unexpected
+ * value must read as "it grants nothing", because this gate exists so the
+ * connect flow can refuse a no-read key with a true sentence. Believing a
+ * `"false"` or a `1` accepts the key and hands the member the exact 403-later
+ * failure `canRead` was added to prevent.
+ */
 function canRead(scope: unknown): boolean {
-  return isRecord(scope) && Boolean(scope.library);
+  return isRecord(scope) && scope.library === true;
 }
 
 export function parseKeyPermissions(body: unknown): KeyPermissions | null {

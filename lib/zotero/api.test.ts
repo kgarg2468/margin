@@ -178,6 +178,23 @@ describe("the URLs, built from segments nobody sanitised", () => {
       }
     }
   });
+
+  it("cannot be walked out of by the library id itself", () => {
+    // The one position the paragraph above cannot bound by prefix: the
+    // library id IS the prefix, so a `..` there does not drop a scope — it
+    // leaves the library entirely (`/users/../groups` resolves to `/groups`,
+    // a different library's front door). Dot segments are substituted, not
+    // encoded, because no encoding of one survives the URL parser.
+    for (const id of ["..", "."]) {
+      expect(new URL(groupsUrl(id)).pathname).toBe("/users/-/groups");
+      expect(new URL(collectionsUrl({ type: "user", id })).pathname).toBe(
+        "/users/-/collections",
+      );
+      expect(new URL(collectionsUrl({ type: "group", id })).pathname).toBe(
+        "/groups/-/collections",
+      );
+    }
+  });
 });
 
 describe("parseKeyPermissions", () => {
@@ -249,6 +266,16 @@ describe("parseKeyPermissions", () => {
   it("says a key with the library switched off cannot read", () => {
     const narrowed = { ...body, access: { user: { library: false, files: true } } };
     expect(parseKeyPermissions(narrowed)?.canRead).toBe(false);
+  });
+
+  it("does not believe a truthy library that is not the boolean", () => {
+    // The mirror of the truthy-write test, because the safe direction flips:
+    // an unexpected value in `write` must count as writing (refuse the key),
+    // but an unexpected value in `library` must count as granting nothing —
+    // believing a `"false"` here accepts the key and buys the member the
+    // 403-on-first-sync that `canRead` exists to prevent.
+    const stringly = { ...body, access: { user: { library: "false", files: true } } };
+    expect(parseKeyPermissions(stringly)?.canRead).toBe(false);
   });
 
   it("says a group-only key can read", () => {
