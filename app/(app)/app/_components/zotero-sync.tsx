@@ -467,17 +467,22 @@ function ScopeForm({
                 ))}
               </select>
             ))}
-
-          <button
-            type="button"
-            className={`${secondaryButtonClass} self-start`}
-            disabled={pending}
-            onClick={onDone}
-          >
-            Done
-          </button>
         </div>
       )}
+
+      {/* Outside the picked-a-library guard on purpose: Done writes nothing,
+          so it must be reachable in every state. Held hostage to a library
+          choice, "Change what syncs" becomes a door with no way back — the
+          only exits would be a scope write that restarts the walk (which the
+          warning above just advised against) or a page reload. */}
+      <button
+        type="button"
+        className={`${secondaryButtonClass} self-start`}
+        disabled={pending}
+        onClick={onDone}
+      >
+        Done
+      </button>
 
       {error !== null && (
         <p role="alert" className={`${errorClass} pop-in`}>
