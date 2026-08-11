@@ -337,6 +337,31 @@ export class FakeCtx {
     cancel: async () => undefined,
   };
 
+  /** Blobs the code under test stored, in order, and the ids it deleted. */
+  readonly stored: Blob[] = [];
+  readonly discarded: string[] = [];
+  private storageCounter = 0;
+
+  /**
+   * `ctx.storage`, as far as anything under test needs it.
+   *
+   * Actions store fetched PDFs and mutations delete the ones that lost a
+   * dedupe race, and both of those are invariants worth asserting: a blob
+   * stored with nothing pointing at it is a file nobody will ever find again.
+   * Recording rather than simulating, for the same reason the scheduler does.
+   */
+  readonly storage = {
+    store: async (blob: Blob): Promise<Id<"_storage">> => {
+      this.storageCounter += 1;
+      this.stored.push(blob);
+      return `storage_${this.storageCounter}` as Id<"_storage">;
+    },
+    delete: async (id: Id<"_storage">): Promise<void> => {
+      this.discarded.push(id as string);
+    },
+    getUrl: async (): Promise<string | null> => null,
+  };
+
   private async call(reference: unknown, args: unknown): Promise<unknown> {
     const name = getFunctionName(
       reference as Parameters<typeof getFunctionName>[0],

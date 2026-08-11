@@ -3,6 +3,7 @@ import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import {
   action,
+  internalAction,
   internalMutation,
   internalQuery,
   mutation,
@@ -12,18 +13,32 @@ import {
 } from "./_generated/server";
 import { pause, retryAfterMs } from "./auth";
 import { getMembership, requireMembership, requireUserId } from "./lib/authz";
+import { isPlausibleDoi, normalizeDoi } from "./lib/doi";
 import { recordEvent } from "./lib/ledger";
+import { nextRedirectHop } from "./lib/scholarly";
+import { cleanAuthors, cleanTitle, pdfFromResponse } from "./papers";
+import { referenceIdentity } from "../lib/reference-import/normalize";
 import {
   ZOTERO_API_VERSION,
+  childrenUrl,
   collectionsUrl,
+  fileUrl,
   groupsUrl,
+  itemsUrl,
   keysCurrentUrl,
   normalizeApiKey,
   parseCollections,
   parseGroups,
   parseKeyPermissions,
+  readSyncHeaders,
   type ZoteroLibrary,
 } from "../lib/zotero/api";
+import {
+  pickPdfAttachment,
+  toReference,
+  type ZoteroItem,
+  type ZoteroReference,
+} from "../lib/zotero/items";
 
 /**
  * Zotero, one way: a member's library, read onto the lab's shelf.
@@ -127,6 +142,14 @@ const READ_ATTEMPTS = 2;
  *   - **A `304` is an answer.** It is the cheap "nothing has changed" the
  *     hourly sweep is built on, and returning it as a response rather than
  *     raising is what lets a caller treat it as the no-op it is.
+ *   - **A `3xx` is an answer too, but only when asked for.** One caller wants
+ *     one: `/items/<key>/file` answers `302` to a presigned storage URL, and
+ *     the hop after it has to be re-issued by hand with no credential on it,
+ *     which means somebody has to be handed the `Location` rather than a
+ *     refusal. Behind an option rather than on by default, so that every other
+ *     request in the module still reads a redirect as a refusal — a `302` from
+ *     `/keys/current` is not somewhere a key should be following anybody, and
+ *     fail-closed is the only sane default for a request carrying one.
  *
  * The two ceilings that wait are different mechanisms, and they are meant to
  * disagree. This one is the **in-request** wait: one `429`, `retry-after`
@@ -144,7 +167,11 @@ const READ_ATTEMPTS = 2;
 export async function zoteroFetch(
   url: string,
   apiKey: string,
-  options: { ifModifiedSinceVersion?: number } = {},
+  options: {
+    ifModifiedSinceVersion?: number;
+    /** Hand a `3xx` back instead of raising, for the download's second hop. */
+    redirectIsAnAnswer?: boolean;
+  } = {},
 ): Promise<Response> {
   const headers: Record<string, string> = {
     "Zotero-API-Key": apiKey,
@@ -167,6 +194,14 @@ export async function zoteroFetch(
     }
 
     if (response.ok || response.status === 304) {
+      return response;
+    }
+
+    if (
+      options.redirectIsAnAnswer === true &&
+      response.status >= 300 &&
+      response.status < 400
+    ) {
       return response;
     }
 
@@ -746,5 +781,673 @@ export const status = query({
             },
       lastImported: stale ? null : last.imported,
     };
+  },
+});
+
+/* -------------------------------------------------------------------------
+ * The sync
+ * ---------------------------------------------------------------------- */
+
+/**
+ * How many Zotero items one run may walk.
+ *
+ * The cap that makes this feature honest, and it is set by the *expensive*
+ * part rather than by the page. Twenty-five items is up to twenty-five
+ * `/children` requests and up to twenty-five PDF downloads, each of them
+ * allowed to be 60 MB, against an API that asks for no more than four
+ * concurrent requests. Zotero's own page maximum is a hundred, which would be
+ * a hundred downloads inside one action — the shape that gets killed halfway
+ * through with a cursor that never advanced and nothing to show for it.
+ *
+ * It is a *rate*, not a ceiling. `syncCursor` persists where the walk got to,
+ * and the hourly sweep continues it, so a four-thousand-item collection fills
+ * over an afternoon instead of failing at once. A member who wants it faster
+ * presses Sync now again, which is exactly what the button says it does.
+ */
+export const SYNC_PAGE_ITEMS = 25;
+
+/**
+ * How much of the lab's shelf the title-identity fallback compares against.
+ *
+ * The same two hundred `listPapers` reads, and deliberately the same number:
+ * this is the set of papers the library page can show, so a duplicate this
+ * misses is one a member could not have seen on the shelf either. Read **once
+ * per run** into a map rather than once per candidate — `createFromMetadata`
+ * does the latter (`convex/papers.ts:369-376`) and at 25 candidates against a
+ * full shelf that is five thousand document reads for one page of items.
+ *
+ * The honest limitation, written down rather than hidden: past two hundred
+ * papers this fallback starts missing duplicates that have no DOI and no
+ * Zotero key in common. So does the library page's own filter, and the two
+ * ceilings should be lifted together — `convex/schema.ts:1119-1122` names the
+ * 201st paper as the signal for exactly that.
+ */
+const IDENTITY_SCAN_LIMIT = 200;
+
+/** How many links one hourly sweep will set going. */
+const MAX_SWEEP_LINKS = 20;
+
+/** A link is due for another look an hour after the last one finished. */
+const SYNC_INTERVAL_MS = 60 * 60 * 1000;
+
+/**
+ * The DOI on a Zotero item, in the one form `by_lab_and_doi` is a key for.
+ *
+ * Zotero holds whatever the publisher's metadata said, and that is routinely
+ * `https://doi.org/10.1038/Nature12373` rather than `10.1038/nature12373`.
+ * `papers.doi` is stored normalized precisely so that one DOI is one paper per
+ * lab however it arrived, and a raw write splits that key where nobody can see
+ * it: the second copy is filed under a string the first copy's lookup will
+ * never produce, so both the dedupe *and* the duplicate are invisible.
+ * `isPlausibleDoi` then drops what is not a DOI at all, which is what a `DOI:`
+ * line in a free-text `extra` field turns out to be about as often as not.
+ */
+function syncDoi(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  const doi = normalizeDoi(raw);
+  return isPlausibleDoi(doi) ? doi : undefined;
+}
+
+/**
+ * One page of Zotero rows, as candidates Margin can file.
+ *
+ * The only place a candidate is made, which is what lets everything
+ * downstream — the preflight query, the committing mutation — take the DOI as
+ * already normalized rather than each remembering to.
+ */
+function candidatesIn(items: unknown[]): ZoteroReference[] {
+  return items.flatMap((raw) => {
+    const entry = toReference(raw as ZoteroItem);
+    return entry === null ? [] : [{ ...entry, doi: syncDoi(entry.doi) }];
+  });
+}
+
+/**
+ * One item, mapped and ready to be filed. `doi` arrives through `syncDoi`.
+ */
+const zoteroCandidate = v.object({
+  zoteroItemKey: v.string(),
+  title: v.string(),
+  authors: v.array(v.string()),
+  year: v.optional(v.number()),
+  venue: v.optional(v.string()),
+  abstract: v.optional(v.string()),
+  doi: v.optional(v.string()),
+  url: v.optional(v.string()),
+});
+
+/**
+ * Which of these candidates the lab does not already have.
+ *
+ * Run before any file is downloaded, which is the whole reason it is a
+ * separate query: a re-walk over a collection Margin has already imported is
+ * the common case, and spending twenty-five PDF downloads to discover that is
+ * the difference between a cheap hourly poll and an expensive one. The same
+ * `findByDoi` → fetch → `insertFromDoi` shape `convex/papers.ts` already uses,
+ * for the same reason.
+ *
+ * Three passes, cheapest first, and none of them a scan:
+ *
+ *   1. `by_lab_and_zotero_item` — this exact item, already here.
+ *   2. `by_lab_and_doi` — this paper, from somewhere else.
+ *   3. `referenceIdentity` against one bounded read of the shelf — the same
+ *      key `createFromMetadata` uses, so a `.bib` paste and a Zotero sync
+ *      collapse onto one row.
+ *
+ * A miss here costs a download and nothing else: `commitPage` asks all three
+ * questions again with the answers that matter, because it is the one holding
+ * the transaction.
+ */
+export const newAmong = internalQuery({
+  args: { labId: v.id("labs"), candidates: v.array(zoteroCandidate) },
+  returns: v.array(v.string()),
+  handler: async (ctx, args) => {
+    const shelf = await ctx.db
+      .query("papers")
+      .withIndex("by_lab", (q) => q.eq("labId", args.labId))
+      .take(IDENTITY_SCAN_LIMIT);
+    const identities = new Set(
+      shelf.map((paper) => referenceIdentity(paper.title, paper.year)),
+    );
+
+    const fresh: string[] = [];
+    for (const candidate of args.candidates) {
+      const byKey = await ctx.db
+        .query("papers")
+        .withIndex("by_lab_and_zotero_item", (q) =>
+          q.eq("labId", args.labId).eq("zoteroItemKey", candidate.zoteroItemKey),
+        )
+        .first();
+      if (byKey !== null) continue;
+
+      const doi = candidate.doi;
+      if (doi !== undefined) {
+        const byDoi = await ctx.db
+          .query("papers")
+          .withIndex("by_lab_and_doi", (q) =>
+            q.eq("labId", args.labId).eq("doi", doi),
+          )
+          .first();
+        if (byDoi !== null) continue;
+      }
+
+      if (identities.has(referenceIdentity(candidate.title, candidate.year))) {
+        continue;
+      }
+      fresh.push(candidate.zoteroItemKey);
+    }
+    return fresh;
+  },
+});
+
+/**
+ * File one page of items, and move the cursor.
+ *
+ * One transaction for the whole page rather than one per item: the dedupe map
+ * is read once, the cursor moves once, and a page either lands or does not.
+ *
+ * ## Nothing here can assume it is on time
+ *
+ * `connectedAt` travels with the run for the reason `slack.recordDeliveryOutcome`
+ * documents at length (`convex/slack.ts:392-433`): these writes are scheduled
+ * from an action and race the member in the settings page. A run that read a
+ * library with a key the member has since revoked must not write papers under
+ * it, must not advance a cursor belonging to a walk that no longer exists, and
+ * must not leave the blobs it fetched sitting in storage with nothing pointing
+ * at them.
+ *
+ * The dedupe is re-checked here even though `newAmong` just ran, for the
+ * reason `insertFromDoi` re-checks (`convex/papers.ts:850-868`): two members
+ * can be syncing overlapping libraries at once, and the gap between the query
+ * and this mutation is a real interval.
+ */
+export const commitPage = internalMutation({
+  args: {
+    linkId: v.id("zoteroLinks"),
+    connectedAt: v.number(),
+    entries: v.array(
+      v.object({
+        ...zoteroCandidate.fields,
+        storageId: v.optional(v.id("_storage")),
+      }),
+    ),
+    /** How many items the page held, imported or not — what `start` advances by. */
+    walked: v.number(),
+    targetVersion: v.number(),
+    total: v.number(),
+    /** True when Zotero gave back a short page: there is no more to walk. */
+    exhausted: v.boolean(),
+  },
+  returns: v.object({ imported: v.number(), skipped: v.number(), done: v.boolean() }),
+  handler: async (ctx, args) => {
+    const link = await ctx.db.get(args.linkId);
+    const nothing = { imported: 0, skipped: 0, done: true };
+    if (link === null) return nothing;
+
+    if (link.connectedAt !== args.connectedAt) {
+      // The member replaced their key while this run was in flight. Drop the
+      // files it fetched rather than leaving them in storage unreferenced.
+      for (const entry of args.entries) {
+        if (entry.storageId !== undefined) {
+          await ctx.storage.delete(entry.storageId);
+        }
+      }
+      return nothing;
+    }
+
+    const shelf = await ctx.db
+      .query("papers")
+      .withIndex("by_lab", (q) => q.eq("labId", link.labId))
+      .take(IDENTITY_SCAN_LIMIT);
+    const byIdentity = new Map(
+      shelf.map((paper) => [referenceIdentity(paper.title, paper.year), paper]),
+    );
+    /**
+     * Identities filed by this page, which the shelf map does not know about.
+     *
+     * A Zotero collection can hold the same paper twice — a duplicate the
+     * member never noticed — and both copies can land on one page. A set
+     * rather than adding rows to `byIdentity` because the only question asked
+     * of it is membership, and a map of half-real documents is a shape
+     * somebody will later read a field off.
+     */
+    const filedThisPage = new Set<string>();
+
+    let imported = 0;
+    let skipped = 0;
+
+    for (const entry of args.entries) {
+      const title = cleanTitle(entry.title);
+      const authors = cleanAuthors(entry.authors);
+      // Through `syncDoi` again on the writing side, where the dedupe key is
+      // actually minted: `zoteroCandidate` says its DOIs are normalized, and
+      // this is the one function that would be storing a raw one if that ever
+      // stopped being true.
+      const doi = syncDoi(entry.doi);
+
+      const byKey = await ctx.db
+        .query("papers")
+        .withIndex("by_lab_and_zotero_item", (q) =>
+          q.eq("labId", link.labId).eq("zoteroItemKey", entry.zoteroItemKey),
+        )
+        .first();
+      if (byKey !== null) {
+        // The member fixed something upstream. Patch the metadata rather than
+        // adding a near-duplicate; leave the file alone, because a PDF on the
+        // shelf has a text layer and annotations anchored to it and swapping
+        // that out is `attachPdf`'s job, not a background sync's.
+        await ctx.db.patch(byKey._id, {
+          title,
+          authors,
+          year: entry.year,
+          venue: entry.venue,
+          abstract: entry.abstract,
+          doi: doi ?? byKey.doi,
+        });
+        if (entry.storageId !== undefined) await ctx.storage.delete(entry.storageId);
+        skipped += 1;
+        continue;
+      }
+
+      const byDoi =
+        doi === undefined
+          ? null
+          : await ctx.db
+              .query("papers")
+              .withIndex("by_lab_and_doi", (q) =>
+                q.eq("labId", link.labId).eq("doi", doi),
+              )
+              .first();
+      const identity = referenceIdentity(title, entry.year);
+      if (byDoi === null && filedThisPage.has(identity)) {
+        // The second copy of a paper that was duplicated upstream.
+        if (entry.storageId !== undefined) await ctx.storage.delete(entry.storageId);
+        skipped += 1;
+        continue;
+      }
+      const byIdentityMatch = byDoi ?? byIdentity.get(identity) ?? null;
+
+      if (byIdentityMatch !== null) {
+        // Same paper, arrived another way. Claim it for this Zotero item so a
+        // later edit upstream finds this row instead of making a second one.
+        if (byIdentityMatch.zoteroItemKey === undefined) {
+          await ctx.db.patch(byIdentityMatch._id, {
+            zoteroItemKey: entry.zoteroItemKey,
+          });
+        }
+        if (entry.storageId !== undefined) await ctx.storage.delete(entry.storageId);
+        skipped += 1;
+        continue;
+      }
+
+      const paperId = await ctx.db.insert("papers", {
+        labId: link.labId,
+        title,
+        authors,
+        year: entry.year,
+        venue: entry.venue,
+        abstract: entry.abstract,
+        doi,
+        sourceUrl: entry.url,
+        storageId: entry.storageId,
+        zoteroItemKey: entry.zoteroItemKey,
+        // A fetched PDF has no text layer: nothing has run pdf.js over it yet.
+        // `pending` is that gap, and the reader closes it on first open —
+        // exactly as it does for a DOI-fetched open-access copy.
+        ingestStatus: entry.storageId === undefined ? "needs-pdf" : "pending",
+        addedBy: link.userId,
+      });
+      await recordEvent(ctx, {
+        labId: link.labId,
+        type: "paper.added",
+        actorId: link.userId,
+        paperId,
+        title,
+      });
+      filedThisPage.add(identity);
+      imported += 1;
+    }
+
+    const start = (link.syncCursor?.start ?? 0) + args.walked;
+    const walkedImported = (link.syncCursor?.imported ?? 0) + imported;
+    const done = args.exhausted || start >= args.total;
+    const at = Date.now();
+
+    await ctx.db.patch(link._id, {
+      // `lastVersion` moves only when the walk finishes, and moves to the
+      // version the walk *started* at. Anything edited during a multi-run walk
+      // has a higher version and is seen by the next one; the cost is
+      // re-reading a handful of items, and the alternative is losing an edit
+      // made while Margin was three pages in.
+      lastVersion: done ? args.targetVersion : link.lastVersion,
+      syncCursor: done
+        ? undefined
+        : {
+            targetVersion: args.targetVersion,
+            start,
+            total: args.total,
+            imported: walkedImported,
+          },
+      lastSyncAt: at,
+      lastSync: { at, connectedAt: args.connectedAt, imported, skipped },
+    });
+
+    // Only when something arrived. The hourly sweep asks every linked library
+    // whether anything changed, and for most members on most hours the answer
+    // is no — a row per poll would be an append-only table growing to record
+    // that nothing happened.
+    if (imported > 0) {
+      await recordEvent(ctx, {
+        labId: link.labId,
+        actorId: link.userId,
+        type: "zotero.synced",
+        imported,
+        skipped,
+      });
+    }
+
+    return { imported, skipped, done };
+  },
+});
+
+/** Record that a run looked and found nothing, or was refused. */
+export const markSwept = internalMutation({
+  args: {
+    linkId: v.id("zoteroLinks"),
+    connectedAt: v.number(),
+    statusCode: v.union(v.number(), v.null()),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const link = await ctx.db.get(args.linkId);
+    if (link === null || link.connectedAt !== args.connectedAt) return null;
+    const at = Date.now();
+    await ctx.db.patch(link._id, {
+      lastSyncAt: at,
+      lastSync: {
+        at,
+        connectedAt: args.connectedAt,
+        // Absent, not zero: absent is how "it worked" is spelled, and a status
+        // of nothing is not a status.
+        statusCode: args.statusCode ?? undefined,
+        imported: 0,
+        skipped: 0,
+      },
+    });
+    return null;
+  },
+});
+
+/** A repository that accepts the connection and then stops talking. */
+const FILE_FETCH_TIMEOUT_MS = 20_000;
+
+/**
+ * The bytes behind one Zotero attachment, or `null`.
+ *
+ * Two hops, and the whole reason this function exists rather than a `fetch`:
+ *
+ *   1. `<prefix>/items/<key>/file` **with** the key, `redirect: "manual"`, and
+ *      a `302` expected rather than bytes.
+ *   2. Wherever `Location` points, **without** the key and without any Zotero
+ *      header at all.
+ *
+ * `fetch` following that redirect by itself strips `Authorization` and strips
+ * nothing else, so a custom `Zotero-API-Key` rides along to a presigned Amazon
+ * URL — a member's credential handed to a storage host, in a request that
+ * works perfectly and therefore never gets looked at.
+ *
+ * `nextRedirectHop` is imported rather than restated: it already resolves a
+ * relative `Location`, already requires https, and already refuses a hop onto
+ * a machine rather than a public site — which matters here for the same reason
+ * it matters on the pasted-link path, since the destination is chosen by
+ * somebody else's `302`.
+ *
+ * `null` for every failure, and the caller files the paper `needs-pdf`. A
+ * paper with no readable copy is still worth having, and the library already
+ * says so honestly.
+ */
+async function downloadAttachment(
+  library: ZoteroLibrary,
+  attachmentKey: string,
+  apiKey: string,
+): Promise<Blob | null> {
+  try {
+    const first = await zoteroFetch(fileUrl(library, attachmentKey), apiKey, {
+      redirectIsAnAnswer: true,
+    });
+    // Zotero can answer bytes directly for a small file; both shapes are fine.
+    if (first.status < 300 || first.status >= 400) {
+      return await pdfFromResponse(first);
+    }
+    const target = nextRedirectHop(
+      fileUrl(library, attachmentKey),
+      first.headers.get("location"),
+    );
+    if (target === null) return null;
+
+    // No credential on this one. That is the entire point of the two hops.
+    const second = await fetch(target, {
+      headers: { Accept: "application/pdf" },
+      redirect: "manual",
+      signal: AbortSignal.timeout(FILE_FETCH_TIMEOUT_MS),
+    });
+    return await pdfFromResponse(second);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The file for one item, if it has one Zotero is holding.
+ *
+ * Two requests at worst and often none: `pickPdfAttachment` reads `linkMode`,
+ * `contentType` and `md5` off the children listing, so a snapshot, a linked
+ * file and a WebDAV-stored PDF are all refused before a download is spent.
+ */
+async function fetchPdfFor(
+  ctx: { storage: { store: (blob: Blob) => Promise<Id<"_storage">> } },
+  library: ZoteroLibrary,
+  itemKey: string,
+  apiKey: string,
+): Promise<Id<"_storage"> | undefined> {
+  try {
+    const response = await zoteroFetch(childrenUrl(library, itemKey), apiKey);
+    const children = await bodyOf(response);
+    const attachment = pickPdfAttachment(
+      Array.isArray(children) ? (children as Parameters<typeof pickPdfAttachment>[0]) : [],
+    );
+    if (attachment === null) return undefined;
+    const pdf = await downloadAttachment(library, attachment.key, apiKey);
+    return pdf === null ? undefined : await ctx.storage.store(pdf);
+  } catch (caught) {
+    // A paper with no file is still worth having, and the library says so.
+    console.error(`Could not fetch a Zotero attachment: ${String(caught)}`);
+    return undefined;
+  }
+}
+
+/**
+ * One bounded run against one link.
+ *
+ * The whole shape, in order: read the link (and its key) once, ask for one
+ * page — conditionally when there is nothing in flight and a version to be
+ * since — map the items, ask which are new *before* spending a download, fetch
+ * the files for those, and hand the page to one mutation that dedupes again,
+ * files, and moves the cursor.
+ *
+ * Failures are logged and swallowed rather than thrown. A refused run leaves
+ * the cursor exactly where it was and the sweep tries again in an hour; an
+ * `internalAction` that threw would show up as a failed function every hour
+ * for every member with a revoked key, without anything useful happening as a
+ * result. The settings row is where a member finds out, off `lastSync`.
+ */
+export const syncLink = internalAction({
+  args: { linkId: v.id("zoteroLinks") },
+  returns: v.object({ imported: v.number(), skipped: v.number(), done: v.boolean() }),
+  handler: async (ctx, args): Promise<{ imported: number; skipped: number; done: boolean }> => {
+    const nothing = { imported: 0, skipped: 0, done: true };
+    const payload = await ctx.runQuery(internal.zotero.syncPayload, {
+      linkId: args.linkId,
+    });
+    if (payload === null) return nothing;
+
+    const library: ZoteroLibrary = {
+      type: payload.libraryType,
+      id: payload.libraryId,
+    };
+    const cursor = payload.syncCursor;
+    const start = cursor?.start ?? 0;
+
+    let response: Response;
+    try {
+      response = await zoteroFetch(
+        itemsUrl({
+          library,
+          collectionKey: payload.collectionKey,
+          since: payload.lastVersion,
+          start,
+          limit: SYNC_PAGE_ITEMS,
+        }),
+        payload.apiKey,
+        // Conditional only at the top of a walk. Mid-walk the library has
+        // moved by definition — this run is what is moving it — and a `304`
+        // there would strand the cursor.
+        cursor === undefined && payload.lastVersion !== undefined
+          ? { ifModifiedSinceVersion: payload.lastVersion }
+          : {},
+      );
+    } catch (caught) {
+      console.error(`A Zotero sync was refused: ${String(caught)}`);
+      await ctx.runMutation(internal.zotero.markSwept, {
+        linkId: args.linkId,
+        connectedAt: payload.connectedAt,
+        statusCode: permanentStatus(caught),
+      });
+      return nothing;
+    }
+
+    if (response.status === 304) {
+      // The cheap hourly no-op: nothing in this library has changed since the
+      // last completed walk, so one small request is the entire cost.
+      await ctx.runMutation(internal.zotero.markSwept, {
+        linkId: args.linkId,
+        connectedAt: payload.connectedAt,
+        statusCode: null,
+      });
+      return nothing;
+    }
+
+    const headers = readSyncHeaders(response.headers);
+    const body = await bodyOf(response);
+    const items = Array.isArray(body) ? body : [];
+    const targetVersion =
+      cursor?.targetVersion ?? headers.lastModifiedVersion ?? payload.lastVersion ?? 0;
+    const total = cursor?.total ?? headers.totalResults ?? items.length;
+
+    const candidates = candidatesIn(items);
+
+    const fresh = new Set(
+      await ctx.runQuery(internal.zotero.newAmong, {
+        labId: payload.labId,
+        candidates,
+      }),
+    );
+
+    const entries: (ZoteroReference & { storageId?: Id<"_storage"> })[] = [];
+    for (const candidate of candidates) {
+      if (!fresh.has(candidate.zoteroItemKey)) {
+        entries.push(candidate);
+        continue;
+      }
+      entries.push({
+        ...candidate,
+        storageId: await fetchPdfFor(ctx, library, candidate.zoteroItemKey, payload.apiKey),
+      });
+    }
+
+    const outcome = await ctx.runMutation(internal.zotero.commitPage, {
+      linkId: args.linkId,
+      connectedAt: payload.connectedAt,
+      entries,
+      walked: items.length,
+      targetVersion,
+      total,
+      // A short page is Zotero saying there is no more, whatever
+      // `Total-Results` claimed when the walk started — libraries shrink too.
+      exhausted: items.length < SYNC_PAGE_ITEMS,
+    });
+    if (headers.backoffMs !== null) {
+      // Zotero asking for room. Honoured before this action returns rather
+      // than remembered, because the next request is most often the next run
+      // and there is nowhere durable to remember it that is worth a field.
+      await pause(headers.backoffMs);
+    }
+    return outcome;
+  },
+});
+
+/**
+ * Sync now. One run, one page, and an honest answer about whether it finished.
+ *
+ * Public and member-triggered. `done: false` is what the button turns into
+ * "…and there's more — press again, or leave it to the hourly check", which is
+ * the sentence that keeps the cap from reading as a bug.
+ */
+export const syncNow = action({
+  args: { labId: v.id("labs") },
+  returns: v.object({ imported: v.number(), skipped: v.number(), done: v.boolean() }),
+  handler: async (ctx, args): Promise<{ imported: number; skipped: number; done: boolean }> => {
+    const linkId: Id<"zoteroLinks"> | null = await ctx.runQuery(
+      internal.zotero.callerLinkId,
+      { labId: args.labId },
+    );
+    if (linkId === null) {
+      throw new ConvexError(
+        "There's no Zotero library linked here yet. Paste a key first.",
+      );
+    }
+    return await ctx.runAction(internal.zotero.syncLink, { linkId });
+  },
+});
+
+/* -------------------------------------------------------------------------
+ * The hourly sweep
+ * ---------------------------------------------------------------------- */
+
+/** The links that have not been looked at in an hour, most overdue first. */
+export const dueLinks = internalQuery({
+  args: {},
+  returns: v.array(v.id("zoteroLinks")),
+  handler: async (ctx) => {
+    const due = await ctx.db
+      .query("zoteroLinks")
+      .withIndex("by_due", (q) => q.lte("lastSyncAt", Date.now() - SYNC_INTERVAL_MS))
+      .take(MAX_SWEEP_LINKS);
+    return due.map((link) => link._id);
+  },
+});
+
+/**
+ * The cron's entry point: look at everything overdue, an hour at a time.
+ *
+ * Fanned out with `runAfter(0, …)` rather than run inline — the pattern
+ * `convex/digests.ts:450` uses — so one member's slow library does not hold up
+ * everybody else's, and a run that fails takes only itself down.
+ *
+ * Bounded at `MAX_SWEEP_LINKS` per tick for the reason every read in this
+ * codebase is bounded: an unbounded sweep is a table scan on a schedule, and
+ * an hour later it is a larger one. A deployment with more overdue links than
+ * that catches up over the following hours, in `lastSyncAt` order, which is
+ * the fair order.
+ */
+export const sweep = internalAction({
+  args: {},
+  returns: v.null(),
+  handler: async (ctx): Promise<null> => {
+    const linkIds = await ctx.runQuery(internal.zotero.dueLinks, {});
+    for (const linkId of linkIds) {
+      await ctx.scheduler.runAfter(0, internal.zotero.syncLink, { linkId });
+    }
+    return null;
   },
 });

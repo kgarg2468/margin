@@ -744,16 +744,22 @@ describe("the modules that hold a credential", () => {
   });
 
   it("never lets a credentialed request follow a redirect", () => {
-    // The finding this whole rule exists for: `fetch` strips `Authorization`
-    // across a cross-origin redirect and strips nothing else, so a followed
-    // 302 from `/items/<key>/file` hands a member's key to Amazon. Every
-    // `fetch` in the module that carries the key sets `redirect: "manual"`;
-    // the one that does not carry it is the second hop, and it is named.
+    // The finding this rule exists for: `fetch` strips `Authorization` across
+    // a cross-origin redirect and strips nothing else, so a followed 302 from
+    // `/items/<key>/file` hands a member's key to Amazon.
+    //
+    // Two halves. Every `fetch` in the module steers manually — including the
+    // uncredentialed second hop, which is chosen by somebody else's `Location`
+    // and has no more business following a chain than the first one does. And
+    // the key is named exactly once, inside the transport, so there is one
+    // request in the codebase that can carry it and it is the one that sets
+    // the header.
     const zotero = sources.find((source) => source.name === "zotero.ts")?.code ?? "";
-    const fetches = [...zotero.matchAll(/\bfetch\(/g)];
-    expect(fetches.length).toBeGreaterThan(0);
-    const manual = [...zotero.matchAll(/redirect:\s*"manual"/g)];
-    expect(manual.length).toBe(fetches.length);
+    const fetches = [...zotero.matchAll(/\bfetch\(/g)].length;
+    const manual = [...zotero.matchAll(/redirect:\s*"manual"/g)].length;
+    expect(fetches).toBeGreaterThan(1);
+    expect(manual).toBe(fetches);
+    expect([...zotero.matchAll(/"Zotero-API-Key"/g)]).toHaveLength(1);
   });
 
   it("keeps the Zotero key out of anything that gets logged", () => {
