@@ -1,7 +1,11 @@
 import { getFunctionName } from "convex/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id, TableNames } from "./_generated/dataModel";
-import { STUB_MODEL, type DelegationModelFailure } from "./delegations";
+import {
+  STUB_MODEL,
+  type DelegationModelFailure,
+  type ScoutModelResult,
+} from "./delegations";
 
 /**
  * A database that runs in a test process.
@@ -410,7 +414,11 @@ export function registerFakeScoutModel(
 ): { prompt: string }[] {
   const calls: { prompt: string }[] = [];
   ctx.register(internal.delegations.callScoutModel, {
-    _handler: (_ctx: unknown, args: { prompt: string }) => {
+    // Annotated, because `register`/`handlerOf` go through `unknown` and erase
+    // every type on the way: a fixture that drifted from the seam's contract
+    // would typecheck happily and fail as a puzzle at runtime. This is the one
+    // place the two shapes can still be held together.
+    _handler: (_ctx: unknown, args: { prompt: string }): ScoutModelResult => {
       calls.push({ prompt: args.prompt });
       return options.modelFailure === undefined
         ? fakeScoutModel(args.prompt)

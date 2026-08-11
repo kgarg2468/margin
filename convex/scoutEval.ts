@@ -518,14 +518,22 @@ export const retrieve = internalQuery({
  * registers the offline fixture measures the query reduction and the candidate
  * gate. Neither is assumed — the model each question was ranked by is
  * collected on the way past and printed on the report.
+ *
+ * `model` is `null` when the gather came back empty, because then nothing was
+ * called and there is no honest name to write down. Naming one anyway is not a
+ * harmless default: a question can carry labels and still gather no candidates
+ * — the labels come from the ledger (`labelsFor`: outcomes and replies) and the
+ * candidates come from the search index, and two independent sources disagree
+ * on a real corpus. A report that filled the gap with the fixture's name would
+ * be telling an operator with a live key that a stub had ranked their run.
  */
 async function scoutRanking(
   ctx: ActionCtx,
   labId: Id<"labs">,
   question: string,
   candidates: readonly Candidate[],
-): Promise<{ ranked: Id<"annotations">[]; model: string }> {
-  if (candidates.length === 0) return { ranked: [], model: STUB_MODEL };
+): Promise<{ ranked: Id<"annotations">[]; model: string | null }> {
+  if (candidates.length === 0) return { ranked: [], model: null };
   const prompt = buildScoutPrompt(labId, question, candidates);
   const { byLabel } = labelCandidates(candidates);
   const result = await ctx.runAction(internal.delegations.callScoutModel, {
@@ -637,15 +645,27 @@ const GROUND_TRUTH_CAVEATS = [
   "Labels whose note has since been withdrawn or taken private are dropped, and the count of dropped labels is reported above.",
 ];
 
+/**
+ * What the `ranker` field says when no question reached the model.
+ *
+ * A sentinel rather than an empty string, because this field is printed: a
+ * report has to be able to say "nothing ranked this" in the same slot it
+ * otherwise says "gpt-5.6-sol", and the prose below branches on it rather than
+ * describing a run that never happened.
+ */
+const NO_RANKER = "none — no question reached the model";
+
 function asymmetryNotes(ranker: string): string[] {
   return [
     `Candidate counts are not equal, by construction. The scout ranks the notes its gather returned (up to ${MAX_CANDIDATES}); the search drawer reads the index's top ${BASELINE_RESULTS * BASELINE_OVERFETCH} and returns the first ${BASELINE_RESULTS} that survive its live filter, ranking nothing further. Both sides are scored on ${EVAL_TOP_N} results, and each per-question row prints the pool its side actually chose from.`,
     `The two sides also send different queries: the scout reduces the question to keywords (stopwords and repeats removed) to fit the ${MAX_SEARCH_LENGTH}-character search cap, while the drawer sends the question as a member typed it, truncated at the same cap. That difference is part of what is being measured, not a defect in the comparison.`,
     "The baseline is the drawer's shared half, and that makes it the drawer's *upper* bound rather than a handicap. `search.everything` interleaves the caller's own private notes into the same six slots — a member's private notes evict lab-visible rows rather than extending the list — and every label here is lab-visible by construction. So a real member, sitting in front of the real drawer with private notes of their own that match, would see at most as many labelled notes as this baseline reports and usually fewer. An eval has no caller whose notebook it could legitimately read, and the scout has no private half either.",
     "Retrieval runs against the corpus as it stands today, not as it stood on the day each question was settled: notes written since are candidates now and were not then. Both sides read the same corpus, so the comparison holds — but absolute recall drifts downward as a lab keeps writing, and two runs made on different dates are not comparable to each other.",
-    ranker === STUB_MODEL
-      ? `The scout side was ranked by the offline fixture (${STUB_MODEL}), which cites its candidates in gather order. This run measured retrieval and query reduction, not a model's judgement, and it is not the gate the design's §10.2 is asking for.`
-      : `The scout side was ranked by ${ranker}, through the same prompt, seam, and citation gate the product uses.`,
+    ranker === NO_RANKER
+      ? "No question in this run reached the model — every one of them was dropped, or gathered nothing to rank. The scout side is not a measurement of anything, and the numbers beside it are the arithmetic of an empty list."
+      : ranker === STUB_MODEL
+        ? `The scout side was ranked by the offline fixture (${STUB_MODEL}), which cites its candidates in gather order. This run measured retrieval and query reduction, not a model's judgement, and it is not the gate the design's §10.2 is asking for.`
+        : `The scout side was ranked by ${ranker}, through the same prompt, seam, and citation gate the product uses.`,
   ];
 }
 
@@ -714,7 +734,7 @@ export const run = internalAction({
         retrieved.question,
         retrieved.candidates,
       );
-      rankers.add(model);
+      if (model !== null) rankers.add(model);
 
       scored.push(
         scoreQuestion({
@@ -724,7 +744,10 @@ export const run = internalAction({
           settledAt: one.settledAt,
           labels: retrieved.labels,
           scout: {
-            system: `scout (${model})`,
+            system:
+              model === null
+                ? "scout (nothing gathered; no model called)"
+                : `scout (${model})`,
             ranked,
             candidatesConsidered: retrieved.candidates.length,
           },
@@ -745,14 +768,12 @@ export const run = internalAction({
      * true only until the seam behind it changes, which is exactly what
      * happened to this file. A set, because a report is one run against one
      * deployment and the honest answer to "which models" is however many
-     * answered.
+     * answered — and a sorted join, because one name joined is that name, so
+     * the common case needs no branch of its own and no fallback that would
+     * only ever fire by naming something that had not run.
      */
-    const ranker =
-      rankers.size === 0
-        ? "none — no question reached the model"
-        : rankers.size === 1
-          ? ([...rankers][0] ?? STUB_MODEL)
-          : [...rankers].sort().join(", ");
+    const answered = [...rankers].sort();
+    const ranker = answered.length === 0 ? NO_RANKER : answered.join(", ");
     const report: ScoutEvalReport = {
       generatedAt: Date.now(),
       ranker,

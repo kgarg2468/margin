@@ -634,6 +634,28 @@ describe("readModelPayload", () => {
     ).toEqual({ ok: false, failure: "model-output-invalid" });
   });
 
+  it("takes the refusal over the answer the same message also wrote", () => {
+    // A model may refuse *and* write something. Without the refusal branch
+    // this payload comes back `{ok: true, text: "The lab has written…"}` and
+    // a refusal walks into the citation gate dressed as an answer — so the
+    // branch needs a case where the two parts disagree, not one where the
+    // refusal is the only thing there.
+    expect(
+      readModelPayload({
+        status: "completed",
+        output: [
+          {
+            type: "message",
+            content: [
+              { type: "refusal", refusal: "no" },
+              { type: "output_text", text: '{"items":[]}' },
+            ],
+          },
+        ],
+      }),
+    ).toEqual({ ok: false, failure: "model-output-invalid" });
+  });
+
   it("treats an empty answer as unreadable output", () => {
     expect(readModelPayload({ status: "completed", output: [] })).toEqual({
       ok: false,
@@ -655,9 +677,9 @@ describe("parseScoutJson", () => {
 
 describe("a model call that does not come back with items", () => {
   const cases = [
-    ["model-unavailable", "couldn’t reach"],
+    ["model-unavailable", "couldn't reach"],
     ["model-timeout", "in time"],
-    ["model-output-invalid", "couldn’t read"],
+    ["model-output-invalid", "couldn't read"],
     ["over-budget", "more to read"],
   ] as const;
 

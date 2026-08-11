@@ -1444,9 +1444,8 @@ export const callScoutModel = internalAction({
     }
     const model = process.env.SCOUT_MODEL ?? DEFAULT_SCOUT_MODEL;
 
-    let response: Response;
     try {
-      response = await fetch(OPENAI_RESPONSES_URL, {
+      const response = await fetch(OPENAI_RESPONSES_URL, {
         method: "POST",
         headers: {
           authorization: `Bearer ${apiKey}`,
@@ -1472,7 +1471,25 @@ export const callScoutModel = internalAction({
         // running under.
         signal: AbortSignal.timeout(SCOUT_REQUEST_TIMEOUT_MS),
       });
+
+      if (!response.ok) {
+        // The body can carry account details. Deployment log, never a row.
+        console.error(
+          `Scout call failed: ${response.status} ${await response.text()}`,
+        );
+        return { ok: false, failure: "model-unavailable" };
+      }
+
+      const read = readModelPayload(await response.json());
+      return read.ok ? { ok: true, text: read.text, model } : read;
     } catch (error) {
+      // The two body reads are inside this `try` deliberately, and the
+      // deliberation is the point: `fetch` resolves when the *headers* land,
+      // so a timeout that fires mid-stream, a connection reset after the
+      // status line, and a gateway that answered 200 with a page of HTML all
+      // throw here rather than above. Left outside, each of them would leave
+      // this function throwing — which is the one thing its contract says it
+      // does not do, and the caller would file a timeout as `run-error`.
       const name = error instanceof Error ? error.name : "";
       if (name === "TimeoutError" || name === "AbortError") {
         return { ok: false, failure: "model-timeout" };
@@ -1480,17 +1497,6 @@ export const callScoutModel = internalAction({
       console.error("Scout call threw:", error);
       return { ok: false, failure: "model-unavailable" };
     }
-
-    if (!response.ok) {
-      // The body can carry account details. Deployment log, never a row.
-      console.error(
-        `Scout call failed: ${response.status} ${await response.text()}`,
-      );
-      return { ok: false, failure: "model-unavailable" };
-    }
-
-    const read = readModelPayload(await response.json());
-    return read.ok ? { ok: true, text: read.text, model } : read;
   },
 });
 
@@ -1865,11 +1871,11 @@ export const FAILURE_SENTENCES: Record<
   "nothing-citable":
     "The scout found material but could not cite any of it. Nothing was stored.",
   "model-unavailable":
-    "The scout couldn’t reach its model. Nothing was stored, and the question is still open — the next brief will try again.",
+    "The scout couldn't reach its model. Nothing was stored, and the question is still open — the next brief will try again.",
   "model-timeout":
-    "The scout’s model didn’t answer in time. Nothing was stored, and the slot is free again.",
+    "The scout's model didn't answer in time. Nothing was stored, and the slot is free again.",
   "model-output-invalid":
-    "The scout’s answer came back in a shape this codebase couldn’t read. Nothing was stored.",
+    "The scout's answer came back in a shape this codebase couldn't read. Nothing was stored.",
   "over-budget":
     "This question had more to read than one run can hold. Nothing was stored.",
 };
