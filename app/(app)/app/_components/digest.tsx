@@ -123,35 +123,44 @@ export function DigestInbox({ labId }: { labId: Id<"labs"> }) {
   // an error because a digest could not be built, but nor should one dropped
   // request cost the member their digest for the whole visit.
   //
-  // `settled` is separate from the ref because it is about the page rather
-  // than about the request: until this comes back, the section does not yet
-  // know whether it exists, and it holds a slot rather than guessing empty.
+  // `settledFor` is separate from the ref because it is about the page rather
+  // than about the request: until the answer comes back, the section does not
+  // yet know whether it exists, and it holds a slot rather than guessing empty.
+  // It records *which* lab it settled for rather than a bare yes, because this
+  // page stays mounted when the sidebar switches labs. A bare flag would still
+  // read true from the lab just left — and the outgoing lab's request, landing
+  // a moment later, would set it true all over again. Either one collapses the
+  // slot while the new lab's catch-up is still out, which is the exact pop this
+  // component exists to prevent. Compared against the current `labId`, both of
+  // those stale writes are simply false.
   const asked = useRef<string | null>(null);
-  const [catchUpSettled, setCatchUpSettled] = useState(false);
+  const [settledFor, setSettledFor] = useState<Id<"labs"> | null>(null);
   useEffect(() => {
     if (asked.current === labId) return;
     asked.current = labId;
-    setCatchUpSettled(false);
     void catchUp({ labId })
       .catch(() => {
         if (asked.current === labId) asked.current = null;
       })
       .finally(() => {
-        setCatchUpSettled(true);
+        setSettledFor(labId);
       });
   }, [labId, catchUp]);
 
   const state = inboxState({
     loaded: digests !== undefined,
-    catchUpSettled,
+    catchUpSettled: settledFor === labId,
     unreadCount: unread.length,
   });
 
   // The reserved slot: one line, the same ghost the roster and the calendar
   // use, sized to nothing in particular because a heading over an unknown is
-  // worse than a blank. Returning before the presence below is safe precisely
-  // because both of its inputs latch — nothing ever comes back here, so no
-  // exit animation is being cut short.
+  // worse than a blank. Returning before the presence below cuts no exit
+  // animation short: for any one lab both inputs move only forwards, so
+  // nothing ever comes back here mid-visit. Switching labs does come back, and
+  // means to — the cards below belong to the lab the reader just left, and
+  // holding them on screen while the new lab's mail is still out would be
+  // showing them another lab's inbox.
   if (state === "reserving") {
     return (
       <span
