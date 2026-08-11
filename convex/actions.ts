@@ -122,6 +122,8 @@ const outcomeView = v.object({
   ownerName: v.optional(v.string()),
   settledAt: v.optional(v.number()),
   settledByName: v.optional(v.string()),
+  /** What informed it, for the panel to say so. */
+  settledWithFindingId: v.optional(v.id("findings")),
   citation: v.optional(citationView),
   /**
    * Whether the caller may settle or reopen this one, decided on the server so
@@ -419,6 +421,40 @@ export const setOwner = mutation({
 });
 
 /**
+ * The finding a settlement may name, or nothing.
+ *
+ * Validated rather than trusted, because a `findingId` arrives from a browser
+ * and "this is what we settled on" is exactly the kind of claim a record is
+ * worthless without. Two checks and no more: the report is this lab's, and it
+ * is about *this* question. A report about a different question is not weaker
+ * evidence about this one — it is not evidence about it at all.
+ *
+ * Refused loudly rather than dropped quietly. Settling is one press, and a
+ * press that silently recorded less than it said it would is worse than one
+ * that failed.
+ */
+async function settlementFinding(
+  ctx: MutationCtx,
+  action: Doc<"actions">,
+  findingId: Id<"findings"> | undefined,
+): Promise<Id<"findings"> | undefined> {
+  if (findingId === undefined) {
+    return undefined;
+  }
+  const finding = await ctx.db.get(findingId);
+  if (
+    finding === null ||
+    finding.labId !== action.labId ||
+    finding.actionId !== action._id
+  ) {
+    throw new ConvexError(
+      "That report isn't about this question, so it can't be what settled it.",
+    );
+  }
+  return finding._id;
+}
+
+/**
  * Say it carried no further — the question is answered, the task is done — or
  * put it back.
  *
@@ -436,7 +472,12 @@ export const setOwner = mutation({
  * be a decision the lab had not yet made.
  */
 export const setSettled = mutation({
-  args: { actionId: v.id("actions"), settled: v.boolean() },
+  args: {
+    actionId: v.id("actions"),
+    settled: v.boolean(),
+    /** The scout's report the settler had in front of them (design §7). */
+    findingId: v.optional(v.id("findings")),
+  },
   returns: v.null(),
   handler: async (ctx, args) => {
     const { action, session, membership, userId } = await requireAction(
@@ -457,10 +498,17 @@ export const setSettled = mutation({
       return null;
     }
 
+    // Hoisted because the ledger event below records it too, and the event is
+    // written on one path out of both branches.
+    let informedBy: Id<"findings"> | undefined;
     if (args.settled) {
+      // Before the patch: a settlement that recorded the wrong provenance is
+      // worse than one that refused, and the check is a read either way.
+      informedBy = await settlementFinding(ctx, action, args.findingId);
       await ctx.db.patch(action._id, {
         settledAt: Date.now(),
         settledBy: userId,
+        ...(informedBy === undefined ? {} : { settledWithFindingId: informedBy }),
       });
       // A settled question is not a question the scout may keep working on:
       // the subject fence is what stops this feature drifting into chat, and
@@ -474,6 +522,7 @@ export const setSettled = mutation({
       await ctx.db.patch(action._id, {
         settledAt: undefined,
         settledBy: undefined,
+        settledWithFindingId: undefined,
       });
     }
 
@@ -485,6 +534,7 @@ export const setSettled = mutation({
       sessionId: action.sessionId,
       actionId: action._id,
       kind: action.kind,
+      ...(informedBy === undefined ? {} : { findingId: informedBy }),
     });
     return null;
   },
@@ -687,6 +737,7 @@ async function toView(
       action.settledBy === undefined
         ? undefined
         : await nameOf(action.settledBy),
+    settledWithFindingId: action.settledWithFindingId,
     citation,
     canSettle: settles(action.kind) && steward,
     canAssign: action.kind === "task" && steward,

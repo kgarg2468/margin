@@ -12,11 +12,13 @@ import {
   type OutcomeKind,
 } from "@/lib/actions";
 import { cleanQuote } from "@/lib/quotes";
+import type { KnownNote } from "@/lib/scout/surface";
 import { formatDate } from "@/lib/sessions-ui";
 import {
   errorClass,
   eyebrowClass,
   labelClass,
+  linkButtonClass,
   secondaryButtonClass,
   selectClass,
   textareaClass,
@@ -24,11 +26,12 @@ import {
 import type { FunctionReturnType } from "convex/server";
 import { useMutation } from "convex/react";
 import { useQuery } from "convex-helpers/react/cache/hooks";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { ConfirmAction } from "../../../_components/confirm-action";
 import { readableError } from "../../../_components/errors";
 import type { AnnotationView } from "../../../library/[paperId]/read/_components/types";
 import type { SessionDetail } from "./manage";
+import { ScoutChip, ScoutFinding } from "./scout";
 
 /**
  * What the room is carrying: the outcomes half of the ritual.
@@ -92,6 +95,23 @@ export function SessionOutcomes({
   });
   const [recording, setRecording] = useState(false);
 
+  // Author and page for every note this page holds a row for, so a scout
+  // citation under a question can be named rather than counted — the same map
+  // the brief builds, off the same subscription, holding nothing the page was
+  // not already showing.
+  const known = useMemo(
+    () =>
+      new Map(
+        rows
+          .filter((row) => row.visibility === "lab" && !row.deleted)
+          .map((row) => [
+            row._id,
+            { authorName: row.authorName, pageIndex: row.anchor.pageIndex },
+          ]),
+      ),
+    [rows],
+  );
+
   if (listing === undefined) {
     return null;
   }
@@ -116,6 +136,8 @@ export function SessionOutcomes({
           carried={listing.carried}
           dropped={listing.carriedDroppedCount}
           labId={session.labId}
+          paperId={session.paperId}
+          known={known}
         />
       )}
 
@@ -161,6 +183,8 @@ export function SessionOutcomes({
                       key={outcome._id}
                       outcome={outcome}
                       labId={session.labId}
+                      paperId={session.paperId}
+                      known={known}
                     />
                   ))}
                 </ul>
@@ -222,10 +246,14 @@ function CarriedForward({
   carried,
   dropped,
   labId,
+  paperId,
+  known,
 }: {
   carried: Listing["carried"];
   dropped: number;
   labId: Id<"labs">;
+  paperId: Id<"papers">;
+  known: ReadonlyMap<Id<"annotations">, KnownNote>;
 }) {
   return (
     <div className="flex flex-col gap-3 border-l-2 border-rule pl-4">
@@ -241,6 +269,13 @@ function CarriedForward({
                 : ""}
               {formatDate(item.fromSessionAt)}
             </p>
+            {item.outcome.kind === "question" && (
+              <ScoutFinding
+                subject={{ kind: "action", actionId: item.outcome._id }}
+                paperId={paperId}
+                known={known}
+              />
+            )}
             <OutcomeControls outcome={item.outcome} labId={labId} />
           </li>
         ))}
@@ -257,9 +292,13 @@ function CarriedForward({
 function OutcomeCard({
   outcome,
   labId,
+  paperId,
+  known,
 }: {
   outcome: OutcomeRow;
   labId: Id<"labs">;
+  paperId: Id<"papers">;
+  known: ReadonlyMap<Id<"annotations">, KnownNote>;
 }) {
   return (
     <li
@@ -267,6 +306,13 @@ function OutcomeCard({
       className="flex flex-col gap-1 border-l-2 pl-3"
     >
       <OutcomeBody outcome={outcome} />
+      {outcome.kind === "question" && (
+        <ScoutFinding
+          subject={{ kind: "action", actionId: outcome._id }}
+          paperId={paperId}
+          known={known}
+        />
+      )}
       <OutcomeControls outcome={outcome} labId={labId} />
     </li>
   );
@@ -305,7 +351,21 @@ function OutcomeBody({ outcome }: { outcome: OutcomeRow }) {
                 : ` by ${outcome.settledByName}`
             }`
           : ""}
+        {outcome.kind === "question" && (
+          <>
+            {" "}
+            <ScoutChip subject={{ kind: "action", actionId: outcome._id }} />
+          </>
+        )}
       </p>
+
+      {outcome.settledWithFindingId !== undefined && (
+        // Provenance, said where the settlement is said. Not a link: the
+        // report is drawn on this same row, right below.
+        <p className="font-sans text-[11px] text-ink-faint">
+          Settled with the scout&rsquo;s report.
+        </p>
+      )}
 
       {outcome.citation !== undefined &&
         (outcome.citation.withdrawn ? (
@@ -346,6 +406,14 @@ function OutcomeControls({
   const [assigning, setAssigning] = useState(false);
 
   const settled = outcome.settledAt !== undefined;
+  // Only asked for a question somebody may actually close, and only while it
+  // is open — a settled row has nothing left for a report to inform.
+  const finding = useQuery(
+    api.findings.newestForSubject,
+    outcome.kind === "question" && outcome.canSettle && !settled
+      ? { subject: { kind: "action", actionId: outcome._id } }
+      : "skip",
+  );
   const anything = outcome.canSettle || outcome.canWithdraw || outcome.canAssign;
   if (!anything) {
     return null;
@@ -384,6 +452,31 @@ function OutcomeControls({
               : outcome.kind === "task"
                 ? "Mark it done"
                 : "Mark it answered"}
+          </button>
+        )}
+
+        {outcome.canSettle && !settled && finding !== undefined && finding !== null && (
+          // A second door to the same mutation, and the only difference is what
+          // it records. The permission is `canSettle` in both — a report does
+          // not widen who may close a question, and it was never meant to
+          // (design §8: "Settle (with or without finding) — unchanged").
+          <button
+            type="button"
+            disabled={pending}
+            onClick={() =>
+              void run(
+                () =>
+                  setSettled({
+                    actionId: outcome._id,
+                    settled: true,
+                    findingId: finding._id,
+                  }),
+                "That didn't take.",
+              )
+            }
+            className={`${linkButtonClass} text-xs tap-target`}
+          >
+            Settle with this
           </button>
         )}
 

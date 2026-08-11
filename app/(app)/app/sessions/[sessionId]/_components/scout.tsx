@@ -201,3 +201,14 @@ export function ScoutStatusChip({
     </span>
   );
 }
+
+/** The row's newest run, as a chip. Subscribes so a card in flight settles itself. */
+export function ScoutChip({
+  subject,
+}: {
+  subject: Parameters<typeof ScoutFinding>[0]["subject"];
+}) {
+  const runs = useQuery(api.delegations.listForSubject, { subject });
+  const newest = runs?.[0];
+  return newest === undefined ? null : <ScoutStatusChip status={newest.status} />;
+}

@@ -887,6 +887,12 @@ export const eventDoc = v.union(
     sessionId: v.id("sessions"),
     actionId: v.id("actions"),
     kind: actionKind,
+    /**
+     * What informed it, when a scout's report did. An id and nothing else —
+     * the ledger carries no prose, least of all a machine's paraphrase of
+     * notes whose authors can un-share them tomorrow.
+     */
+    findingId: v.optional(v.id("findings")),
   }),
   /**
    * And back open, because the answer didn't hold.
@@ -1633,6 +1639,19 @@ export default defineSchema({
      */
     settledAt: v.optional(v.number()),
     settledBy: v.optional(v.id("users")),
+    /**
+     * The scout's report a human had in front of them when they settled it.
+     *
+     * Provenance, not authority: a machine still settles nothing (§3.2), and
+     * this field changes no permission and no outcome. What it buys is the
+     * question a lab asks itself six months later — *why did we decide that* —
+     * having an answer that survives the reasoning being forgotten.
+     *
+     * Cleared on reopen. A question that came back open is not a question that
+     * was settled with a report; the ledger keeps both events, which is where
+     * a walk between states is supposed to live.
+     */
+    settledWithFindingId: v.optional(v.id("findings")),
   })
     .index("by_session", ["sessionId"])
     /** The carry-forward read: one paper's outcomes, newest first. */
