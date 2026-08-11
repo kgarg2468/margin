@@ -36,6 +36,7 @@ import { useTextLayer } from "./use-text-layer";
 export function AddPaper({
   labId,
   onAdded,
+  onDismiss,
 }: {
   labId: Id<"labs">;
   /**
@@ -45,11 +46,31 @@ export function AddPaper({
    * asks to be kept open rather than assuming it will be.
    */
   onAdded?: () => void;
+  /**
+   * Escape, answered from inside the panel rather than at the window.
+   *
+   * The library's own key handler ignores anything typed into a field, which is
+   * the right rule for `/` and `a` and the wrong one for the only key that
+   * closes this: the DOI input takes focus the moment the panel opens, so `a`
+   * then `esc` would have reached nothing at all. A panel that owns a caret has
+   * to answer for its own dismissal — the same conclusion `composer-escape.ts`
+   * reached, on the same ground: Escape is never a keystroke that types
+   * something, so a field has no claim on it.
+   */
+  onDismiss?: () => void;
 }) {
   const [tab, setTab] = useState<"doi" | "upload" | "references">("doi");
 
   return (
-    <section className={`${panelClass} flex flex-col gap-6`}>
+    <section
+      className={`${panelClass} flex flex-col gap-6`}
+      // Bubbled from wherever focus is — a tab, a text field, the dropzone.
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          onDismiss?.();
+        }
+      }}
+    >
       <div
         role="tablist"
         aria-label="How to add a paper"

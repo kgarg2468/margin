@@ -55,8 +55,14 @@ export const secondaryButtonClass =
  * strip, a `Sign out`. Quiet on purpose — Margin's chrome is marginalia and
  * padding these up to buttons would turn the margin into a toolbar — but a
  * control all the same, which is what `pressable` says and what this class
- * spent eleven call sites not saying. `ConfirmAction` had already written the
- * combination out by hand rather than importing half of it.
+ * spent every quiet control in the app not saying. `ConfirmAction` had already
+ * written the combination out by hand rather than importing half of it.
+ *
+ * Which makes this the line between two things that used to look identical:
+ * wearing this class means "a control drawn as a word", and the same string
+ * written out inline means "a prose link" — a word inside a sentence, which
+ * goes somewhere and does not give under the finger. Sweeping those into this
+ * export would erase the distinction it was widened to draw.
  *
  * Still not `tap-target`: the hit box depends on what sits next to a given
  * one (adjacent 44px boxes overlap), so it stays a call-site decision.

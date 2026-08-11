@@ -184,8 +184,12 @@ function Library({
           setFiling(null);
           setMarked(null);
           // `a` opens the panel and nothing closed it but a link at the bottom
-          // of it. On an empty shelf this is a no-op by design — the panel is
-          // rendered by `isEmpty` there, and there is nothing to put away.
+          // of it. This half only covers an Escape pressed with focus outside a
+          // field — the guard above returns before here otherwise, and the DOI
+          // input has focus the instant the panel opens, so `AddPaper` answers
+          // that case itself (`onDismiss`). On an empty shelf both are a no-op
+          // by design: the panel is rendered by `isEmpty` there, and there is
+          // nothing to put away.
           setAdding(false);
           return;
         case "ArrowDown":
@@ -270,7 +274,11 @@ function Library({
           reading. Closing it is now something the reader does. */}
       {isEmpty || adding ? (
         <div className="flex flex-col gap-3">
-          <AddPaper labId={lab._id} onAdded={() => setAdding(true)} />
+          <AddPaper
+            labId={lab._id}
+            onAdded={() => setAdding(true)}
+            onDismiss={() => setAdding(false)}
+          />
           {!isEmpty && (
             <button
               type="button"
@@ -409,6 +417,10 @@ function Library({
                         is why the chip that used to sit beside the title is
                         gone rather than sitting above this saying the same
                         thing quieter. */}
+                    {/* The one anchor in the lane wearing `pressable`: a
+                        named action a thumb lands on, sitting in a row of
+                        controls, not a word inside a sentence. Prose links
+                        stay as they are. */}
                     <Link
                       href={`/app/library/${paper._id}`}
                       className={

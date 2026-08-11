@@ -12,6 +12,10 @@ import { describe, expect, it } from "vitest";
  * A source check rather than a render check, for the reason the reader's copy
  * of this file gives: there is nothing to render in a node test and nothing to
  * assert about it if there were.
+ *
+ * And a file-granular one: a single wearing control carries its whole file, so
+ * green here means the grammar reached each file, not that every control in it
+ * presses. The absence checks below are the strict half; this one is a floor.
  */
 
 const LANE = join(process.cwd(), "app/(app)/app/library");
