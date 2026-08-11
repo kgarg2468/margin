@@ -77,7 +77,11 @@ export function ScoutFinding({
   // Both facts, one rule, and it lives in `lib/` — see `drawnStatusLine` for
   // why a rerun still in flight is drawn over a standing report while a rerun
   // that came back empty or failed leaves that report alone and says nothing.
-  const status = drawnStatusLine(runs[0], report !== null);
+  // `finding`, not `report`: a subscription that has not landed may yet hold a
+  // report, so an empty/failed sentence must wait for it — otherwise the
+  // sentence flashes for the sub-second window before a standing report lands,
+  // exactly the contradiction the leave-it-alone rule exists to prevent.
+  const status = drawnStatusLine(runs[0], finding !== null);
 
   // Declared once and placed twice: alone under the question when there is no
   // report, and above one when there is.
