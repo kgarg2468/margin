@@ -318,8 +318,9 @@ export function parseCollections(body: unknown): ZoteroCollection[] {
  *
  * Deliberately not the ceiling on the *other* wait, and the two should not be
  * unified. `convex/zotero.ts`'s transport re-asks a `429` once, inside the
- * request, through `retryAfterMs` — whose own `MAX_BACKOFF_MS` is 8s, because
- * that wait happens with a refused request still in hand and a member watching.
+ * request, through `retryAfterMs` — whose own `MAX_BACKOFF_MS` of 8s lives in
+ * `convex/auth.ts`, because that wait happens with a refused request still in
+ * hand and a member watching.
  * This one is a pause between two pages of a walk, asked for by Zotero on a
  * response that succeeded, with nothing in flight while it is honoured; 30s is
  * affordable there and is room Zotero explicitly asked for. Collapsing the two

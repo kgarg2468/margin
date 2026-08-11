@@ -124,21 +124,22 @@ const READ_ATTEMPTS = 2;
  *     one already handles. `retryAfterMs` is imported rather than restated; it
  *     already reads both spellings of the header and already refuses to
  *     believe a delay longer than this is willing to wait.
+ *   - **A `304` is an answer.** It is the cheap "nothing has changed" the
+ *     hourly sweep is built on, and returning it as a response rather than
+ *     raising is what lets a caller treat it as the no-op it is.
  *
  * The two ceilings that wait are different mechanisms, and they are meant to
  * disagree. This one is the **in-request** wait: one `429`, `retry-after`
  * honoured through `retryAfterMs`, capped at that function's `MAX_BACKOFF_MS`
- * of 8s, and a longer directed delay is declined outright — the cursor is a
- * better answer than an action holding a socket open. The other is the
- * **between-page** wait: Zotero's `Backoff` header, which arrives on successful
- * responses too and asks for room before the *next* page rather than a re-ask
- * of this one. `readSyncHeaders` in `lib/zotero/api.ts` reads that one and caps
- * it at 30s, which is affordable precisely because nothing is in flight while
- * it is honoured. A single shared ceiling would have to be the smaller of the
- * two, and would then throw away the room Zotero explicitly asked for.
- *   - **A `304` is an answer.** It is the cheap "nothing has changed" the
- *     hourly sweep is built on, and returning it as a response rather than
- *     raising is what lets a caller treat it as the no-op it is.
+ * of 8s (module-private to `convex/auth.ts`), and a longer directed delay is
+ * declined outright — the cursor is a better answer than an action holding a
+ * socket open. The other is the **between-page** wait: Zotero's `Backoff`
+ * header, which arrives on successful responses too and asks for room before
+ * the *next* page rather than a re-ask of this one. `readSyncHeaders` in
+ * `lib/zotero/api.ts` reads that one and caps it at 30s, which is affordable
+ * precisely because nothing is in flight while it is honoured. A single shared
+ * ceiling would have to be the smaller of the two, and would then throw away
+ * the room Zotero explicitly asked for.
  */
 export async function zoteroFetch(
   url: string,
@@ -553,6 +554,14 @@ export const listCollections = action({
 const COLLECTION_KEY = /^[A-Za-z0-9]{4,32}$/;
 
 /**
+ * What addresses a Zotero library: a numeric id, for users and groups both.
+ * `parseKeyPermissions` and `parseGroups` only ever produce digits, so
+ * anything else — the empty string that builds `/users//collections`, a name
+ * where an id belongs — never came from the picker.
+ */
+const LIBRARY_ID = /^[0-9]{1,16}$/;
+
+/**
  * Point the link at a library, and optionally at one collection in it.
  *
  * **The version counter is thrown away on every change.** A
@@ -590,6 +599,11 @@ export const chooseScope = mutation({
     if (link === null) {
       throw new ConvexError(
         "There's no Zotero library linked here yet. Paste a key first.",
+      );
+    }
+    if (!LIBRARY_ID.test(args.libraryId)) {
+      throw new ConvexError(
+        "That isn't a Zotero library. Pick one from the list.",
       );
     }
     if (

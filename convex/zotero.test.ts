@@ -471,6 +471,24 @@ describe("chooseScope", () => {
     expect(ctx.db.all("zoteroLinks")[0]?.collectionKey).toBeUndefined();
   });
 
+  it("refuses a library id that did not come from Zotero", async () => {
+    // Same argument, one argument earlier: `parseKeyPermissions` and
+    // `parseGroups` only ever produce digits, and the empty string builds
+    // `/users//collections`. A guard on the collection key alone would leave
+    // the id beside it unwatched.
+    const { ctx, seed } = await linked();
+    for (const libraryId of ["", "..", "Rahmani Lab", "475425/x"]) {
+      await expect(
+        choose(ctx, {
+          labId: seed.labId,
+          libraryType: "group",
+          libraryId,
+        }),
+      ).rejects.toBeInstanceOf(ConvexError);
+    }
+    expect(ctx.db.all("zoteroLinks")[0]?.libraryType).toBe("user");
+  });
+
   it("refuses when this member has no link to scope", async () => {
     const { ctx, seed } = await world();
     await expect(
