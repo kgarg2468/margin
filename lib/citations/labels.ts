@@ -19,7 +19,8 @@
  * kills it: a label nobody minted resolves to nothing and the item is dropped
  * whole. The bound was never the safety property; the resolution is.
  */
-const LABEL = String.raw`A\d+`;
+const DIGITS = String.raw`\d+`;
+const LABEL = String.raw`A${DIGITS}`;
 
 /** A label anywhere in prose, brackets optional. Word-bounded: `DNA12` is not one. */
 const IN_PROSE = new RegExp(String.raw`\[?\b(${LABEL})\b\]?`, "g");
@@ -37,8 +38,14 @@ const IN_PROSE_WITH_SPACE = new RegExp(
   "g",
 );
 
-/** A `refs` entry that is nothing but a label, and the leading zeros it may carry. */
-const SOLE_LABEL = /^\[?\s*a\s*(\d+)\s*\]?$/i;
+/**
+ * A `refs` entry that is nothing but a label, and the leading zeros it may
+ * carry. Built from `DIGITS` like the prose readers above — the strict wrapper
+ * differs in its casing and whitespace tolerance, never in how many digits a
+ * label may have, or the two would drift apart exactly the way the old bound
+ * did.
+ */
+const SOLE_LABEL = new RegExp(String.raw`^\[?\s*a\s*(${DIGITS})\s*\]?$`, "i");
 
 /** One label, from a zero-based position. 1-based on the page: the prompt says `[A1]`. */
 export function labelAt(index: number): string {
