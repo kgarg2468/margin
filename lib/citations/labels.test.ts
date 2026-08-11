@@ -5,6 +5,7 @@ import {
   labelAt,
   normalizeLabel,
   scanLabels,
+  stripLabels,
 } from "./labels";
 
 describe("issueLabels", () => {
@@ -58,5 +59,60 @@ describe("scanLabels", () => {
 
   it("does not read a label out of a longer word", () => {
     expect(scanLabels("DNA12 is not a citation")).toEqual([]);
+  });
+});
+
+describe("the grammar has no length limit", () => {
+  // The bug this closes: `A\d{1,4}` made a five-digit label invisible to the
+  // scanner, so the gate never learned the item cited something nobody issued
+  // and kept it — reference and all.
+  it("reads a label longer than four digits, so the gate can reject it", () => {
+    expect(scanLabels("the cohorts diverge [A12345]")).toEqual(["A12345"]);
+  });
+
+  it("normalizes one, rather than refusing to look at it", () => {
+    expect(normalizeLabel("[A12345]")).toBe("A12345");
+  });
+
+  it("still refuses a word that merely contains digits", () => {
+    expect(scanLabels("DNA12345 is not a citation")).toEqual([]);
+  });
+});
+
+describe("stripLabels", () => {
+  it("takes a trailing marker out and closes the gap before the stop", () => {
+    expect(stripLabels("The cohort split holds [A3].")).toBe(
+      "The cohort split holds.",
+    );
+  });
+
+  it("takes an unbracketed one out too — the scanner reads both", () => {
+    expect(stripLabels("The cohort split holds A3.")).toBe(
+      "The cohort split holds.",
+    );
+  });
+
+  it("takes a leading marker out and does not leave the space behind", () => {
+    expect(stripLabels("[A12] the assay was rerun")).toBe(
+      "the assay was rerun",
+    );
+  });
+
+  it("removes the parenthesis a run of markers leaves empty", () => {
+    expect(stripLabels("Both members said so (A3, A4).")).toBe(
+      "Both members said so.",
+    );
+  });
+
+  it("reaches a label the old grammar could not see", () => {
+    expect(stripLabels("nothing issued this [A12345]")).toBe(
+      "nothing issued this",
+    );
+  });
+
+  it("leaves a sentence with no markers in it exactly as it was", () => {
+    expect(stripLabels("Two members read the 4°C step the same way.")).toBe(
+      "Two members read the 4°C step the same way.",
+    );
   });
 });
