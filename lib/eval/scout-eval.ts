@@ -181,6 +181,20 @@ export type Population = {
   /** Labels discarded because the note is no longer lab-visible. */
   labelsDroppedNotLabVisible: number;
   /**
+   * Scored questions whose gather came back empty, so no model was ever asked.
+   *
+   * They are scored — they have labels, and recall 0 against those labels is a
+   * true statement about what the scout returned. But they are not a
+   * measurement of a model's judgement, and they drag the means down without
+   * appearing anywhere in the ranker set. Reported so a reader can tell a
+   * model that ranked badly from a retrieval that returned nothing to rank.
+   *
+   * Required, not optional. An optional counter makes "none of them did" and
+   * "nobody counted" the same value, which is the shape this field exists to
+   * stop being possible somewhere else.
+   */
+  questionsWithNoRanker: number;
+  /**
    * Bounded reads that came back full, in the reader's words.
    *
    * A `.take(n)` that returns exactly `n` has almost certainly left rows
@@ -325,11 +339,33 @@ function aggregateSide(
   };
 }
 
-export function aggregate(questions: readonly QuestionScore[]): Aggregate {
+export function aggregate(
+  questions: readonly QuestionScore[],
+  /**
+   * What to call the scout side over the whole run.
+   *
+   * This used to be sampled from the first row, and a row-0 sample is only a
+   * label while every row carries the same one. A row's `system` names what
+   * ranked *that* question, so once the rows can disagree the sample is a claim
+   * about eleven other rows made by looking at one of them: a run whose first
+   * question happened to gather nothing printed that fact as the heading over
+   * means the other eleven produced.
+   *
+   * So the sample is gone rather than demoted to a fallback. A fallback would
+   * be the same bug, kept exported and waiting for the next caller who does not
+   * know to pass this — which is the caller most likely to be wrong about it.
+   * Absent, the aggregate is labelled `scout`, which is true of every run.
+   *
+   * The baseline side needs no such argument. `search.everything` is a literal
+   * at its one call site and is the same string on every row by construction,
+   * so there is nothing there for a sample to be wrong about.
+   */
+  scoutSystem?: string,
+): Aggregate {
   return {
     questionsScored: questions.length,
     scout: aggregateSide(
-      questions[0]?.scout.system ?? "scout",
+      scoutSystem ?? "scout",
       questions.map((one) => one.scout),
     ),
     baseline: aggregateSide(

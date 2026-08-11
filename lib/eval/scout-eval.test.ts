@@ -220,6 +220,7 @@ describe("formatScoutEvalReport", () => {
       questionsUnreadable: 1,
       questionsBeyondLimit: 4,
       labelsDroppedNotLabVisible: 3,
+      questionsWithNoRanker: 0,
       truncated: [],
     },
     questions: [question("q1", ["a"], ["a"], ["x"])],

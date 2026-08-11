@@ -1,5 +1,11 @@
 import { getFunctionName } from "convex/server";
+import { internal } from "./_generated/api";
 import type { Doc, Id, TableNames } from "./_generated/dataModel";
+import {
+  STUB_MODEL,
+  type DelegationModelFailure,
+  type ScoutModelResult,
+} from "./delegations";
 
 /**
  * A database that runs in a test process.
@@ -21,6 +27,10 @@ import type { Doc, Id, TableNames } from "./_generated/dataModel";
  * what the code under test actually depends on. Where it diverges it should
  * diverge toward being *stricter* than the real thing, never looser — see
  * `hostileSearchIndex` below, which is the whole point of the exercise.
+ * One known exception breaks that rule today: the `search` constraint in
+ * `matches` accepts every row, so no test here can tell "the search found
+ * it" from "something else supplied it". Tightening it means re-seeding
+ * scoutEval.test.ts's empty-body overfetch rows in the same change.
  *
  * The file is named with two dots so Convex's bundler skips it, the same
  * trick `*.test.ts` relies on. Nothing here is ever deployed.
@@ -104,6 +114,36 @@ export type IndexRead = {
   constraints: Constraint[];
 };
 
+/** A `filter()` expression, evaluated against one row. */
+type Expr = (row: Row) => unknown;
+
+/**
+ * The `q` handed to a `.filter()` callback.
+ *
+ * Convex offers far more than this — `gt`, `lt`, `add`, `sub` — and every one
+ * of them is deliberately absent rather than approximated. A read that starts
+ * needing one throws here, at the missing method, instead of being filtered by
+ * a builder that quietly returned something truthy; this fixture's whole
+ * bargain is that where it diverges it diverges toward being stricter.
+ */
+class ExpressionBuilder {
+  field(name: string): Expr {
+    return (row) => row[name];
+  }
+  eq(a: Expr, b: Expr | unknown): Expr {
+    return (row) => a(row) === (typeof b === "function" ? (b as Expr)(row) : b);
+  }
+  neq(a: Expr, b: Expr | unknown): Expr {
+    return (row) => a(row) !== (typeof b === "function" ? (b as Expr)(row) : b);
+  }
+  and(...parts: Expr[]): Expr {
+    return (row) => parts.every((part) => part(row) === true);
+  }
+  or(...parts: Expr[]): Expr {
+    return (row) => parts.some((part) => part(row) === true);
+  }
+}
+
 class FakeQuery {
   constructor(
     private readonly rows: Row[],
@@ -111,6 +151,8 @@ class FakeQuery {
     private readonly descending: boolean,
     /** When true, filters are recorded and then ignored — a lying index. */
     private readonly hostile: boolean,
+    /** The `filter()` predicate, applied after the index constraints. */
+    private readonly predicate: Expr | null = null,
   ) {}
 
   order(direction: "asc" | "desc"): FakeQuery {
@@ -119,13 +161,45 @@ class FakeQuery {
       this.constraints,
       direction === "desc",
       this.hostile,
+      this.predicate,
     );
   }
 
+  filter(build: (q: ExpressionBuilder) => Expr): FakeQuery {
+    const predicate = build(new ExpressionBuilder());
+    if (typeof predicate !== "function") {
+      throw new Error(
+        "A `filter()` callback returned something this fixture cannot evaluate; it knows eq/neq/and/or/field and nothing else.",
+      );
+    }
+    return new FakeQuery(
+      this.rows,
+      this.constraints,
+      this.descending,
+      this.hostile,
+      predicate,
+    );
+  }
+
+  private keep(row: Row): boolean {
+    if (this.predicate === null) return true;
+    const verdict = this.predicate(row);
+    // A bare `q.field("x")` as the whole filter is the shape that would
+    // otherwise pass a truthy row and drop a falsy one while looking like a
+    // predicate. Convex requires a boolean here and so does this.
+    if (typeof verdict !== "boolean") {
+      throw new Error(
+        `A \`filter()\` expression answered ${typeof verdict} rather than a boolean; this fixture refuses to guess what that meant.`,
+      );
+    }
+    return verdict;
+  }
+
   private resolve(): Row[] {
-    const kept = this.hostile
+    const indexed = this.hostile
       ? [...this.rows]
       : this.rows.filter((row) => matches(row, this.constraints));
+    const kept = indexed.filter((row) => this.keep(row));
     kept.sort((a, b) => a._creationTime - b._creationTime);
     return this.descending ? kept.reverse() : kept;
   }
@@ -380,6 +454,83 @@ export class FakeCtx {
 }
 
 /* -------------------------------------------------------------------------
+ * The model
+ * ---------------------------------------------------------------------- */
+
+const MATERIAL_MARKER = "MATERIAL (JSON):\n";
+
+/**
+ * A model that reads its prompt and cites everything it was shown.
+ *
+ * The offline stand-in for `internal.delegations.callScoutModel`, registered
+ * against the real reference so the suites drive the whole run — claim,
+ * gather, the privacy gate, the prompt, the citation gate, the store — and
+ * fake only the network.
+ *
+ * It parses the prompt's own JSON payload rather than being handed the
+ * material out of band, which is both what a model does and what makes it a
+ * fixture that cannot pass while the prompt is broken. It cites rather than
+ * paraphrases: a stub that invented prose could clear the citation gate while
+ * saying something about notes it had not read, and a fixture that lies is
+ * worse than none.
+ *
+ * It answers per question, out of `questions[].labels` rather than out of the
+ * shared `annotations` layout — the batch prompt gives every question the same
+ * vocabulary and a different subset of it to use, and a fixture that cited the
+ * whole layout would be a fixture that cannot fail the per-question gate. A
+ * stand-in that could only pass is not a stand-in.
+ */
+export function fakeScoutModel(prompt: string): {
+  ok: true;
+  text: string;
+  model: string;
+} {
+  const at = prompt.indexOf(MATERIAL_MARKER);
+  if (at === -1) {
+    throw new Error(
+      "The scout prompt no longer carries a `MATERIAL (JSON):` payload; the fake model cannot read what the real one is shown.",
+    );
+  }
+  const payload = JSON.parse(prompt.slice(at + MATERIAL_MARKER.length)) as {
+    questions: { ref: string; labels: string[] }[];
+  };
+  return {
+    ok: true,
+    model: STUB_MODEL,
+    text: JSON.stringify({
+      answers: payload.questions.map((one) => ({
+        ref: one.ref,
+        items: one.labels.map((label) => ({
+          text: `The lab has written on this before [${label}].`,
+          citations: [label],
+        })),
+      })),
+    }),
+  };
+}
+
+/** Register it, and hand back the log of what the run asked the model. */
+export function registerFakeScoutModel(
+  ctx: FakeCtx,
+  options: { modelFailure?: DelegationModelFailure } = {},
+): { prompt: string }[] {
+  const calls: { prompt: string }[] = [];
+  ctx.register(internal.delegations.callScoutModel, {
+    // Annotated, because `register`/`handlerOf` go through `unknown` and erase
+    // every type on the way: a fixture that drifted from the seam's contract
+    // would typecheck happily and fail as a puzzle at runtime. This is the one
+    // place the two shapes can still be held together.
+    _handler: (_ctx: unknown, args: { prompt: string }): ScoutModelResult => {
+      calls.push({ prompt: args.prompt });
+      return options.modelFailure === undefined
+        ? fakeScoutModel(args.prompt)
+        : { ok: false, failure: options.modelFailure };
+    },
+  });
+  return calls;
+}
+
+/* -------------------------------------------------------------------------
  * Rows
  * ---------------------------------------------------------------------- */
 
@@ -464,11 +615,15 @@ export async function seedAnnotation(
     deletedAt: number;
     type: string;
     labId: Id<"labs">;
+    paperId: Id<"papers">;
+    /** The meeting it was written under — what makes a note carriable forward. */
+    sessionId: Id<"sessions">;
   }> = {},
 ): Promise<Id<"annotations">> {
   return await ctx.db.insert("annotations", {
     labId: overrides.labId ?? seed.labId,
-    paperId: seed.paperId,
+    paperId: overrides.paperId ?? seed.paperId,
+    sessionId: overrides.sessionId,
     memberId: seed.memberId,
     anchor: {
       quote: "incubation at 4°C",

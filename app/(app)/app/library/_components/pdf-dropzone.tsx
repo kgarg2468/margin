@@ -12,6 +12,36 @@ import { useRef, useState } from "react";
  * using it, since the library's "add a paper" and a paper's "attach the PDF"
  * end in different places.
  */
+export type FileOffer =
+  | { kind: "ignored" }
+  | { kind: "rejected" }
+  | { kind: "accepted"; file: File };
+
+/**
+ * What a file arriving at this zone is allowed to do, decided once for both
+ * ways in.
+ *
+ * `disabled` is the reason this is a function and not three lines inside a
+ * handler. It used to be a prop that styled the zone and stopped the click, and
+ * a drag-and-drop went straight past it into `onFile` — a second attach
+ * starting on top of one already running, two files landing on one paper, and a
+ * progress bar showing two runs interleaved with a cancel that could only reach
+ * one of them. A refusal has to be answered at every entrance or it is
+ * decoration.
+ *
+ * `accepted` carries the file so that having been accepted and having something
+ * to accept cannot come apart at the call site.
+ */
+export function offerFile(
+  file: File | undefined,
+  disabled: boolean,
+): FileOffer {
+  if (disabled || file === undefined) {
+    return { kind: "ignored" };
+  }
+  return isPdfFile(file) ? { kind: "accepted", file } : { kind: "rejected" };
+}
+
 export function PdfDropzone({
   id,
   hint,
@@ -28,15 +58,16 @@ export function PdfDropzone({
   const [rejected, setRejected] = useState(false);
 
   function accept(file: File | undefined) {
-    if (file === undefined) {
+    const offer = offerFile(file, disabled);
+    if (offer.kind === "ignored") {
       return;
     }
-    if (!isPdfFile(file)) {
+    if (offer.kind === "rejected") {
       setRejected(true);
       return;
     }
     setRejected(false);
-    onFile(file);
+    onFile(offer.file);
   }
 
   return (
@@ -45,20 +76,34 @@ export function PdfDropzone({
         type="button"
         disabled={disabled}
         onClick={() => inputRef.current?.click()}
+        // Withholding `preventDefault` is how an element says it is not a drop
+        // target: the browser then refuses the drop itself and shows the "no"
+        // cursor, so the gesture is answered before it is finished rather than
+        // after. `dragover` is where that is decided — there is no `dragenter`
+        // handler here, and adding one would only repeat this answer.
         onDragOver={(event) => {
+          if (disabled) {
+            return;
+          }
           event.preventDefault();
           setOver(true);
         }}
         onDragLeave={() => setOver(false)}
         onDrop={(event) => {
+          // Unconditional, including while disabled. Left to the browser, a
+          // dropped PDF replaces the page with itself — the one outcome worse
+          // than a second attach. `accept` is what declines the file; this only
+          // stops the window from being taken.
           event.preventDefault();
           setOver(false);
           accept(event.dataTransfer.files[0]);
         }}
         className={
           "flex w-full flex-col items-center gap-1 rounded-md border border-dashed px-6 py-10 " +
-          "transition-colors disabled:cursor-not-allowed disabled:opacity-50 " +
-          (over
+          "pressable disabled:cursor-not-allowed disabled:opacity-50 " +
+          // A zone that went busy under a hovering drag would otherwise keep the
+          // lit border it was given while it was still willing.
+          (over && !disabled
             ? "border-accent bg-highlight"
             : "border-rule bg-surface hover:border-ink-faint")
         }

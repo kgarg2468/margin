@@ -13,8 +13,10 @@ import { recordEvent } from "./lib/ledger";
 import { slackIsConfigured } from "./lib/slack";
 import { briefSectionKey } from "./schema";
 import { canApprove } from "./sessions";
-import { isStillShared, WITHDRAWN_ITEM_TEXT } from "./synthesis";
+import { WITHDRAWN_ITEM_TEXT } from "./synthesis";
 import { assembleBrief, type BriefAnnotation } from "../lib/brief/assemble";
+import { redactWhenAnyWithdrawn } from "../lib/citations/redaction";
+import { isStillShared } from "../lib/citations/visibility";
 
 /**
  * The presenter's pre-session brief.
@@ -42,9 +44,9 @@ import { assembleBrief, type BriefAnnotation } from "../lib/brief/assemble";
  * A stored citation is a claim about a row, and the margin moves underneath it:
  * notes get withdrawn and members flip one back to private. So `getForSession`
  * re-resolves every cited id on read and redacts a line whose notes have all
- * gone, using the same `isStillShared` predicate `convex/synthesis.ts` applies
- * — imported rather than restated, because a privacy rule with two definitions
- * has one that is out of date.
+ * gone, using the same `isStillShared` predicate every other surface applies
+ * (`lib/citations/visibility.ts`) — imported rather than restated, because a
+ * privacy rule with two definitions has one that is out of date.
  *
  * ## Two things this file will not do
  *
@@ -207,13 +209,21 @@ async function priorSessions(
  * a panel of four empty headings tells a presenter less than no panel at all —
  * so a session whose paper has no shared annotations yet simply doesn't get a
  * row, and the boundary job leaves nothing behind to clean up.
+ *
+ * The carried-forward ids come back with the id of the row. They are already
+ * computed here, and a caller that re-read the brief to find them would be
+ * re-deriving "which notes are the scout's subjects" from stored text — a
+ * second definition of the rule, and the one that goes out of date.
  */
 async function writeBrief(
   ctx: MutationCtx,
   session: Doc<"sessions">,
   trigger: "scheduled" | "manual",
   actorId: Id<"users">,
-): Promise<Id<"briefs"> | null> {
+): Promise<{
+  briefId: Id<"briefs">;
+  carriedAnnotationIds: Id<"annotations">[];
+} | null> {
   const paper = await ctx.db.get(session.paperId);
   if (paper === null) {
     return null;
@@ -308,7 +318,16 @@ async function writeBrief(
     itemCount,
     trigger,
   });
-  return briefId;
+  return {
+    briefId,
+    // The subjects the scout may be pointed at, taken from the section that
+    // defines them: `lib/brief/assemble.ts` builds "carried-over" from
+    // top-level `open-question` notes with no replies, one id per line.
+    carriedAnnotationIds:
+      sections
+        .find((section) => section.key === "carried-over")
+        ?.items.flatMap((item) => item.annotationIds) ?? [],
+  };
 }
 
 /**
@@ -330,12 +349,17 @@ export const generate = mutation({
         "That session was cancelled, so there is no meeting left to prepare for.",
       );
     }
-    const briefId = await writeBrief(ctx, session, "manual", userId);
-    if (briefId === null) {
+    const written = await writeBrief(ctx, session, "manual", userId);
+    if (written === null) {
       throw new ConvexError(
         "There's nothing to brief on yet — nobody has shared an annotation on this paper. A brief is assembled from what the lab wrote, so it has nothing to rearrange.",
       );
     }
+    // And deliberately no scout. This is a button, and a batch of model calls
+    // per press is not what pressing "assemble" means — somebody re-reading
+    // their prep three times would pay three times for the same answers. The
+    // design puts the delegation trigger on the T−2h chain (§6.1) precisely
+    // because that one fires once.
     return null;
   },
 });
@@ -384,7 +408,25 @@ export const buildForSession = internalMutation({
       return null;
     }
 
-    await writeBrief(ctx, session, "scheduled", session.presenterId);
+    const written = await writeBrief(
+      ctx,
+      session,
+      "scheduled",
+      session.presenterId,
+    );
+
+    // §6.1: strictly after the brief, and never in front of it. The brief is
+    // deterministic and instant and has to stay that way — a presenter opening
+    // it two hours before they stand up waits for nothing, and the scout's
+    // lines arrive underneath, reactively, or they do not arrive. A separate
+    // transaction is also what keeps a delegation failure from rolling back a
+    // brief that is already correct.
+    if (written !== null && written.carriedAnnotationIds.length > 0) {
+      await ctx.scheduler.runAfter(0, internal.delegations.enqueueForBrief, {
+        briefId: written.briefId,
+        annotationIds: written.carriedAnnotationIds,
+      });
+    }
     return null;
   },
 });
@@ -445,11 +487,12 @@ export function redactWithdrawn(
 ): StoredSection[] {
   return sections.map((section) => ({
     ...section,
-    items: section.items.map((item) =>
-      item.annotationIds.every((id) => stillShared.has(id))
-        ? item
-        : { ...item, text: WITHDRAWN_ITEM_TEXT },
-    ),
+    items: redactWhenAnyWithdrawn(
+      section.items,
+      stillShared,
+      (item) => item.annotationIds,
+      (item) => ({ ...item, text: WITHDRAWN_ITEM_TEXT }),
+    ).items,
   }));
 }
 

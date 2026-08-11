@@ -17,12 +17,15 @@ import {
   chipClass,
   errorClass,
   labelClass,
+  linkButtonClass,
   primaryButtonClass,
   secondaryButtonClass,
   textareaClass,
 } from "@/lib/ui";
 import { useAction, useMutation } from "convex/react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { PanelHold } from "./upload-flow";
+import { importHold, percentSent } from "./upload-flow";
 
 type Preview = {
   format: ReferenceFormat;
@@ -33,9 +36,17 @@ type Preview = {
 export function ReferenceImport({
   labId,
   onAdded,
+  onBusy,
 }: {
   labId: Id<"labs">;
   onAdded?: () => void;
+  /**
+   * A running import holds the panel open. It is the longest wait of the three
+   * — one round trip per selected reference — and the one whose abandonment
+   * costs most, because the outcomes list is the only record of which entries
+   * landed and which did not.
+   */
+  onBusy?: (hold: PanelHold | null) => void;
 }) {
   const createFromDoi = useAction(api.papers.createFromDoi);
   const createFromMetadata = useMutation(api.papers.createFromMetadata);
@@ -52,6 +63,48 @@ export function ReferenceImport({
   const [importing, setImporting] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  /** Not an error: what a withdrawal left behind, in the member's own words. */
+  const [note, setNote] = useState<string | null>(null);
+  /**
+   * Read between entries by the worker loop. A ref rather than state because
+   * the loop is already running when this is written and would never see a
+   * re-render's copy of it.
+   */
+  const stopped = useRef(false);
+  /**
+   * Which import is allowed to speak. A run that has been stopped still is —
+   * its entries in the air really are landing — but one the member has reset
+   * past is not, or its outcomes would appear in a form that has been emptied.
+   */
+  const attempt = useRef(0);
+
+  const hold = importHold(importing);
+
+  /**
+   * A run outlives this component: its workers are holding promises that no
+   * unmount cancels. Silencing them on the way out keeps a straggler from
+   * calling `onAdded` into a closed panel, which the library reads as a fresh
+   * arrival and re-opens on.
+   */
+  useEffect(
+    () => () => {
+      stopped.current = true;
+      attempt.current += 1;
+    },
+    [],
+  );
+
+  useEffect(() => {
+    onBusy?.(importHold(importing));
+  }, [importing, onBusy]);
+  /**
+   * Separate from the report above so its cleanup runs on unmount alone. Paired
+   * with it, every change would first withdraw the hold and then re-state it,
+   * and the parent's identity check would see two different values where the
+   * member saw one unbroken wait.
+   */
+  useEffect(() => () => onBusy?.(null), [onBusy]);
 
   function prepare(text: string, name: string | null) {
     setError(null);
@@ -91,6 +144,9 @@ export function ReferenceImport({
   }
 
   function startOver() {
+    // A run that is still winding down must not write into the blank form this
+    // hands back — an entry in the air can land seconds after the reset.
+    attempt.current += 1;
     setSource("");
     setSourceName(null);
     setPreview(null);
@@ -98,17 +154,26 @@ export function ReferenceImport({
     setOutcomes(new Map());
     setImporting(false);
     setError(null);
+    setNote(null);
   }
 
   async function confirmImport() {
     if (preview === null || selected.size === 0) {
       return;
     }
+    const mine = ++attempt.current;
     setImporting(true);
     setError(null);
+    setNote(null);
     setOutcomes(new Map());
+    stopped.current = false;
 
     const results = await importReferences({
+      // Two ways to be over, and the older run needs both. `stopped` is shared,
+      // so the line above un-cancels it the moment a second run starts — an
+      // earlier run's workers would read the new run's `false` and resume
+      // sending. The generation is the half that cannot be taken back.
+      cancelled: () => stopped.current || attempt.current !== mine,
       entries: preview.entries,
       selected: [...selected].sort((left, right) => left - right),
       createFromDoi: async (entry) => {
@@ -129,6 +194,12 @@ export function ReferenceImport({
         });
       },
       onOutcome: (index, outcome) => {
+        // A straggler from a run the member has already reset past has nothing
+        // to say. One that is merely *stopped* still does: it was genuinely
+        // sent, it genuinely landed, and the list is the record of that.
+        if (attempt.current !== mine) {
+          return;
+        }
         if (outcome.status === "added" && !keptOpen.current) {
           keptOpen.current = true;
           onAdded?.();
@@ -141,8 +212,51 @@ export function ReferenceImport({
       },
     });
 
+    if (attempt.current !== mine) {
+      return;
+    }
     setImporting(false);
     setOutcomes(results);
+    if (stopped.current) {
+      // The outcomes stay on screen: they are the record of what happened, and
+      // the reason stopping this is a cancel and not a discard.
+      //
+      // "Settled" rather than "sent", because not everything above was sent:
+      // a reference the export listed twice is answered from the first copy's
+      // result without a round trip of its own. The sentence has to be true of
+      // the whole list, and only the second half is about the network.
+      //
+      // A stop that beats the first entry leaves nothing above to point at, and
+      // pointing at an empty list is how a member starts looking for the rows
+      // that were never there.
+      setNote(
+        results.size > 0
+          ? "Stopped. The references above are settled; the rest were never sent."
+          : "Stopped. Nothing was sent.",
+      );
+    }
+  }
+
+  /**
+   * A real one, unlike the panel's other two waits — and it gives the panel
+   * back at once rather than when the queue happens to drain.
+   *
+   * An import is one round trip per entry, so it is the longest wait here and
+   * the only one that can be stopped part-done and still leave something worth
+   * keeping. Two separate things happen on this press. `stopped` keeps the
+   * workers from issuing anything further; entries already in the air are left
+   * to finish, since cancelling them would only throw away answers that have
+   * been paid for. And `importing` goes false *now*, because the alternative is
+   * the failure this control exists to prevent: one hung action on entry 40 of
+   * 200 means the queue never drains, and a panel that waits for it is a panel
+   * bolted shut by the very control that was meant to open it.
+   */
+  function stopImporting() {
+    stopped.current = true;
+    setImporting(false);
+    // Said immediately. The stragglers can take seconds, and a press that
+    // produces no visible answer reads as a press that missed.
+    setNote("Stopping. Nothing further will be sent.");
   }
 
   const withinBatchDuplicates =
@@ -318,9 +432,43 @@ export function ReferenceImport({
           </ul>
 
           {importing && (
-            <p role="status" className="font-sans text-sm text-ink-muted">
-              Importing {outcomes.size} of {selected.size}…
-            </p>
+            <div className="flex flex-wrap items-baseline gap-x-4 gap-y-2">
+              {/* A bar, not a live region. It was `role="status"`, which is
+                  both the conditional shape that announces unreliably and —
+                  once it does announce — one interruption per reference, which
+                  on a 200-entry export is the failure the upload's own progress
+                  line was rewritten to avoid. A `progressbar` is polled: the
+                  count is here to be looked at, and reachable on request. */}
+              <p
+                role="progressbar"
+                aria-label="Importing references"
+                aria-valuetext={`${outcomes.size} of ${selected.size}`}
+                {...(() => {
+                  const percent = percentSent(outcomes.size, selected.size);
+                  return percent === null
+                    ? {}
+                    : {
+                        "aria-valuenow": percent,
+                        "aria-valuemin": 0,
+                        "aria-valuemax": 100,
+                      };
+                })()}
+                className="font-sans text-sm tabular-nums text-ink-muted"
+              >
+                Importing {outcomes.size} of {selected.size}…
+              </p>
+              {/* No wait without a way out of it — and this was the longest
+                  wait in the panel with no control on it at all. */}
+              {hold !== null && (
+                <button
+                  type="button"
+                  onClick={stopImporting}
+                  className={`${linkButtonClass} tap-target text-xs`}
+                >
+                  {hold.label}
+                </button>
+              )}
+            </div>
           )}
 
           <div className="flex flex-wrap items-center gap-4">
@@ -349,6 +497,17 @@ export function ReferenceImport({
           </div>
         </>
       )}
+
+      {/* Mounted always, and `sr-only` while empty — a live region that arrives
+          holding its text is the shape several screen readers ignore, and being
+          out of flow costs the panel no gap. Same reasoning as `add-paper`'s
+          `Note`, which this cannot import: that module imports this one. */}
+      <p
+        role="status"
+        className={note === null ? "sr-only" : "font-sans text-sm text-ink-muted"}
+      >
+        {note ?? ""}
+      </p>
 
       {error !== null && (
         <p role="alert" className={errorClass}>

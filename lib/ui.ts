@@ -50,8 +50,25 @@ export const secondaryButtonClass =
   `font-sans text-sm text-ink hover:border-ink-faint ${pressable} ` +
   "disabled:cursor-not-allowed disabled:opacity-50";
 
+/**
+ * A control drawn as a word: an `Undo` in a toast, a `Clear` on the filter
+ * strip, a `Sign out`. Quiet on purpose — Margin's chrome is marginalia and
+ * padding these up to buttons would turn the margin into a toolbar — but a
+ * control all the same, which is what `pressable` says and what this class
+ * spent every quiet control in the app not saying. `ConfirmAction` had already
+ * written the combination out by hand rather than importing half of it.
+ *
+ * Which makes this the line between two things that used to look identical:
+ * wearing this class means "a control drawn as a word", and the same string
+ * written out inline means "a prose link" — a word inside a sentence, which
+ * goes somewhere and does not give under the finger. Sweeping those into this
+ * export would erase the distinction it was widened to draw.
+ *
+ * Still not `tap-target`: the hit box depends on what sits next to a given
+ * one (adjacent 44px boxes overlap), so it stays a call-site decision.
+ */
 export const linkButtonClass =
-  "font-sans text-sm text-accent underline-offset-4 hover:underline";
+  `font-sans text-sm text-accent underline-offset-4 hover:underline ${pressable}`;
 
 /** A sheet resting on the desk. */
 export const cardClass =

@@ -243,6 +243,26 @@ export const delegationStatus = v.union(
   v.literal("cancelled"),
 );
 
+/** The model was unreachable: no key on this deployment, a 5xx, or a rate limit. */
+const modelUnavailable = v.literal("model-unavailable");
+/** The call was still open when the scout's own timeout fired. */
+const modelTimeout = v.literal("model-timeout");
+/** Something came back and it was not items this codebase can read — including a refusal. */
+const modelOutputInvalid = v.literal("model-output-invalid");
+/** The answer ran out of output budget, so what came back is half an answer. */
+const overBudget = v.literal("over-budget");
+
+/**
+ * The subset a model call can produce, so the action that makes the call can
+ * validate its own return without being able to claim a lease expired.
+ */
+export const delegationModelFailure = v.union(
+  modelUnavailable,
+  modelTimeout,
+  modelOutputInvalid,
+  overBudget,
+);
+
 /**
  * Why a run ended without a finding — a closed set, never prose.
  *
@@ -267,6 +287,12 @@ export const delegationFailure = v.union(
   v.literal("run-error"),
   /** Material came back and every item of it died at the citation gate. */
   v.literal("nothing-citable"),
+  // The four a model call can produce, spliced in from the narrow union above
+  // rather than restated, so the subset and the whole set cannot drift.
+  modelUnavailable,
+  modelTimeout,
+  modelOutputInvalid,
+  overBudget,
 );
 
 /**

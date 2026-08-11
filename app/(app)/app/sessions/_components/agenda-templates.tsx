@@ -338,7 +338,7 @@ export function AgendaTemplateField({
             <button
               type="button"
               onClick={close}
-              className="tap-target text-ink-faint underline-offset-4 hover:text-ink-muted hover:underline"
+              className="pressable tap-target text-ink-faint underline-offset-4 hover:text-ink-muted hover:underline"
             >
               Cancel
             </button>

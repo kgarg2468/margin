@@ -10,6 +10,175 @@ const entries: ReferenceEntry[] = [
   { title: "Metadata duplicate", authors: [] },
 ];
 
+describe("importReferences, called off part-way", () => {
+  const many: ReferenceEntry[] = Array.from({ length: 20 }, (_, index) => ({
+    title: `Paper ${index}`,
+    authors: [],
+    doi: `10.1/p${index}`,
+  }));
+
+  it("stops issuing round trips and keeps what already landed", async () => {
+    let calls = 0;
+    let stop = false;
+    const outcomes = await importReferences({
+      entries: many,
+      selected: many.map((_, index) => index),
+      concurrency: 1,
+      cancelled: () => stop,
+      createFromDoi: async (entry) => {
+        calls++;
+        // Called off while the fourth is in the air: it is one round trip and
+        // is not interruptible, so it still lands and is still reported.
+        if (calls === 4) {
+          stop = true;
+        }
+        return { paperId: `doi:${entry.doi}`, alreadyInLibrary: false };
+      },
+      createFromMetadata: async () => {
+        throw new Error("no metadata entry in this batch");
+      },
+    });
+
+    expect(calls).toBe(4);
+    expect(outcomes.size).toBe(4);
+    expect(outcomes.get(3)).toEqual({
+      status: "added",
+      paperId: "doi:10.1/p3",
+    });
+    // The rest were never sent, so they have no outcome rather than a failure.
+    expect(outcomes.has(4)).toBe(false);
+  });
+
+  it("sends nothing when the stop lands before the queue's first turn", async () => {
+    // The panel's empty sentence — "Stopped. Nothing was sent." — is only true
+    // when this is true, and until the queue stopped dispatching inside its
+    // caller's own tick it never could be: three trips were already in the air
+    // by the time the caller had a line of its own to run, and a trip in the air
+    // always records an outcome.
+    let calls = 0;
+    let stopped = false;
+    const run = importReferences({
+      entries: many,
+      selected: many.map((_, index) => index),
+      concurrency: 3,
+      cancelled: () => stopped,
+      createFromDoi: async (entry) => {
+        calls++;
+        return { paperId: `doi:${entry.doi}`, alreadyInLibrary: false };
+      },
+      createFromMetadata: async () => {
+        throw new Error("no metadata entry in this batch");
+      },
+    });
+    stopped = true;
+    const outcomes = await run;
+
+    expect(calls).toBe(0);
+    expect(outcomes.size).toBe(0);
+  });
+
+  it("keeps the settled list when the stop lands after the first trip is out", async () => {
+    // The other side of the same seam, and the one a member actually reaches:
+    // the first worker's trip is gone and cannot be recalled, so it is reported.
+    // Its two colleagues have not sent yet and never do. A stop is not all or
+    // nothing, and the sentence about it has to hold for the middle.
+    let calls = 0;
+    let stopped = false;
+    const outcomes = await importReferences({
+      entries: many,
+      selected: many.map((_, index) => index),
+      concurrency: 3,
+      cancelled: () => stopped,
+      createFromDoi: async (entry) => {
+        calls++;
+        stopped = true;
+        return { paperId: `doi:${entry.doi}`, alreadyInLibrary: false };
+      },
+      createFromMetadata: async () => {
+        throw new Error("no metadata entry in this batch");
+      },
+    });
+
+    expect(calls).toBe(1);
+    expect(outcomes.size).toBe(1);
+    expect(outcomes.get(0)).toEqual({ status: "added", paperId: "doi:10.1/p0" });
+  });
+
+  it("does nothing at all when it is called off before the first entry", async () => {
+    let calls = 0;
+    const outcomes = await importReferences({
+      entries: many,
+      selected: [0, 1, 2],
+      cancelled: () => true,
+      createFromDoi: async () => {
+        calls++;
+        return { paperId: "unreachable", alreadyInLibrary: false };
+      },
+      createFromMetadata: async () => {
+        throw new Error("unreachable");
+      },
+    });
+
+    expect(calls).toBe(0);
+    expect(outcomes.size).toBe(0);
+  });
+
+  it("stays called off when a later run resets the flag it was called off with", async () => {
+    // The panel's stop flag is shared between runs, so starting a second import
+    // sets it back to false while the first one's workers are still looping.
+    // The predicate the panel builds is the pair — the flag *or* a generation
+    // that has moved past this run — and the second half is the one a new run
+    // cannot take back. Composed here exactly as the panel composes it; what is
+    // under test is that the queue asks again before each entry rather than
+    // reading the answer once, which is what makes the second half bite at all.
+    let stopped = false;
+    let generation = 1;
+    const mine = generation;
+
+    let calls = 0;
+    const outcomes = await importReferences({
+      entries: many,
+      selected: many.map((_, index) => index),
+      concurrency: 1,
+      cancelled: () => stopped || generation !== mine,
+      createFromDoi: async (entry) => {
+        calls++;
+        if (calls === 3) {
+          // Stop pressed, and then a second import started on top of it.
+          stopped = true;
+          stopped = false;
+          generation += 1;
+        }
+        return { paperId: `doi:${entry.doi}`, alreadyInLibrary: false };
+      },
+      createFromMetadata: async () => {
+        throw new Error("no metadata entry in this batch");
+      },
+    });
+
+    expect(calls).toBe(3);
+    expect(outcomes.size).toBe(3);
+    expect(outcomes.has(3)).toBe(false);
+  });
+
+  it("runs the whole batch when nothing calls it off", async () => {
+    const outcomes = await importReferences({
+      entries: many,
+      selected: many.map((_, index) => index),
+      cancelled: () => false,
+      createFromDoi: async (entry) => ({
+        paperId: `doi:${entry.doi}`,
+        alreadyInLibrary: false,
+      }),
+      createFromMetadata: async () => {
+        throw new Error("no metadata entry in this batch");
+      },
+    });
+
+    expect(outcomes.size).toBe(many.length);
+  });
+});
+
 describe("importReferences", () => {
   it("routes DOI and metadata entries and reports each outcome independently", async () => {
     const updates: Array<[number, string]> = [];

@@ -3,7 +3,7 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { query, type QueryCtx } from "./_generated/server";
 import { getMembership, requireUserId } from "./lib/authz";
 import { annotationType } from "./schema";
-import { isStillShared } from "./synthesis";
+import { isStillShared } from "../lib/citations/visibility";
 import {
   changedSince,
   mostRecentMeetings,

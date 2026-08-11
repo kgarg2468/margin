@@ -1,20 +1,23 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { internal } from "./_generated/api";
 import type { ActionCtx, QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { internalAction, internalQuery } from "./_generated/server";
 import {
   MAX_CANDIDATES,
+  SOLE_QUESTION_REF,
+  answersByRef,
   buildScoutPrompt,
   candidateShape,
   gatherLabVisible,
   labelCandidates,
-  runScout,
+  parseScoutJson,
   sanitizeFindingItems,
   STUB_MODEL,
+  type Candidate,
 } from "./delegations";
 import { MAX_SEARCH_LENGTH } from "./search";
-import { isStillShared } from "./synthesis";
+import { isStillShared } from "../lib/citations/visibility";
 import {
   EVAL_TOP_N,
   aggregate,
@@ -506,38 +509,67 @@ export const retrieve = internalQuery({
  * The scout's ranked answer, produced by the shipped path and nothing else.
  *
  * Prompt, model seam, citation gate — `buildScoutPrompt` (which is also the
- * second privacy gate, and throws rather than filters), `runScout`, and
- * `sanitizeFindingItems`, in the order `runOne` calls them. What comes back is
- * the finding's citations in item order, which *is* the scout's ranking as a
- * reader receives it.
+ * second privacy gate, and throws rather than filters), the
+ * `internal.delegations.callScoutModel` action, and `sanitizeFindingItems`, in
+ * the order `runForBrief` calls them — over a batch of one, which is what a
+ * question scored on its own is. What comes back is the finding's citations in
+ * item order, which *is* the scout's ranking as a reader receives it.
  *
- * Today `runScout` is the stub, so this ranks by the search index's own order
- * with the question reduced to keywords. That is not a flattering thing to
- * report and it is the honest thing to report: until C3 lands a model here,
- * this harness measures the query reduction and the candidate gate, not
- * judgement. When C3 replaces the body of `runScout`, this function does not
- * change and the same report becomes a measurement of the real thing.
+ * The seam is now a call the harness makes through `ctx`, which is why this
+ * function takes one. That means the report measures whatever answered: a
+ * deployment with a key measures a model's judgement, and a suite that
+ * registers the offline fixture measures the query reduction and the candidate
+ * gate. Neither is assumed — the model each question was ranked by is
+ * collected on the way past and printed on the report.
+ *
+ * `model` is `null` when the gather came back empty, because then nothing was
+ * called and there is no honest name to write down. Naming one anyway is not a
+ * harmless default: a question can carry labels and still gather no candidates
+ * — the labels come from the ledger (`labelsFor`: outcomes and replies) and the
+ * candidates come from the search index, and two independent sources disagree
+ * on a real corpus. A report that filled the gap with the fixture's name would
+ * be telling an operator with a live key that a stub had ranked their run.
  */
 async function scoutRanking(
+  ctx: ActionCtx,
   labId: Id<"labs">,
   question: string,
-  candidates: readonly {
-    _id: Id<"annotations">;
-    labId: Id<"labs">;
-    paperId: Id<"papers">;
-    visibility: "private" | "lab";
-    deletedAt?: number;
-    type: string;
-    status?: string;
-    body: string;
-  }[],
-): Promise<Id<"annotations">[]> {
-  if (candidates.length === 0) return [];
+  candidates: readonly Candidate[],
+): Promise<{ ranked: Id<"annotations">[]; model: string | null }> {
+  if (candidates.length === 0) return { ranked: [], model: null };
   const prompt = buildScoutPrompt(labId, question, candidates);
-  const { labelled, byLabel } = labelCandidates(candidates);
-  const raw = await runScout(prompt, labelled);
-  const { items } = sanitizeFindingItems(raw, byLabel);
-  return topN(items.flatMap((item) => item.citedAnnotationIds));
+  const { byLabel } = labelCandidates(candidates);
+  const result = await ctx.runAction(internal.delegations.callScoutModel, {
+    prompt,
+  });
+  if (!result.ok) {
+    // A report whose scout side is empty because the call failed would print
+    // recall 0 and read as a measurement. Refusing is the honest answer, and
+    // an operator running this by hand is exactly who can act on it.
+    throw new ConvexError(
+      "The scout's model could not be reached, so there is nothing to score it on. Nothing has been measured — check OPENAI_API_KEY on this deployment and run it again.",
+    );
+  }
+  const parsed = parseScoutJson(result.text);
+  // A batch of one. The seam answers in the `answers` envelope whatever it was
+  // asked, so the harness reads the same wire format the product does — a
+  // report scored against a different one would be a report about nothing.
+  //
+  // Where it deliberately parts company is the missing ref. `runForBrief`
+  // passes `?? []` and files an unanswered question as `nothing-citable`,
+  // which is the right verdict on one row of a brief. Here `?? {}` throws,
+  // and that is the point: a question the model never answered would
+  // otherwise be scored recall 0 and printed as a measurement of the scout
+  // rather than of a call that went wrong. The report refuses instead.
+  const answers = parsed === null ? null : answersByRef(parsed);
+  const { items } = sanitizeFindingItems(
+    answers?.get(SOLE_QUESTION_REF) ?? {},
+    byLabel,
+  );
+  return {
+    ranked: topN(items.flatMap((item) => item.citedAnnotationIds)),
+    model: result.model,
+  };
 }
 
 const sideShape = v.object({
@@ -573,6 +605,7 @@ const reportShape = v.object({
     questionsUnreadable: v.number(),
     questionsBeyondLimit: v.number(),
     labelsDroppedNotLabVisible: v.number(),
+    questionsWithNoRanker: v.number(),
     truncated: v.array(v.string()),
   }),
   questions: v.array(
@@ -630,15 +663,53 @@ const GROUND_TRUTH_CAVEATS = [
   "Labels whose note has since been withdrawn or taken private are dropped, and the count of dropped labels is reported above.",
 ];
 
-function asymmetryNotes(ranker: string): string[] {
+/**
+ * What the `ranker` field says when no question reached the model.
+ *
+ * A sentinel rather than an empty string, because this field is printed: a
+ * report has to be able to say "nothing ranked this" in the same slot it
+ * otherwise says "gpt-5.6-sol", and the prose below branches on it rather than
+ * describing a run that never happened.
+ */
+const NO_RANKER = "none — no question reached the model";
+
+/**
+ * The run's disclosures, in the output rather than in a footnote.
+ *
+ * Takes the models that answered as a *set* rather than the joined string the
+ * report prints, because the two questions this prose has to answer are "was
+ * any of this the fixture" and "was any of it a model", and both are membership
+ * questions. Asking them of the joined string means exact equality, and exact
+ * equality drops the §10.2 warning from precisely the run that most needs it:
+ * the mixed one, where half the rows were ranked by a stub.
+ */
+function asymmetryNotes(
+  answered: readonly string[],
+  questionsWithNoRanker: number,
+): string[] {
+  const others = answered.filter((one) => one !== STUB_MODEL);
   return [
     `Candidate counts are not equal, by construction. The scout ranks the notes its gather returned (up to ${MAX_CANDIDATES}); the search drawer reads the index's top ${BASELINE_RESULTS * BASELINE_OVERFETCH} and returns the first ${BASELINE_RESULTS} that survive its live filter, ranking nothing further. Both sides are scored on ${EVAL_TOP_N} results, and each per-question row prints the pool its side actually chose from.`,
     `The two sides also send different queries: the scout reduces the question to keywords (stopwords and repeats removed) to fit the ${MAX_SEARCH_LENGTH}-character search cap, while the drawer sends the question as a member typed it, truncated at the same cap. That difference is part of what is being measured, not a defect in the comparison.`,
     "The baseline is the drawer's shared half, and that makes it the drawer's *upper* bound rather than a handicap. `search.everything` interleaves the caller's own private notes into the same six slots — a member's private notes evict lab-visible rows rather than extending the list — and every label here is lab-visible by construction. So a real member, sitting in front of the real drawer with private notes of their own that match, would see at most as many labelled notes as this baseline reports and usually fewer. An eval has no caller whose notebook it could legitimately read, and the scout has no private half either.",
     "Retrieval runs against the corpus as it stands today, not as it stood on the day each question was settled: notes written since are candidates now and were not then. Both sides read the same corpus, so the comparison holds — but absolute recall drifts downward as a lab keeps writing, and two runs made on different dates are not comparable to each other.",
-    ranker === STUB_MODEL
-      ? `The scout side is the stub ranker (${STUB_MODEL}), which cites its candidates in gather order. Until C3 replaces the model seam, this report measures retrieval and query reduction, not a model's judgement, and it is not the gate the design's §10.2 is asking for.`
-      : `The scout side was ranked by ${ranker}.`,
+    answered.length === 0
+      ? "No question in this run reached the model — every one of them was dropped, or gathered nothing to rank. The scout side is not a measurement of anything, and the numbers beside it are the arithmetic of an empty list."
+      : !answered.includes(STUB_MODEL)
+        ? `The scout side was ranked by ${answered.join(", ")}, through the same prompt, seam, and citation gate the product uses.`
+        : others.length === 0
+          ? `The scout side was ranked by the offline fixture (${STUB_MODEL}), which cites its candidates in gather order. This run measured retrieval and query reduction, not a model's judgement, and it is not the gate the design's §10.2 is asking for.`
+          : `Part of this run was ranked by the offline fixture (${STUB_MODEL}), which cites its candidates in gather order, and part by ${others.join(", ")}. Mixed, the aggregate is not a measurement of a model's judgement either, and this run is not the gate the design's §10.2 is asking for.`,
+    ...(questionsWithNoRanker === 0
+      ? []
+      : [
+          // Scored, and scored correctly — but a question whose gather came
+          // back empty contributes recall 0 to the means without any model
+          // having seen it. Left undisclosed, the reader reads those zeros as
+          // a model's failure to rank rather than as retrieval's failure to
+          // return, and those are different repairs.
+          `${questionsWithNoRanker} scored question${questionsWithNoRanker === 1 ? "" : "s"} gathered no candidates at all, so no model was asked about ${questionsWithNoRanker === 1 ? "it" : "them"} and ${questionsWithNoRanker === 1 ? "its" : "their"} recall 0 is retrieval's, not a ranker's. The per-question rows above print ${questionsWithNoRanker === 1 ? "it" : "them"} with a candidate pool of 0, and ${questionsWithNoRanker === 1 ? "it counts" : "they count"} toward the aggregate on any run where one is shown — under this gate's minimum, no aggregate is printed at all.`,
+        ]),
   ];
 }
 
@@ -668,8 +739,10 @@ export const run = internalAction({
 
     const scored: QuestionScore[] = [];
     const truncated = [...found.population.truncated];
+    const rankers = new Set<string>();
     let unreadable = 0;
     let droppedAtRetrieval = 0;
+    let withNoRanker = 0;
 
     for (const one of found.questions) {
       const retrieved = await ctx.runQuery(internal.scoutEval.retrieve, {
@@ -700,11 +773,14 @@ export const run = internalAction({
         continue;
       }
 
-      const ranked = await scoutRanking(
+      const { ranked, model } = await scoutRanking(
+        ctx,
         retrieved.labId,
         retrieved.question,
         retrieved.candidates,
       );
+      if (model === null) withNoRanker += 1;
+      else rankers.add(model);
 
       scored.push(
         scoreQuestion({
@@ -714,7 +790,10 @@ export const run = internalAction({
           settledAt: one.settledAt,
           labels: retrieved.labels,
           scout: {
-            system: `scout (${STUB_MODEL})`,
+            system:
+              model === null
+                ? "scout (nothing gathered; no model called)"
+                : `scout (${model})`,
             ranked,
             candidatesConsidered: retrieved.candidates.length,
           },
@@ -727,22 +806,40 @@ export const run = internalAction({
       );
     }
 
-    const totals = aggregate(scored);
+    /**
+     * What ranked this report — collected rather than declared.
+     *
+     * A `ranker` field the code writes down in advance is a field that stays
+     * true only until the seam behind it changes, which is exactly what
+     * happened to this file. A set, because a report is one run against one
+     * deployment and the honest answer to "which models" is however many
+     * answered — and a sorted join, because one name joined is that name, so
+     * the common case needs no branch of its own and no fallback that would
+     * only ever fire by naming something that had not run.
+     *
+     * Computed before the aggregate because the aggregate is labelled from it.
+     * Left to its own devices `aggregate` takes the first row's `system` as the
+     * heading for every row's numbers, and the first row is not a spokesman.
+     */
+    const answered = [...rankers].sort();
+    const ranker = answered.length === 0 ? NO_RANKER : answered.join(", ");
+    const totals = aggregate(scored, `scout (${ranker})`);
     const report: ScoutEvalReport = {
       generatedAt: Date.now(),
-      ranker: STUB_MODEL,
+      ranker,
       topN: EVAL_TOP_N,
       groundTruth: {
         rules: GROUND_TRUTH_RULES,
         caveats: GROUND_TRUTH_CAVEATS,
       },
-      asymmetry: asymmetryNotes(STUB_MODEL),
+      asymmetry: asymmetryNotes(answered, withNoRanker),
       population: {
         ...found.population,
         questionsScored: scored.length,
         questionsUnreadable: unreadable,
         labelsDroppedNotLabVisible:
           found.population.labelsDroppedNotLabVisible + droppedAtRetrieval,
+        questionsWithNoRanker: withNoRanker,
         truncated: [...new Set(truncated)],
       },
       questions: scored,

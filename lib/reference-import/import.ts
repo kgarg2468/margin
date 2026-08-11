@@ -17,6 +17,19 @@ type ImportReferencesOptions = {
   ) => Promise<{ paperId: string; alreadyInLibrary: boolean }>;
   onOutcome?: (index: number, outcome: ReferenceImportOutcome) => void;
   concurrency?: number;
+  /**
+   * Asked before each round trip; a true answer stops the workers issuing any
+   * more of them and returns what has already landed.
+   *
+   * A question rather than an `AbortSignal` because the two mean different
+   * things. A signal promises rejection, and rejecting here would throw away
+   * the outcomes collected so far — which are the point of the import, the only
+   * record of which references made it in. Stopping this one is not an error to
+   * unwind from; it is an early return with the results intact. Round trips
+   * already in the air are left to finish, since cancelling them would only
+   * lose their answers.
+   */
+  cancelled?: () => boolean;
 };
 
 /** Later DOI-less records with the same title and year point to the first. */
@@ -50,6 +63,7 @@ export async function importReferences({
   createFromMetadata,
   onOutcome,
   concurrency = 3,
+  cancelled,
 }: ImportReferencesOptions): Promise<Map<number, ReferenceImportOutcome>> {
   const pending = selected.filter((index) => entries[index] !== undefined);
   const duplicates = findWithinBatchDuplicates(entries, pending);
@@ -59,6 +73,12 @@ export async function importReferences({
 
   async function worker() {
     while (cursor < queued.length) {
+      // Between entries is the only honest place to ask: one entry is a single
+      // round trip and is not interruptible, so this stops the queue rather
+      // than the request in flight.
+      if (cancelled?.() === true) {
+        return;
+      }
       const index = queued[cursor];
       cursor++;
       if (index === undefined) {
@@ -96,6 +116,25 @@ export async function importReferences({
     queued.length,
     Math.max(1, Math.floor(concurrency)),
   );
+
+  /*
+   * Nothing goes out in the caller's own tick.
+   *
+   * The per-entry check below was always ordered correctly — asked, then sent —
+   * but the first answer for all three workers was given before `await` had
+   * handed control back to whoever started the import. Three round trips were
+   * therefore already in the air by the time the caller had a line of its own to
+   * run, and a caller cannot call off a queue it has not yet been given back.
+   * The panel's "Stopped. Nothing was sent." was unreachable for exactly that
+   * reason: `concurrency` outcomes were guaranteed no matter how early the stop
+   * came, because a trip in the air always records one.
+   *
+   * This is one turn, not a delay: it does not wait for a timer, and a stop that
+   * arrives after the first trips are out still cannot recall them — that case
+   * is a stop with results, and it says so.
+   */
+  await Promise.resolve();
+
   await Promise.all(Array.from({ length: workerCount }, worker));
 
   for (const [index, firstIndex] of duplicates) {

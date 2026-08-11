@@ -1,10 +1,23 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Doc, Id } from "./_generated/dataModel";
-import { redactWithdrawn } from "./briefs";
+import { buildForSession, generate, redactWithdrawn } from "./briefs";
+import {
+  FakeCtx,
+  handlerOf,
+  rowAt,
+  seedAnnotation,
+  seedLab,
+} from "./delegations.fixtures";
 import { WITHDRAWN_ITEM_TEXT } from "./synthesis";
 
+vi.mock("@convex-dev/auth/server", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@convex-dev/auth/server")>()),
+  getAuthUserId: async (ctx: unknown) =>
+    (ctx as { auth?: { userId?: string } }).auth?.userId ?? null,
+}));
+
 /**
- * What a stored brief is still allowed to say.
+ * What a stored brief is still allowed to say, and what it sets going.
  *
  * The assembly itself is tested in `lib/brief/` — it is pure and knows nothing
  * about a database. This covers the other half, which is the half that has a
@@ -17,6 +30,10 @@ import { WITHDRAWN_ITEM_TEXT } from "./synthesis";
  * keep serving a withdrawn member's name and passage for as long as the other
  * member's note survived — which is a way around `visibility: "private"` that
  * looks, on the page, exactly like a line that is fine.
+ *
+ * The second block below is about reachability rather than redaction: the scout
+ * costs money per run, so *which* assembly queues one is a product decision,
+ * and it is enforced here against the real handlers.
  */
 
 const note = (n: number) => `annotation_${n}` as Id<"annotations">;
@@ -116,5 +133,95 @@ describe("redactWithdrawn", () => {
     const sections = [collision()];
     redactWithdrawn(sections, shared());
     expect(sections[0]?.items[0]?.text).toBe(collision().items[0]?.text);
+  });
+});
+
+/* -------------------------------------------------------------------------
+ * What assembling a brief sets going
+ * ---------------------------------------------------------------------- */
+
+/**
+ * A lab with a session two hours out and a prior session that left one
+ * question unanswered — the shape `lib/brief/assemble.ts` carries forward.
+ */
+async function briefWorld() {
+  const ctx = new FakeCtx();
+  const seed = await seedLab(ctx);
+  const priorSessionId = await ctx.db.insert("sessions", {
+    labId: seed.labId,
+    paperId: seed.paperId,
+    presenterId: seed.member,
+    // Before the upcoming one, which is what makes it prior.
+    scheduledAt: -1,
+    status: "ended",
+    createdBy: seed.pi,
+  });
+  const carried = await seedAnnotation(
+    ctx,
+    { ...seed, memberId: seed.member },
+    {
+      type: "open-question",
+      body: "Which cohort ran the second replicate?",
+      sessionId: priorSessionId,
+    },
+  );
+  return { ctx, seed, priorSessionId, carried };
+}
+
+describe("the scout rides the brief", () => {
+  it("queues one run per carried-forward question, after the brief is written", async () => {
+    const { ctx, seed, carried } = await briefWorld();
+
+    await handlerOf(buildForSession)(ctx, {
+      sessionId: seed.sessionId,
+      expectedScheduledAt: 1,
+    } as never);
+
+    // The brief exists first and the enqueue is a separate transaction
+    // scheduled after it: the scout rides along behind the brief, and a
+    // delegation that failed to queue must not be able to roll back a brief
+    // that is already correct.
+    expect(ctx.db.all("briefs")).toHaveLength(1);
+    const queued = ctx.scheduled.filter((call) =>
+      call.name.includes("enqueueForBrief"),
+    );
+    expect(queued).toHaveLength(1);
+    expect(rowAt(queued).args).toEqual({
+      briefId: rowAt(ctx.db.all("briefs"))._id,
+      annotationIds: [carried],
+    });
+  });
+
+  it("queues nothing when the brief carries no open questions forward", async () => {
+    // No subject, no scout. A brief with an empty "carried-over" section is
+    // the common case for a lab's first session, and it must cost nothing.
+    const { ctx, seed, carried } = await briefWorld();
+    // Answered: a reply is what takes a question off the carried list.
+    await ctx.db.patch(carried, { type: "claim" });
+
+    await handlerOf(buildForSession)(ctx, {
+      sessionId: seed.sessionId,
+      expectedScheduledAt: 1,
+    } as never);
+
+    expect(ctx.db.all("briefs")).toHaveLength(1);
+    expect(
+      ctx.scheduled.filter((call) => call.name.includes("enqueueForBrief")),
+    ).toEqual([]);
+  });
+
+  it("queues nothing for a brief a person assembled by hand", async () => {
+    // `generate` is a button, and a batch of model calls per press is not what
+    // pressing "assemble" means. §6.1 puts the trigger on the T−2h chain
+    // precisely because that one fires once.
+    const { ctx, seed } = await briefWorld();
+    ctx.auth = { userId: seed.pi };
+
+    await handlerOf(generate)(ctx, { sessionId: seed.sessionId } as never);
+
+    expect(ctx.db.all("briefs")).toHaveLength(1);
+    expect(
+      ctx.scheduled.filter((call) => call.name.includes("enqueueForBrief")),
+    ).toEqual([]);
   });
 });
