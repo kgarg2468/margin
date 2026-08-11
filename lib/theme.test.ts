@@ -17,13 +17,24 @@ import {
  * scope by accident. It gets exactly the two globals it is allowed to see,
  * which doubles as an assertion that it does not quietly need a third.
  */
-function boot(stored: string | null | (() => never)): string[] {
-  const classes: string[] = [];
+function boot(
+  stored: string | null | (() => never),
+  initial: string[] = [],
+): string[] {
+  const classes: string[] = [...initial];
   const documentStub = {
     documentElement: {
       classList: {
         add: (name: string) => {
           classes.push(name);
+        },
+        remove: (...names: string[]) => {
+          for (const name of names) {
+            const at = classes.indexOf(name);
+            if (at !== -1) {
+              classes.splice(at, 1);
+            }
+          }
         },
       },
     },
@@ -80,6 +91,19 @@ describe("the boot script", () => {
 
   it("cannot drift from the module's own key", () => {
     expect(THEME_BOOT_SCRIPT).toContain(JSON.stringify(THEME_STORAGE_KEY));
+  });
+
+  it("asserts the whole theme state rather than trusting a classless start", () => {
+    // The server renders <html> without a class, so today this cannot happen —
+    // but the script's job is the theme state, not a delta against an assumed
+    // blank, and a document that already wears a class must converge instead
+    // of ending up both light and dark at once.
+    expect(boot("dark", ["light"])).toEqual(["dark"]);
+    expect(
+      boot(() => {
+        throw new Error("site data blocked");
+      }, ["light"]),
+    ).toEqual([DEFAULT_THEME]);
   });
 });
 

@@ -73,10 +73,17 @@ export function themeClass(
 export const THEME_BOOT_SCRIPT = [
   "(function(){",
   `var d=${JSON.stringify(themeClass(DEFAULT_THEME) ?? "")};`,
+  "var l=document.documentElement.classList;",
   "try{",
   `var p=localStorage.getItem(${JSON.stringify(THEME_STORAGE_KEY)});`,
   'var c=p==="light"||p==="dark"?p:p==="auto"?"":d;',
-  "if(c)document.documentElement.classList.add(c);",
-  "}catch(e){if(d)document.documentElement.classList.add(d)}",
+  // Remove before add, even though the server renders <html> classless: the
+  // script asserts the whole theme state instead of trusting a clean start,
+  // so running it against a document that already wears a class — a future
+  // second inclusion, a template that gained a default — converges rather
+  // than stacking `light` beside `dark`.
+  'l.remove("light","dark");',
+  "if(c)l.add(c);",
+  '}catch(e){l.remove("light","dark");if(d)l.add(d)}',
   "})()",
 ].join("");
