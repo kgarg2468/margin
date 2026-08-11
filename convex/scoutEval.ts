@@ -588,10 +588,7 @@ const reportShape = v.object({
     questionsUnreadable: v.number(),
     questionsBeyondLimit: v.number(),
     labelsDroppedNotLabVisible: v.number(),
-    // Optional on the wire because it is optional on `Population`, which is
-    // shared with fixtures written before this counter existed. `run` always
-    // sends it; absent and zero mean the same thing.
-    questionsWithNoRanker: v.optional(v.number()),
+    questionsWithNoRanker: v.number(),
     truncated: v.array(v.string()),
   }),
   questions: v.array(
@@ -694,7 +691,7 @@ function asymmetryNotes(
           // having seen it. Left undisclosed, the reader reads those zeros as
           // a model's failure to rank rather than as retrieval's failure to
           // return, and those are different repairs.
-          `${questionsWithNoRanker} scored question${questionsWithNoRanker === 1 ? "" : "s"} gathered no candidates at all, so no model was asked about ${questionsWithNoRanker === 1 ? "it" : "them"} and ${questionsWithNoRanker === 1 ? "its" : "their"} recall 0 is retrieval's, not a ranker's. ${questionsWithNoRanker === 1 ? "It is" : "They are"} in the means below and in the per-question rows above, where the candidate pool prints as 0.`,
+          `${questionsWithNoRanker} scored question${questionsWithNoRanker === 1 ? "" : "s"} gathered no candidates at all, so no model was asked about ${questionsWithNoRanker === 1 ? "it" : "them"} and ${questionsWithNoRanker === 1 ? "its" : "their"} recall 0 is retrieval's, not a ranker's. The per-question rows above print ${questionsWithNoRanker === 1 ? "it" : "them"} with a candidate pool of 0, and ${questionsWithNoRanker === 1 ? "it counts" : "they count"} toward the aggregate on any run where one is shown — under this gate's minimum, no aggregate is printed at all.`,
         ]),
   ];
 }

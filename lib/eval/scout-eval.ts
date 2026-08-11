@@ -189,10 +189,11 @@ export type Population = {
    * appearing anywhere in the ranker set. Reported so a reader can tell a
    * model that ranked badly from a retrieval that returned nothing to rank.
    *
-   * Optional because `formatScoutEvalReport` is shared with fixtures written
-   * before the counter existed; absent and zero mean the same thing.
+   * Required, not optional. An optional counter makes "none of them did" and
+   * "nobody counted" the same value, which is the shape this field exists to
+   * stop being possible somewhere else.
    */
-  questionsWithNoRanker?: number;
+  questionsWithNoRanker: number;
   /**
    * Bounded reads that came back full, in the reader's words.
    *
@@ -343,14 +344,17 @@ export function aggregate(
   /**
    * What to call the scout side over the whole run.
    *
-   * Absent, the label is sampled from the first row — which is what this
-   * function used to do unconditionally, and which is only a label while every
-   * row carries the same one. A row's `system` names what ranked *that*
-   * question, so once the rows can disagree, a row-0 sample is a claim about
-   * eleven other rows made by looking at one of them: a run whose first
-   * question happened to gather nothing would print that fact as the heading
-   * over means the other eleven produced. The caller knows the run-level
-   * answer, and when it passes one this stops guessing.
+   * This used to be sampled from the first row, and a row-0 sample is only a
+   * label while every row carries the same one. A row's `system` names what
+   * ranked *that* question, so once the rows can disagree the sample is a claim
+   * about eleven other rows made by looking at one of them: a run whose first
+   * question happened to gather nothing printed that fact as the heading over
+   * means the other eleven produced.
+   *
+   * So the sample is gone rather than demoted to a fallback. A fallback would
+   * be the same bug, kept exported and waiting for the next caller who does not
+   * know to pass this — which is the caller most likely to be wrong about it.
+   * Absent, the aggregate is labelled `scout`, which is true of every run.
    *
    * The baseline side needs no such argument. `search.everything` is a literal
    * at its one call site and is the same string on every row by construction,
@@ -361,7 +365,7 @@ export function aggregate(
   return {
     questionsScored: questions.length,
     scout: aggregateSide(
-      scoutSystem ?? questions[0]?.scout.system ?? "scout",
+      scoutSystem ?? "scout",
       questions.map((one) => one.scout),
     ),
     baseline: aggregateSide(

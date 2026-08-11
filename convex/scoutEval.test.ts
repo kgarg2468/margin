@@ -665,6 +665,50 @@ describe("the ranker the report names", () => {
     expect(asymmetry).not.toContain("nothing gathered; no model called");
   });
 
+  it("says the fixture ranked the whole run, without the mixed-run sentence", async () => {
+    const ctx = registeredEval();
+    const seed = await seedSettledQuestion(ctx);
+    await seedReply(ctx, seed);
+
+    const report = await runReport(ctx);
+    const asymmetry = report.asymmetry.join(" ");
+
+    expect(report.ranker).toBe("stub.scout.v0");
+    // `/offline fixture/` alone cannot tell these two sentences apart — the
+    // mixed one contains it too — so this pins the phrases only the whole-run
+    // sentence has, and the phrase only the mixed one has.
+    expect(asymmetry).toMatch(/The scout side was ranked by the offline fixture/);
+    expect(asymmetry).toMatch(/This run measured retrieval and query reduction/);
+    expect(asymmetry).not.toMatch(/part by/);
+  });
+
+  it("names the model and drops the fixture caveat when a model ranked every question", async () => {
+    const ctx = registeredEval();
+    const seed = await seedSettledQuestion(ctx);
+    await seedReply(ctx, seed);
+    // The sentence a deployment with a real key actually prints, and the one
+    // branch no offline suite reaches by default — the fixture answers to its
+    // own name, so a run of only real models never happens unless a test
+    // arranges one.
+    ctx.register(internal.delegations.callScoutModel, {
+      _handler: (_inner: unknown, args: { prompt: string }) => ({
+        ...fakeScoutModel(args.prompt),
+        model: "gpt-5.6-sol",
+      }),
+    });
+
+    const report = await runReport(ctx);
+    const asymmetry = report.asymmetry.join(" ");
+
+    expect(report.ranker).toBe("gpt-5.6-sol");
+    expect(report.aggregate.scout.system).toBe("scout (gpt-5.6-sol)");
+    expect(asymmetry).toMatch(
+      /The scout side was ranked by gpt-5\.6-sol, through the same prompt, seam, and citation gate the product uses/,
+    );
+    expect(asymmetry).not.toMatch(/offline fixture/);
+    expect(asymmetry).not.toMatch(/part by/);
+  });
+
   it("keeps the §10.2 warning on a run only half of which was the fixture", async () => {
     const ctx = registeredEval();
     const seed = await seedSettledQuestion(ctx);
