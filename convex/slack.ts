@@ -244,7 +244,7 @@ export async function postToSlack(
  * fact that it does, in the product, without having to ask.
  *
  * What nobody gets is the URL. It is not in this validator, it is not in any
- * other public query in the codebase, and `convex/slack.guard.test.ts` asserts
+ * other public query in the codebase, and `convex/credentials.guard.test.ts` asserts
  * that by walking the schema and every returns validator rather than by
  * trusting this sentence. A webhook URL handed to the browser is a credential
  * in a query cache and in every dev tools pane that cache is ever opened in —

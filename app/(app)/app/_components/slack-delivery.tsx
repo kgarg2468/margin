@@ -25,7 +25,7 @@ import type { LabSummary } from "./lab-provider";
  * and somebody whose writing leaves the building is owed that fact in the
  * product rather than by asking. Only the PI sees the controls, and *nobody*
  * sees the URL: `slack.status` does not return it, so there is nothing here to
- * render even for the person who pasted it (see `convex/slack.guard.test.ts`).
+ * render even for the person who pasted it (see `convex/credentials.guard.test.ts`).
  *
  * The field is a password field, which is not theatre. A PI wiring this up
  * during a lab meeting is doing it on a projector, and a Slack incoming webhook
