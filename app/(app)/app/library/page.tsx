@@ -318,7 +318,9 @@ function Library({
                 // The way out of a panel should not be quieter than the way in:
                 // this is the same control as `Add a paper` above, run
                 // backwards.
-                className={`${secondaryButtonClass} tap-target self-start aria-disabled:cursor-not-allowed aria-disabled:opacity-50`}
+                // No cursor utility: the base layer answers the pointer for
+                // `aria-disabled` too, and stating it here would outrank it.
+                className={`${secondaryButtonClass} tap-target self-start aria-disabled:opacity-50`}
               >
                 Done adding
               </button>

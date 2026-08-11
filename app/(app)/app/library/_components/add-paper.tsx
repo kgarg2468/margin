@@ -220,12 +220,18 @@ function TabButton({
           onSelect();
         }
       }}
+      // No cursor here: the base layer owns that for every control at once,
+      // `aria-disabled` included, and a utility would outrank it.
       className={
         "-mb-px border-b-2 pb-2 font-sans text-sm pressable " +
-        "aria-disabled:cursor-not-allowed aria-disabled:opacity-50 " +
+        "aria-disabled:opacity-50 " +
         (active
           ? "border-accent text-ink-strong"
-          : "border-transparent text-ink-faint hover:text-ink-muted")
+          : refused
+            ? // No hover lift either. Lightening under the pointer is an offer,
+              // and this tab is not offering.
+              "border-transparent text-ink-faint"
+            : "border-transparent text-ink-faint hover:text-ink-muted")
       }
     >
       {label}
@@ -273,6 +279,11 @@ function DoiTab({
   // outcome sentence — the whole point of the lookup — down with it.
   useEffect(() => {
     onBusy(lookupHold(pending));
+    // Defence in depth, and unreachable today only because a tab switch is
+    // refused while this is running. The outer cleanup already does this on the
+    // panel's behalf; a tab that reports a hold should be able to withdraw it
+    // without depending on that.
+    return () => onBusy(null);
   }, [pending, onBusy]);
 
   /**
@@ -527,6 +538,9 @@ function UploadTab({
   // held shut by a stage whose exit is not on screen.
   useEffect(() => {
     onBusy(cancelOffer(phase));
+    // See `DoiTab`: a tab withdraws its own hold rather than trusting the
+    // panel to notice it has gone.
+    return () => onBusy(null);
   }, [phase, onBusy]);
 
   async function read(file: File) {

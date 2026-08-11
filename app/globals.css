@@ -277,7 +277,11 @@
  * press it will not honour. See the note on `pressable` below.
  */
 @layer base {
-  button:not(:disabled),
+  /* `aria-disabled` counts as refusing, the same as `disabled`. A control that
+     must stay in the tab order to explain itself — see the add panel's tabs —
+     is still a control that will not act when pressed, and the pointer should
+     say so rather than promising something the click will not do. */
+  button:not(:disabled):not([aria-disabled="true"]),
   [role="button"]:not([aria-disabled="true"]),
   /* A listbox row is pressed like a button even though it is an <li>: the ⌘K
      palette's commands and the select's items both land here. */
@@ -289,6 +293,7 @@
   }
 
   button:disabled,
+  button[aria-disabled="true"],
   select:disabled {
     cursor: not-allowed;
   }
@@ -325,7 +330,13 @@
     scale var(--dur-press) ease-out;
 
   @media (prefers-reduced-motion: no-preference) {
-    &:active:not(:disabled) {
+    /* Both spellings of "no", for the reason the note above gives about
+       cursors: a control that refuses the press must not give under it. The
+       `:disabled` half was here from the start; `aria-disabled` arrived with
+       the add panel's tabs, which stay focusable precisely so they can say why
+       they are refusing — and dipped under a press they had no intention of
+       honouring until this caught up with them. */
+    &:active:not(:disabled):not([aria-disabled="true"]) {
       scale: 0.98;
     }
   }

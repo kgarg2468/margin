@@ -25,7 +25,7 @@ import {
 import { useAction, useMutation } from "convex/react";
 import { useEffect, useRef, useState } from "react";
 import type { PanelHold } from "./upload-flow";
-import { importHold } from "./upload-flow";
+import { importHold, percentSent } from "./upload-flow";
 
 type Preview = {
   format: ReferenceFormat;
@@ -72,11 +72,18 @@ export function ReferenceImport({
    * re-render's copy of it.
    */
   const stopped = useRef(false);
+  /**
+   * Which import is allowed to speak. A run that has been stopped still is —
+   * its entries in the air really are landing — but one the member has reset
+   * past is not, or its outcomes would appear in a form that has been emptied.
+   */
+  const attempt = useRef(0);
 
   const hold = importHold(importing);
 
   useEffect(() => {
     onBusy?.(importHold(importing));
+    return () => onBusy?.(null);
   }, [importing, onBusy]);
 
   function prepare(text: string, name: string | null) {
@@ -117,6 +124,9 @@ export function ReferenceImport({
   }
 
   function startOver() {
+    // A run that is still winding down must not write into the blank form this
+    // hands back — an entry in the air can land seconds after the reset.
+    attempt.current += 1;
     setSource("");
     setSourceName(null);
     setPreview(null);
@@ -131,6 +141,7 @@ export function ReferenceImport({
     if (preview === null || selected.size === 0) {
       return;
     }
+    const mine = ++attempt.current;
     setImporting(true);
     setError(null);
     setNote(null);
@@ -159,6 +170,12 @@ export function ReferenceImport({
         });
       },
       onOutcome: (index, outcome) => {
+        // A straggler from a run the member has already reset past has nothing
+        // to say. One that is merely *stopped* still does: it was genuinely
+        // sent, it genuinely landed, and the list is the record of that.
+        if (attempt.current !== mine) {
+          return;
+        }
         if (outcome.status === "added" && !keptOpen.current) {
           keptOpen.current = true;
           onAdded?.();
@@ -171,28 +188,45 @@ export function ReferenceImport({
       },
     });
 
+    if (attempt.current !== mine) {
+      return;
+    }
     setImporting(false);
     setOutcomes(results);
     if (stopped.current) {
-      // The outcomes stay on screen: they are the record of which references
-      // made it in, and the reason stopping this is a cancel and not a discard.
-      // The sentence points at that list rather than counting it — a count of
-      // outcomes is not a count of additions, since some of them failed and
-      // some were already here.
-      setNote("Stopped. What is listed above was sent; nothing else was.");
+      // The outcomes stay on screen: they are the record of what happened, and
+      // the reason stopping this is a cancel and not a discard.
+      //
+      // "Settled" rather than "sent", because not everything above was sent:
+      // a reference the export listed twice is answered from the first copy's
+      // result without a round trip of its own. The sentence has to be true of
+      // the whole list, and only the second half is about the network.
+      setNote(
+        "Stopped. The references above are settled; the rest were never sent.",
+      );
     }
   }
 
   /**
-   * A real one, unlike the panel's other two waits.
+   * A real one, unlike the panel's other two waits — and it gives the panel
+   * back at once rather than when the queue happens to drain.
    *
    * An import is one round trip per entry, so it is the longest wait here and
    * the only one that can be stopped part-done and still leave something worth
-   * keeping. The entry already in the air finishes — cancelling it would only
-   * throw away an answer that has been paid for — and nothing further is sent.
+   * keeping. Two separate things happen on this press. `stopped` keeps the
+   * workers from issuing anything further; entries already in the air are left
+   * to finish, since cancelling them would only throw away answers that have
+   * been paid for. And `importing` goes false *now*, because the alternative is
+   * the failure this control exists to prevent: one hung action on entry 40 of
+   * 200 means the queue never drains, and a panel that waits for it is a panel
+   * bolted shut by the very control that was meant to open it.
    */
   function stopImporting() {
     stopped.current = true;
+    setImporting(false);
+    // Said immediately. The stragglers can take seconds, and a press that
+    // produces no visible answer reads as a press that missed.
+    setNote("Stopping. Nothing further will be sent.");
   }
 
   const withinBatchDuplicates =
@@ -369,7 +403,28 @@ export function ReferenceImport({
 
           {importing && (
             <div className="flex flex-wrap items-baseline gap-x-4 gap-y-2">
-              <p role="status" className="font-sans text-sm text-ink-muted">
+              {/* A bar, not a live region. It was `role="status"`, which is
+                  both the conditional shape that announces unreliably and —
+                  once it does announce — one interruption per reference, which
+                  on a 200-entry export is the failure the upload's own progress
+                  line was rewritten to avoid. A `progressbar` is polled: the
+                  count is here to be looked at, and reachable on request. */}
+              <p
+                role="progressbar"
+                aria-label="Importing references"
+                aria-valuetext={`${outcomes.size} of ${selected.size}`}
+                {...(() => {
+                  const percent = percentSent(outcomes.size, selected.size);
+                  return percent === null
+                    ? {}
+                    : {
+                        "aria-valuenow": percent,
+                        "aria-valuemin": 0,
+                        "aria-valuemax": 100,
+                      };
+                })()}
+                className="font-sans text-sm tabular-nums text-ink-muted"
+              >
                 Importing {outcomes.size} of {selected.size}…
               </p>
               {/* No wait without a way out of it — and this was the longest
