@@ -70,9 +70,17 @@ export function PdfPanel({
    * it while one ran.
    */
   const [attaching, setAttaching] = useState<AbortController | null>(null);
-  const [sending, setSending] = useState<{ loaded: number; total: number } | null>(
-    null,
-  );
+  /**
+   * The count carries the run that owns it. An attach that is on its way out
+   * has to be able to tell its own bytes from a successor's before it clears
+   * them — see the `finally` in `attach`, which is not always the last thing
+   * to run any more.
+   */
+  const [sending, setSending] = useState<{
+    controller: AbortController;
+    loaded: number;
+    total: number;
+  } | null>(null);
 
   /**
    * Open the stored file on its own.
@@ -163,12 +171,12 @@ export function PdfPanel({
           setStatus(`Reading page ${pagesDone} of ${pages}…`),
       });
       setStatus("Storing it for the lab…");
-      setSending({ loaded: 0, total: file.size });
+      setSending({ controller, loaded: 0, total: file.size });
       const uploadUrl = await generateUploadUrl({ labId });
       uploaded = await uploadPdf(uploadUrl, file, {
         signal: controller.signal,
         onProgress: (loaded, total) => {
-          setSending({ loaded, total });
+          setSending({ controller, loaded, total });
           setStatus(bytesProgress(loaded, total));
         },
       });
@@ -213,8 +221,18 @@ export function PdfPanel({
       setError(message);
       await recover(uploaded, message);
     } finally {
-      setAttaching(null);
-      setSending(null);
+      // Only if this run still owns the wait.
+      //
+      // This `finally` is not the last thing to happen any more. `setStatus(null)`
+      // is the first line of the catch, and `busyMessage` is what disables both
+      // dropzones — so the moment either failure path starts awaiting its
+      // clean-up (`discardUpload` on a cancel, `recover`'s two mutations on an
+      // error) a second attach can begin. A blind clear here would take that
+      // one's controller with it, and its "Stop attaching it" button would be
+      // dead for the rest of its life: a wait with no way out of it, which is
+      // the exact failure this task was written to remove.
+      setAttaching((current) => (current === controller ? null : current));
+      setSending((current) => (current?.controller === controller ? null : current));
     }
   }
 
@@ -411,6 +429,9 @@ export function PdfPanel({
               `progressbar` role is what lets it be asked for instead. */}
           <p
             role="progressbar"
+            // `progressbar` takes no name from its own content, so without this
+            // the bar announces as an unlabelled one.
+            aria-label="Attaching the PDF"
             aria-valuetext={busyMessage}
             {...(sending === null
               ? {}

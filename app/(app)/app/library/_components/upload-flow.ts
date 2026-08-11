@@ -81,6 +81,9 @@ export function cancelOffer(
   stage: UploadStage,
 ): { kind: "abort" | "abandon"; label: string } | null {
   switch (stage.kind) {
+    case "empty":
+    case "read":
+      return null;
     case "reading":
       return { kind: "abort", label: "Stop reading it" };
     case "sending":
@@ -88,13 +91,22 @@ export function cancelOffer(
     case "filing":
       return { kind: "abandon", label: "Stop waiting" };
     default:
-      return null;
+      // Every kind above answers for itself, so nothing reaches here and the
+      // narrowed type is `never`. That is the point: a stage added to
+      // `UploadStage` without a decision made about it here stops being a
+      // silent `null` — an unstoppable wait, shipped quietly — and becomes a
+      // type error on this line. A test cannot catch the case it doesn't know
+      // to write; the compiler can.
+      return stage satisfies never;
   }
 }
 
 /** The running count, for eyes. Not announced — see `stageAnnouncement`. */
 export function stageProgress(stage: UploadStage): string | null {
   switch (stage.kind) {
+    case "empty":
+    case "read":
+      return null;
     case "reading":
       return stage.pageCount === 0
         ? "Opening the PDF…"
@@ -104,7 +116,8 @@ export function stageProgress(stage: UploadStage): string | null {
     case "filing":
       return "Filing it…";
     default:
-      return null;
+      // See `cancelOffer`: a new stage owes this switch an answer too.
+      return stage satisfies never;
   }
 }
 
@@ -118,6 +131,9 @@ export function stageProgress(stage: UploadStage): string | null {
  */
 export function stageAnnouncement(stage: UploadStage): string {
   switch (stage.kind) {
+    case "empty":
+    case "read":
+      return "";
     case "reading":
       return "Reading the PDF.";
     case "sending":
@@ -125,6 +141,7 @@ export function stageAnnouncement(stage: UploadStage): string {
     case "filing":
       return "Adding the paper.";
     default:
-      return "";
+      // See `cancelOffer`: a stage that says nothing should say so on purpose.
+      return stage satisfies never;
   }
 }

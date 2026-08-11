@@ -465,6 +465,20 @@ function UploadTab({ labId }: { labId: Id<"labs"> }) {
       }
       router.push(`/app/library/${paperId}`);
     } catch (caught) {
+      // The blob goes first, above the staleness guard. An abandoned run whose
+      // `createFromUpload` rejects later still owns bytes nothing points at,
+      // and a file nothing points at is never found again — so the clean-up is
+      // owed even by a run the component has moved on from. It is safe there
+      // precisely because it touches no UI: everything below the guard is a
+      // `setState`, and a stale run has no business writing any of them.
+      if (uploaded !== null) {
+        try {
+          await discardUpload({ labId, storageId: uploaded });
+        } catch {
+          // Best effort. The member has already been told what happened; a
+          // failed clean-up is not a second thing to say.
+        }
+      }
       if (attempt.current !== mine) {
         return;
       }
@@ -473,14 +487,6 @@ function UploadTab({ labId }: { labId: Id<"labs"> }) {
         setNote("Cancelled. Nothing was added, and the file is still here.");
       } else {
         setError(readableError(caught, "We couldn't add that paper. Try again."));
-      }
-      if (uploaded !== null) {
-        try {
-          await discardUpload({ labId, storageId: uploaded });
-        } catch {
-          // Best effort. The member has already been told what happened; a
-          // failed clean-up is not a second thing to say.
-        }
       }
     } finally {
       release(controller);
@@ -596,6 +602,9 @@ function Progress({ phase }: { phase: UploadPhase }) {
   return (
     <p
       role="progressbar"
+      // `progressbar` takes no name from its own content, so without this the
+      // bar announces as an unlabelled one.
+      aria-label="Upload progress"
       aria-valuetext={text}
       {...(percent === null
         ? {}

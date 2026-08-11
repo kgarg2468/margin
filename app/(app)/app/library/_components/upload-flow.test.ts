@@ -19,10 +19,14 @@ describe("formatBytes", () => {
   it("counts whole kilobytes under a megabyte", () => {
     expect(formatBytes(1024)).toBe("1 KB");
     expect(formatBytes(862_208)).toBe("842 KB");
+    // Rounds rather than truncates: half a kilobyte up reads as the next one.
+    expect(formatBytes(1536)).toBe("2 KB");
   });
   it("counts megabytes to one decimal, because papers are megabytes", () => {
     expect(formatBytes(11.4 * MB)).toBe("11.4 MB");
     expect(formatBytes(3.24 * MB)).toBe("3.2 MB");
+    // Exactly a megabyte is a megabyte, not 1024 KB.
+    expect(formatBytes(MB)).toBe("1.0 MB");
   });
 });
 
@@ -46,6 +50,8 @@ describe("percentSent", () => {
   it("rounds to whole percent", () => {
     expect(percentSent(MB, 4 * MB)).toBe(25);
     expect(percentSent(1, 3)).toBe(33);
+    // Rounds rather than truncates, in both directions.
+    expect(percentSent(2, 3)).toBe(67);
   });
   it("never reports past the end", () => {
     expect(percentSent(5 * MB, 4 * MB)).toBe(100);
@@ -87,6 +93,11 @@ describe("cancelOffer", () => {
     expect(cancelOffer({ kind: "empty" })).toBeNull();
     expect(cancelOffer({ kind: "read" })).toBeNull();
   });
+  // This names a property it cannot enforce: it can only ask the three stages
+  // it already knows about, and the failure worth preventing is a *fourth* one
+  // added later that nobody thinks to add here. That job belongs to the
+  // `satisfies never` in `cancelOffer`, which makes the omission a type error.
+  // What this still earns is the three answers themselves.
   it("leaves no waiting stage unabandonable", () => {
     for (const stage of [
       { kind: "reading", pagesDone: 0, pageCount: 0 },
