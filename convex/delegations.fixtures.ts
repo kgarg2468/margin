@@ -27,6 +27,10 @@ import {
  * what the code under test actually depends on. Where it diverges it should
  * diverge toward being *stricter* than the real thing, never looser — see
  * `hostileSearchIndex` below, which is the whole point of the exercise.
+ * One known exception breaks that rule today: the `search` constraint in
+ * `matches` accepts every row, so no test here can tell "the search found
+ * it" from "something else supplied it". Tightening it means re-seeding
+ * scoutEval.test.ts's empty-body overfetch rows in the same change.
  *
  * The file is named with two dots so Convex's bundler skips it, the same
  * trick `*.test.ts` relies on. Nothing here is ever deployed.
