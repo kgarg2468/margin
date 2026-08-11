@@ -195,16 +195,16 @@ export const MAX_BATCH_QUESTIONS = MAX_ACTIVE_PER_LAB;
  *   ceiling (`annotations.MAX_BODY_LENGTH`) — 320,000 characters;
  * - the questions themselves, `MAX_BATCH_QUESTIONS` bodies at the same
  *   ceiling, since a question is an annotation too — 32,000;
- * - the brief's collision prose, `MAX_COLLISION_LINES` lines of
- *   `MAX_COLLISION_LINE_CHARS` per question — 19,200.
+ * - the brief's collision prose, `MAX_BATCH_QUESTIONS` questions at
+ *   `MAX_COLLISION_LINES` lines of `MAX_COLLISION_LINE_CHARS` each — 19,200.
  *
  * 371,200 characters, which at `CHARS_PER_TOKEN` is about **124,000 tokens**.
  * A real number rather than an unbounded one, and nowhere near the megabyte
  * the union could reach on its own, but it is the number an operator has to
- * size a context against. It is not a character
- * budget: a lab that writes at the ceiling still produces a much
- * larger prompt than one that writes in sentences, and an operator who points
- * `SCOUT_MODEL` at a smaller-context model has to account for that worst case
+ * size a context against. It is not a character budget: a lab that writes at
+ * the ceiling still produces a much larger prompt than one that writes in
+ * sentences, and an operator who points `SCOUT_MODEL` at a smaller-context
+ * model has to account for that worst case
  * themselves. A budget measured in characters is a design change, not a
  * constant.
  */
@@ -882,8 +882,11 @@ export async function gatherLabVisible(
  * lines are read fresh and added as candidates, because a line the model
  * cannot cite is a line it can only paraphrase.
  *
- * The subject is excluded from the *candidates* and not from the *lines*, and
- * the asymmetry is the whole reason to read the brief at all. "A note never
+ * The subject is excluded from the *candidates* and not from the *lines* — a
+ * line against the subject survives, though it carries only the other end's
+ * id, because the citability gate downstream is absolute and the subject can
+ * never be a candidate for it to find. That asymmetry is the whole reason to
+ * read the brief at all. "A note never
  * cites itself" is a rule about rows, and it does not transfer: the gold pair
  * type — `possible answer`, a definition against an open question
  * (`lib/digest/engine.ts`) — routinely has this run's carried-forward question
