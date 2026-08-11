@@ -95,7 +95,7 @@ export function NotificationRail({ labId }: { labId: Id<"labs"> }) {
         // puts beside a passage. Waiting mail earns it; nothing else about the
         // row moves, which is the whole idea of a quiet indicator.
         className={
-          "-mx-3 flex w-[calc(100%+1.5rem)] flex-col gap-0.5 rounded-r-sm border-l-2 px-3 py-2 text-left " +
+          "pressable -mx-3 flex w-[calc(100%+1.5rem)] flex-col gap-0.5 rounded-r-sm border-l-2 px-3 py-2 text-left " +
           "motion-safe:transition-[background-color,border-color] motion-safe:duration-200 " +
           (waiting || open
             ? "border-accent bg-surface"

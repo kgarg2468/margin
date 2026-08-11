@@ -116,6 +116,25 @@ export async function importReferences({
     queued.length,
     Math.max(1, Math.floor(concurrency)),
   );
+
+  /*
+   * Nothing goes out in the caller's own tick.
+   *
+   * The per-entry check below was always ordered correctly — asked, then sent —
+   * but the first answer for all three workers was given before `await` had
+   * handed control back to whoever started the import. Three round trips were
+   * therefore already in the air by the time the caller had a line of its own to
+   * run, and a caller cannot call off a queue it has not yet been given back.
+   * The panel's "Stopped. Nothing was sent." was unreachable for exactly that
+   * reason: `concurrency` outcomes were guaranteed no matter how early the stop
+   * came, because a trip in the air always records one.
+   *
+   * This is one turn, not a delay: it does not wait for a timer, and a stop that
+   * arrives after the first trips are out still cannot recall them — that case
+   * is a stop with results, and it says so.
+   */
+  await Promise.resolve();
+
   await Promise.all(Array.from({ length: workerCount }, worker));
 
   for (const [index, firstIndex] of duplicates) {

@@ -49,6 +49,61 @@ describe("importReferences, called off part-way", () => {
     expect(outcomes.has(4)).toBe(false);
   });
 
+  it("sends nothing when the stop lands before the queue's first turn", async () => {
+    // The panel's empty sentence — "Stopped. Nothing was sent." — is only true
+    // when this is true, and until the queue stopped dispatching inside its
+    // caller's own tick it never could be: three trips were already in the air
+    // by the time the caller had a line of its own to run, and a trip in the air
+    // always records an outcome.
+    let calls = 0;
+    let stopped = false;
+    const run = importReferences({
+      entries: many,
+      selected: many.map((_, index) => index),
+      concurrency: 3,
+      cancelled: () => stopped,
+      createFromDoi: async (entry) => {
+        calls++;
+        return { paperId: `doi:${entry.doi}`, alreadyInLibrary: false };
+      },
+      createFromMetadata: async () => {
+        throw new Error("no metadata entry in this batch");
+      },
+    });
+    stopped = true;
+    const outcomes = await run;
+
+    expect(calls).toBe(0);
+    expect(outcomes.size).toBe(0);
+  });
+
+  it("keeps the settled list when the stop lands after the first trip is out", async () => {
+    // The other side of the same seam, and the one a member actually reaches:
+    // the first worker's trip is gone and cannot be recalled, so it is reported.
+    // Its two colleagues have not sent yet and never do. A stop is not all or
+    // nothing, and the sentence about it has to hold for the middle.
+    let calls = 0;
+    let stopped = false;
+    const outcomes = await importReferences({
+      entries: many,
+      selected: many.map((_, index) => index),
+      concurrency: 3,
+      cancelled: () => stopped,
+      createFromDoi: async (entry) => {
+        calls++;
+        stopped = true;
+        return { paperId: `doi:${entry.doi}`, alreadyInLibrary: false };
+      },
+      createFromMetadata: async () => {
+        throw new Error("no metadata entry in this batch");
+      },
+    });
+
+    expect(calls).toBe(1);
+    expect(outcomes.size).toBe(1);
+    expect(outcomes.get(0)).toEqual({ status: "added", paperId: "doi:10.1/p0" });
+  });
+
   it("does nothing at all when it is called off before the first entry", async () => {
     let calls = 0;
     const outcomes = await importReferences({
