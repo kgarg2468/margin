@@ -1382,22 +1382,44 @@ export default defineSchema({
      */
     libraryName: v.optional(v.string()),
     /**
-     * One Zotero collection, when the member picked one. This is the cap.
+     * One Zotero collection, when the member picked one.
      *
-     * `listPapers` reads the lab's library under one bounded `take(200)` and
-     * says so at `papers.tags` above. A real Zotero library is 1,000–10,000
-     * items, so syncing a whole one detonates the library page on its first
-     * run — the shelf would hold papers the shelf cannot list. Scoping to one
-     * collection is what makes the first version honest rather than
-     * impressive, and the connect copy says why in those words.
+     * Offered rather than demanded, and that is a ruling rather than an
+     * oversight. `listPapers` reads the lab's library under one bounded
+     * `take(200)` and says so at `papers.tags` above, while a real Zotero
+     * library is 1,000–10,000 items — so a whole-library sync fills a shelf
+     * past the point the shelf can list. What stops that from being a broken
+     * product is the *per-run cap*: twenty-five items a run against a durable
+     * cursor, which is a rate rather than a flood, and a progress line that
+     * says so. Narrowing to a collection is the member's answer to "how much
+     * of this did you mean", not Margin's precondition for working, and the
+     * picker's copy offers it in those terms.
      *
-     * Absent means the whole library, which is allowed for the member who
-     * genuinely keeps a small one. The per-run cap and the progress line hold
-     * either way.
+     * Absent means the whole library, which is a real answer — plenty of
+     * people keep one Zotero per project — and `scopeAcceptedAt` below is how
+     * a member says they meant it.
      */
     collectionKey: v.optional(v.string()),
     /** The collection's display name, for the settings row. Display only. */
     collectionName: v.optional(v.string()),
+    /**
+     * When this member last said which part of their library they meant.
+     *
+     * The picker opens itself on arrival for a link nobody has scoped, which
+     * is right once and wrong every time after: a member who is happy with the
+     * whole library presses Done, and without a record of it the panel has no
+     * way to know — so it re-opens on the next settings visit, and the one
+     * after that, spending two requests to api.zotero.org each time to re-ask
+     * a question that has been answered. Written by `acceptScope` (Done) and
+     * by `chooseScope` (which is the same answer arriving through a choice).
+     *
+     * A timestamp rather than a boolean for the reason `connectedAt` is one:
+     * it costs the same and it can answer "when", which a boolean never can.
+     * Absent means never asked and never answered, which is also the state
+     * every link created before this field was added is in — those members see
+     * the picker once more, which is the correct number of times.
+     */
+    scopeAcceptedAt: v.optional(v.number()),
     /**
      * Zotero's `Last-Modified-Version` as of the last **completed** walk.
      * Absent means this library has never been fully walked.
@@ -1445,8 +1467,9 @@ export default defineSchema({
       }),
     ),
     /**
-     * When a run last finished, whatever it found. Drives the sweep's `by_due`
-     * ordering and the "last checked" line in settings.
+     * When a run last finished, whatever it found — and, at connect, when the
+     * link was made, for the grace period the `by_due` comment below sets out.
+     * Drives the sweep's ordering and the "last checked" line in settings.
      *
      * Named for the sync and not for the member: this records that Margin
      * asked Zotero a question, not that anybody read anything. The privacy
@@ -1490,8 +1513,20 @@ export default defineSchema({
      * Ordered by `lastSyncAt` ascending, so the sweep takes the most overdue
      * links first and a library that is mid-walk keeps its place in the queue.
      * A row that has never synced sorts first, because Convex orders an absent
-     * indexed field before every present one — which is the behaviour wanted:
-     * a member who linked their library thirty seconds ago should be first.
+     * indexed field before every present one.
+     *
+     * Which is why `saveLink` stamps this field at connect time rather than
+     * leaving it absent, and the correction matters enough to write down: a
+     * brand-new link is pointed at the member's *whole personal library*,
+     * because that is the only scope nameable without a second round trip. An
+     * absent `lastSyncAt` would put that link at the front of the very next
+     * hourly sweep — twenty-five papers out of a decade of half-read PDFs onto
+     * the lab's shelf, before the member has finished choosing a collection,
+     * and unlinking does not take them back off again. So the clock starts at
+     * connect: an hour is longer than choosing a scope takes, `Sync now` is
+     * untouched for the member who meant the whole library, and nothing that
+     * has genuinely never been walked is ever *skipped* — only made to wait
+     * out its first hour like everything else.
      */
     .index("by_due", ["lastSyncAt"]),
 

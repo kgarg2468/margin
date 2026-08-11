@@ -5,11 +5,14 @@ import type { Id } from "./_generated/dataModel";
 import { FakeCtx, handlerOf, seedLab } from "./delegations.fixtures";
 import {
   ZoteroRefusal,
+  acceptScope,
   callerIn,
   callerLinkId,
   chooseScope,
   connect,
   disconnect,
+  dueLinks,
+  listCollections,
   listLibraries,
   permanentStatus,
   saveLink,
@@ -153,6 +156,24 @@ describe("zoteroFetch", () => {
     expect(caught).toBeInstanceOf(ZoteroRefusal);
     expect(String(caught)).not.toContain(KEY);
     expect((caught as ZoteroRefusal).status).toBe(403);
+  });
+
+  it("scrubs the key out of a body that echoed it back", async () => {
+    // The test above is a claim about a body Margin does not write, so it is
+    // enforced rather than asserted. `GET /keys/current` echoes the credential
+    // in its own *successful* body, and an error page is free to reflect any of
+    // the request back at us — either one reaching the throw puts the key
+    // inside a refusal, and every caller of this transport logs
+    // `String(caught)`.
+    stubFetch([{ status: 403, body: { message: `Invalid key: ${KEY}` } }]);
+    const caught = await zoteroFetch(
+      "https://api.zotero.org/keys/current",
+      KEY,
+    ).catch((error: unknown) => error);
+    expect(String(caught)).not.toContain(KEY);
+    // And what is left still says what happened, which is the whole reason the
+    // body is carried at all.
+    expect(String(caught)).toContain("[key]");
   });
 
   it("treats a redirect as a refusal unless the caller asked for one", async () => {
@@ -320,6 +341,24 @@ describe("connect", () => {
     expect(links[0]?.lastVersion).toBeUndefined();
   });
 
+  it("gives the member an hour before the sweep touches their library", async () => {
+    // The one field here that is stamped rather than cleared. `connect` points
+    // a fresh link at the member's *whole personal library* — the only scope
+    // nameable without a second round trip — and the sweep takes whatever has
+    // gone longest without a look, which an absent `lastSyncAt` wins outright.
+    // Unstamped, the next hourly tick can walk twenty-five papers out of a
+    // decade of half-read PDFs onto the lab's shelf before the member has
+    // finished choosing a collection, and unlinking does not take them back
+    // off. An hour is longer than choosing a scope takes, and Sync now is
+    // untouched for the member who wants their whole library.
+    const { ctx, seed } = await world();
+    stubFetch([{ status: 200, body: READ_ONLY_BODY }]);
+    await run(ctx, seed.labId, KEY);
+
+    expect(ctx.db.all("zoteroLinks")[0]?.lastSyncAt).toBeGreaterThan(0);
+    expect(await handlerOf(dueLinks)(ctx, {} as never)).toEqual([]);
+  });
+
   it("files one ledger fact, carrying no key", async () => {
     const { ctx, seed } = await world();
     stubFetch([{ status: 200, body: READ_ONLY_BODY }]);
@@ -407,6 +446,58 @@ describe("listLibraries", () => {
       id: "475425",
       name: "My library",
     });
+  });
+});
+
+describe("a picker Zotero turns down", () => {
+  /**
+   * A `ZoteroRefusal` is an ordinary `Error`, and Convex redacts one of those
+   * on its way to a client. A picker that let it through therefore rendered the
+   * client's own fallback — "Could not reach Zotero" — next to a settings row
+   * already saying, correctly, that the key had been refused: two sentences
+   * about one event, and the wrong one is the specific one. `connect` has
+   * caught this since it was written; the pickers are the same door.
+   */
+  async function linked() {
+    const { ctx, seed } = await world();
+    await ctx.db.insert("zoteroLinks", {
+      userId: seed.pi,
+      labId: seed.labId,
+      apiKey: KEY,
+      connectedAt: 1_000,
+      libraryType: "user",
+      libraryId: "475425",
+    });
+    return { ctx, seed };
+  }
+
+  const said = async (promise: Promise<unknown>) => {
+    const caught = await promise.catch((error: unknown) => error);
+    expect(caught).toBeInstanceOf(ConvexError);
+    return String((caught as ConvexError<string>).data);
+  };
+
+  it("asks for a new key when the key is the thing that is wrong", async () => {
+    const { ctx, seed } = await linked();
+    stubFetch([{ status: 403, body: { message: "Invalid key" } }]);
+    const sentence = await said(
+      handlerOf(listLibraries)(ctx, { labId: seed.labId } as never) as Promise<unknown>,
+    );
+    expect(sentence).toMatch(/paste a new key/i);
+    expect(sentence).not.toContain(KEY);
+  });
+
+  it("calls a bad minute a bad minute, and says nothing changed", async () => {
+    // 403 and 404 are the member's to fix. Everything else is api.zotero.org
+    // having a moment, and telling somebody to replace a key that is fine is
+    // the most expensive wrong sentence this panel can say.
+    const { ctx, seed } = await linked();
+    stubFetch([{ status: 503 }]);
+    const sentence = await said(
+      handlerOf(listCollections)(ctx, { labId: seed.labId } as never) as Promise<unknown>,
+    );
+    expect(sentence).toMatch(/try again/i);
+    expect(sentence).not.toMatch(/new key/i);
   });
 });
 
@@ -502,6 +593,20 @@ describe("chooseScope", () => {
     expect(ctx.db.all("zoteroLinks")[0]?.libraryType).toBe("user");
   });
 
+  it("counts picking a scope as accepting one", async () => {
+    // The same fact `acceptScope` records, arriving the other way: a member who
+    // narrowed their scope and then closed the tab has answered the question,
+    // and must not be asked it again on the next visit.
+    const { ctx, seed } = await linked();
+    await choose(ctx, {
+      labId: seed.labId,
+      libraryType: "user",
+      libraryId: "475425",
+      collectionKey: "C0LL3CTN",
+    });
+    expect(ctx.db.all("zoteroLinks")[0]?.scopeAcceptedAt).toBeGreaterThan(0);
+  });
+
   it("refuses when this member has no link to scope", async () => {
     const { ctx, seed } = await world();
     await expect(
@@ -511,6 +616,37 @@ describe("chooseScope", () => {
         libraryId: "475425",
       }),
     ).rejects.toBeInstanceOf(ConvexError);
+  });
+});
+
+describe("acceptScope", () => {
+  const accept = (ctx: FakeCtx, labId: Id<"labs">) =>
+    handlerOf(acceptScope)(ctx, { labId } as never);
+
+  it("records the answer Done gives, which nothing else could infer", async () => {
+    // Without it the picker's visibility test is "has this member named a
+    // library", which is false for everybody happy with the default: they press
+    // Done, and the panel opens itself again on the next visit, and on the one
+    // after that, spending two requests to api.zotero.org each time to re-offer
+    // a question they have already answered.
+    const { ctx, seed } = await world();
+    await ctx.db.insert("zoteroLinks", {
+      userId: seed.pi,
+      labId: seed.labId,
+      apiKey: KEY,
+      connectedAt: 1_000,
+      libraryType: "user",
+      libraryId: "475425",
+    });
+    await accept(ctx, seed.labId);
+    expect(ctx.db.all("zoteroLinks")[0]?.scopeAcceptedAt).toBeGreaterThan(0);
+  });
+
+  it("is quiet when there is nothing to accept", async () => {
+    // A member who unlinked in another tab and then pressed Done. The settings
+    // row already renders the unlinked state; this has nothing to add to it.
+    const { ctx, seed } = await world();
+    await expect(accept(ctx, seed.labId)).resolves.toBeNull();
   });
 });
 
@@ -571,6 +707,7 @@ describe("status", () => {
     lastSyncFailed: { at: number; statusCode: number } | null;
     progress: { checked: number; total: number; imported: number } | null;
     lastImported: number | null;
+    scopeAccepted: boolean;
   };
 
   const read = async (ctx: FakeCtx, labId: Id<"labs">): Promise<Status> =>
@@ -646,6 +783,30 @@ describe("status", () => {
       total: 412,
       imported: 40,
     });
+  });
+
+  it("carries whether the scope question has been answered", async () => {
+    // The picker reads this and nothing else. A member who accepted the default
+    // never names a library, so "libraryName is null" is the same shape as
+    // "has not decided" and cannot be told apart from it.
+    const { ctx, seed } = await world();
+    const linkId = await ctx.db.insert("zoteroLinks", {
+      userId: seed.pi,
+      labId: seed.labId,
+      apiKey: KEY,
+      connectedAt: 1_000,
+      libraryType: "user",
+      libraryId: "475425",
+    });
+    expect((await read(ctx, seed.labId)).scopeAccepted).toBe(false);
+
+    await handlerOf(acceptScope)(ctx, { labId: seed.labId } as never);
+    const answered = await read(ctx, seed.labId);
+    expect(answered.scopeAccepted).toBe(true);
+    // Still the default scope, still unnamed: the two are genuinely separate
+    // facts and the row is the only place the second one lives.
+    expect(answered.libraryName).toBeNull();
+    expect((await ctx.db.get(linkId))?.scopeAcceptedAt).toBeGreaterThan(0);
   });
 
   it("cannot see another member's link", async () => {

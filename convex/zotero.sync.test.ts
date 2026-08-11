@@ -217,18 +217,88 @@ describe("one run is bounded", () => {
     expect(link(ctx)?.lastSync?.statusCode).toBeUndefined();
   });
 
-  it("commits the version the walk started at, not the library's latest", async () => {
-    // A member editing a paper on page four of their own walk. Committing the
-    // *current* version would put that edit behind the mark and lose it
-    // forever; committing the target means the next walk sees it again, at the
-    // cost of re-reading a handful of items.
+  it("commits the version the walk started at, not the last page's", async () => {
+    // A member editing a paper on page four of their own walk. `lastVersion` is
+    // the mark `?since=` uses next time, so committing anything the walk did not
+    // actually cover puts that edit behind the mark and loses it; committing the
+    // version the walk pinned at the top means the next walk sees it again, at
+    // the cost of re-reading a handful of items.
+    //
+    // The mark therefore comes off the cursor and never off the page in hand —
+    // asserted here with a page that carries no version header at all, so a
+    // reading of the response could only produce a different answer. The case
+    // where the page reports a *higher* version is the test below: that walk
+    // does not commit a mark at all, it starts again.
     const { ctx, linkId } = await linkedWorld({
       syncCursor: { targetVersion: 8431, start: 25, total: 26, imported: 25 },
     });
-    stubFetch([page([item(9)], 26, 9999), noChildren]);
+    stubFetch([
+      { status: 200, body: [item(9)], headers: { "Total-Results": "26" } },
+      noChildren,
+    ]);
     await run(ctx, linkId);
 
     expect(link(ctx)?.lastVersion).toBe(8431);
+  });
+
+  it("does not close a walk on a count Zotero never sent", async () => {
+    // `Total-Results` is optional, and `start >= total` used to be half of what
+    // ended a walk. Absent, the only fallback is the page in hand — so a full
+    // *first* page with no header read as "25 items, 25 walked, finished", and
+    // `lastVersion` moved past three thousand items nobody had fetched. A short
+    // page is Zotero's own answer to "is there more" and needs no header.
+    const { ctx, linkId } = await linkedWorld();
+    stubFetch([
+      {
+        status: 200,
+        body: Array.from({ length: SYNC_PAGE_ITEMS }, (_, i) => item(i)),
+        headers: { "Last-Modified-Version": "8431" },
+      },
+      ...Array.from({ length: SYNC_PAGE_ITEMS }, () => noChildren),
+    ]);
+    await run(ctx, linkId);
+
+    expect(link(ctx)?.syncCursor?.start).toBe(SYNC_PAGE_ITEMS);
+    expect(link(ctx)?.lastVersion).toBeUndefined();
+  });
+
+  it("walks the page it asked for, not the page it was handed", async () => {
+    // `limit=25` is a request. A proxy, a future API version or something
+    // hostile answering with a hundred rows would otherwise buy a hundred
+    // `/children` requests and a hundred downloads inside one action — the
+    // exact shape `SYNC_PAGE_ITEMS` exists to refuse.
+    const { ctx, linkId } = await linkedWorld();
+    const calls = stubFetch([
+      page(Array.from({ length: 100 }, (_, i) => item(i)), 4_000),
+      ...Array.from({ length: SYNC_PAGE_ITEMS }, () => noChildren),
+    ]);
+    await run(ctx, linkId);
+
+    expect(papers(ctx)).toHaveLength(SYNC_PAGE_ITEMS);
+    expect(link(ctx)?.syncCursor?.start).toBe(SYNC_PAGE_ITEMS);
+    expect(calls, "one page, then one children request each").toHaveLength(
+      1 + SYNC_PAGE_ITEMS,
+    );
+  });
+
+  it("starts the walk again when the library moved under it", async () => {
+    // Offset pagination is only stable while the set underneath holds still,
+    // and a `Last-Modified-Version` above the one the walk pinned is Zotero
+    // saying it did not: an item added or deleted before the current offset
+    // shifts every page after it, so the next `start` points somewhere the walk
+    // has already been or somewhere it has skipped. Restarting costs re-reading
+    // pages that dedupe to nothing; continuing costs the items the shift
+    // stepped over, permanently.
+    const { ctx, linkId } = await linkedWorld({
+      lastVersion: 8000,
+      syncCursor: { targetVersion: 8431, start: 25, total: 400, imported: 25 },
+    });
+    stubFetch([page([item(1)], 400, 8500)]);
+    await run(ctx, linkId);
+
+    expect(link(ctx)?.syncCursor, "the walk is abandoned, not resumed").toBeUndefined();
+    expect(link(ctx)?.lastVersion, "and the mark has not moved").toBe(8000);
+    expect(papers(ctx)).toHaveLength(0);
   });
 });
 
@@ -422,6 +492,88 @@ describe("dedupe", () => {
     expect(papers(ctx)).toHaveLength(1);
     expect((await ctx.db.get(paperId))?.title).toBe("Paper number 4");
   });
+
+  it("does not strip a paper of what the Zotero row never knew", async () => {
+    // `db.patch` reads an `undefined` as *delete this field*, and a Zotero item
+    // is routinely thinner than the paper Margin holds: a `.bib` import or a
+    // DOI walk fills in a venue, an abstract and a list of authors the member's
+    // own Zotero row never had. Claiming that row for a Zotero item would blank
+    // them — and `chooseScope` resets `lastVersion`, so every scope change
+    // re-walks the library and strips the same papers again.
+    const { ctx, seed, linkId } = await linkedWorld();
+    const paperId = await ctx.db.insert("papers", {
+      labId: seed.labId,
+      title: "Paper number 4",
+      authors: ["Ana Ruiz", "Ben Okafor"],
+      year: 2024,
+      venue: "Journal of Reproducible Assays",
+      abstract: "A 4 °C step explains the gap.",
+      doi: "10.1038/nature12373",
+      addedBy: seed.pi,
+      ingestStatus: "ready",
+      zoteroItemKey: "ITEM0004",
+    });
+    // A title and nothing else, which is what most of a real library looks
+    // like once somebody has been dragging PDFs in for a decade.
+    stubFetch([page([item(4, { creators: [], date: undefined })], 1)]);
+    await run(ctx, linkId);
+
+    expect(await ctx.db.get(paperId)).toMatchObject({
+      authors: ["Ana Ruiz", "Ben Okafor"],
+      year: 2024,
+      venue: "Journal of Reproducible Assays",
+      abstract: "A 4 °C step explains the gap.",
+      doi: "10.1038/nature12373",
+    });
+  });
+
+  it("takes a DOI the member corrected upstream", async () => {
+    const { ctx, seed, linkId } = await linkedWorld();
+    const paperId = await ctx.db.insert("papers", {
+      labId: seed.labId,
+      title: "Paper number 4",
+      doi: "10.1038/nature00000",
+      addedBy: seed.pi,
+      ingestStatus: "ready",
+      zoteroItemKey: "ITEM0004",
+    });
+    stubFetch([page([item(4, { DOI: "10.1038/nature12373" })], 1)]);
+    await run(ctx, linkId);
+
+    expect((await ctx.db.get(paperId))?.doi).toBe("10.1038/nature12373");
+  });
+
+  it("will not hand a correction a second row already answers to", async () => {
+    // The one edit that can break `by_lab_and_doi` from outside: the member
+    // fixes a typo in Zotero, and the corrected DOI is the one another paper on
+    // the shelf has held since a `.bib` import. Written through, two rows would
+    // sit under one dedupe key — and from then on every lookup that dedupes
+    // against that DOI finds whichever row Convex hands back first, which is a
+    // fact about an index rather than about the lab.
+    const { ctx, seed, linkId } = await linkedWorld();
+    const older = await ctx.db.insert("papers", {
+      labId: seed.labId,
+      title: "The paper that DOI belongs to",
+      doi: "10.1038/nature12373",
+      addedBy: seed.pi,
+      ingestStatus: "ready",
+    });
+    const claimed = await ctx.db.insert("papers", {
+      labId: seed.labId,
+      title: "Paper number 4",
+      doi: "10.1038/nature00000",
+      addedBy: seed.pi,
+      ingestStatus: "ready",
+      zoteroItemKey: "ITEM0004",
+    });
+    stubFetch([page([item(4, { DOI: "10.1038/nature12373" })], 1)]);
+    await run(ctx, linkId);
+
+    // The row that was here first keeps it; the guest keeps its own row and its
+    // own item key, and does not get somebody else's identifier.
+    expect((await ctx.db.get(older))?.doi).toBe("10.1038/nature12373");
+    expect((await ctx.db.get(claimed))?.doi).toBe("10.1038/nature00000");
+  });
 });
 
 describe("the attachment", () => {
@@ -524,24 +676,20 @@ describe("the attachment", () => {
 
 describe("an outcome that arrives after the member moved", () => {
   /**
-   * The member pastes a new key while a run is in flight.
+   * The member changes something while a run is in flight.
    *
    * Hung off the preflight query rather than written between two statements
    * in the test, and the difference matters. Every await in this context
    * resolves in the same microtask, so a `patch` after `run(…)` lands *before*
    * the run has read the link — which is a race, but the harmless one, and a
    * test that staged it would pass while proving nothing. Wired here, the
-   * replacement happens where the danger is: after the run read the key and
-   * before its outcome tries to land.
+   * change happens where the danger is: after the run read the link and its
+   * key, and before its outcome tries to land.
    */
-  function replaceKeyDuringRun(
-    ctx: FakeCtx,
-    linkId: Id<"zoteroLinks">,
-    fields: Record<string, unknown>,
-  ) {
+  function duringRun(ctx: FakeCtx, change: () => Promise<unknown>) {
     ctx.register(internal.zotero.newAmong, {
       _handler: async (inner: unknown, args: never) => {
-        await ctx.db.patch(linkId, fields);
+        await change();
         return await handlerOf(newAmong)(inner, args);
       },
     });
@@ -556,14 +704,97 @@ describe("an outcome that arrives after the member moved", () => {
       page([item(1)], 40),
       { status: 200, body: [] },
     ]);
-    replaceKeyDuringRun(ctx, linkId, {
-      connectedAt: 9_000,
-      apiKey: "Zx7QmT4rWbNc8VhJ2LpKd6Ye",
-    });
+    duringRun(ctx, () =>
+      ctx.db.patch(linkId, {
+        connectedAt: 9_000,
+        apiKey: "Zx7QmT4rWbNc8VhJ2LpKd6Ye",
+      }),
+    );
     await run(ctx, linkId);
 
     expect(papers(ctx)).toHaveLength(0);
     expect(link(ctx)?.syncCursor).toBeUndefined();
+  });
+
+  it("writes nothing under a scope the member re-pointed", async () => {
+    // `connectedAt` says nothing about this one: the key is the same key. But
+    // the page in hand was read out of one collection and the link now names
+    // another, so filing it puts papers on the lab's shelf out of a library
+    // nobody currently syncs — and moves a cursor that belongs to the old
+    // scope's walk. `chooseScope` has already cleared that cursor, so the run
+    // would be re-creating a walk the member ended.
+    const { ctx, linkId } = await linkedWorld();
+    stubFetch([page([item(1)], 40), { status: 200, body: [] }]);
+    duringRun(ctx, () =>
+      ctx.db.patch(linkId, {
+        collectionKey: "N3WC0LL3",
+        collectionName: "Thursday",
+        syncCursor: undefined,
+      }),
+    );
+    await run(ctx, linkId);
+
+    expect(papers(ctx)).toHaveLength(0);
+    expect(link(ctx)?.syncCursor).toBeUndefined();
+  });
+
+  it("does not leave a blob behind when the member unlinked mid-run", async () => {
+    // Unlink is a delete, so there is no `connectedAt` left to compare and the
+    // page is refused by the row simply being gone. The bytes were already
+    // fetched by then, and a blob with nothing pointing at it is a file nobody
+    // will ever find again and nothing will ever collect.
+    const { ctx, linkId } = await linkedWorld();
+    stubFetch([
+      page([item(1)], 40),
+      {
+        status: 200,
+        body: [
+          {
+            key: "PDF00001",
+            data: {
+              key: "PDF00001",
+              itemType: "attachment",
+              linkMode: "imported_url",
+              contentType: "application/pdf",
+              md5: "9f86d081884c7d659a2feaa0c55ad015",
+            },
+          },
+        ],
+      },
+      { status: 302, headers: { location: "https://s3.amazonaws.com/abc" } },
+      { status: 200, bytes: "%PDF-1.7 fake" },
+    ]);
+    duringRun(ctx, () => ctx.db.delete(linkId));
+    await run(ctx, linkId);
+
+    expect(ctx.stored).toHaveLength(1);
+    expect(ctx.discarded).toHaveLength(1);
+    expect(papers(ctx)).toHaveLength(0);
+  });
+
+  it("refuses a page fetched at an offset the walk has already left", async () => {
+    // Two runs overlapping — the hourly sweep and a member pressing Sync now.
+    // Both read from the same offset, one commits and moves the cursor, and the
+    // other arrives with a page describing where the walk *was*. Applied, it
+    // rewinds `start` to somewhere the walk has been, re-counts what it already
+    // imported, and hands `lastVersion` a walk that never covered the middle.
+    const { ctx, linkId } = await linkedWorld({
+      syncCursor: { targetVersion: 8431, start: 50, total: 400, imported: 50 },
+    });
+    stubFetch([
+      page(Array.from({ length: SYNC_PAGE_ITEMS }, (_, i) => item(i)), 400),
+      ...Array.from({ length: SYNC_PAGE_ITEMS }, () => noChildren),
+    ]);
+    duringRun(ctx, () =>
+      ctx.db.patch(linkId, {
+        syncCursor: { targetVersion: 8431, start: 75, total: 400, imported: 60 },
+      }),
+    );
+    await run(ctx, linkId);
+
+    expect(link(ctx)?.syncCursor?.start, "where the other run left it").toBe(75);
+    expect(link(ctx)?.syncCursor?.imported).toBe(60);
+    expect(papers(ctx)).toHaveLength(0);
   });
 
   it("does not leave a fetched blob with nothing pointing at it", async () => {
@@ -588,7 +819,7 @@ describe("an outcome that arrives after the member moved", () => {
       { status: 302, headers: { location: "https://s3.amazonaws.com/abc" } },
       { status: 200, bytes: "%PDF-1.7 fake" },
     ]);
-    replaceKeyDuringRun(ctx, linkId, { connectedAt: 9_000 });
+    duringRun(ctx, () => ctx.db.patch(linkId, { connectedAt: 9_000 }));
     await run(ctx, linkId);
 
     expect(ctx.stored).toHaveLength(1);

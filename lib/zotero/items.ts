@@ -97,6 +97,76 @@ function text(value: unknown): string | undefined {
 }
 
 /**
+ * How much of each field Margin will hold, and why there is a number at all.
+ *
+ * Every string here is somebody else's, out of a library Margin does not
+ * control, and a Convex document is capped at 1 MiB. A megabyte pasted into an
+ * `abstractNote` is not hypothetical — free-text fields in a reference manager
+ * are where people put things — and unbounded it is worse than one unusable
+ * row: the item sits at a fixed offset in an offset-paginated walk, so every
+ * run from then on fetches it, fails to write the page, and stops in the same
+ * place. The cursor never gets past it, and the rest of the library never
+ * arrives.
+ *
+ * The numbers are the ones the rest of the product already holds to, so a
+ * paper does not change size depending on which door it came through: a title
+ * is `cleanTitle`'s 500 (`convex/papers.ts:42`), an abstract is
+ * `clampAbstract`'s 4,000 (`convex/lib/scholarly.ts:37`). Clipped rather than
+ * refused for the prose fields, because half an abstract is still an abstract;
+ * refused outright for the item key, because a *truncated* key is a different
+ * item's identity and would collide on the dedupe index rather than fail.
+ */
+const MAX_TITLE_CHARS = 500;
+const MAX_ABSTRACT_CHARS = 4_000;
+const MAX_VENUE_CHARS = 300;
+const MAX_AUTHOR_CHARS = 200;
+const MAX_AUTHORS = 60;
+const MAX_DOI_CHARS = 200;
+const MAX_URL_CHARS = 2_000;
+/** Zotero issues eight characters; this is wide enough not to be the authority. */
+const MAX_KEY_CHARS = 64;
+
+/** The earliest year a paper plausibly carries. Movable type is younger. */
+const EARLIEST_YEAR = 1400;
+
+function clip(value: string | undefined, max: number): string | undefined {
+  return value === undefined ? undefined : value.slice(0, max);
+}
+
+/**
+ * A year, or nothing — never a clamp.
+ *
+ * `readYear` takes the first four-digit run in a free-text date field, which
+ * is right for `2024-03-15` and wrong for a page range or a phone number that
+ * wandered into the field. Clamping a `9999` to this year would state a fact
+ * about the paper that nobody said; absence is the honest answer, and the
+ * shelf already renders a paper with no year.
+ */
+function plausibleYear(year: number | undefined): number | undefined {
+  if (year === undefined) return undefined;
+  const ceiling = new Date().getUTCFullYear() + 1;
+  return year >= EARLIEST_YEAR && year <= ceiling ? year : undefined;
+}
+
+/**
+ * A URL only if it is one a browser should be offered.
+ *
+ * `data.url` is stored as `sourceUrl` and rendered on the shelf as the paper's
+ * "Publisher page" link, so this is a member's own library choosing an
+ * `href` — and a `data:` or `javascript:` URL arriving that way is trusted
+ * shelf state that looks exactly like every other paper's. http(s) or nothing.
+ */
+function webUrl(value: string | undefined): string | undefined {
+  if (value === undefined || value.length > MAX_URL_CHARS) return undefined;
+  try {
+    const { protocol } = new URL(value);
+    return protocol === "https:" || protocol === "http:" ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * The DOI a preprint keeps in `extra`.
  *
  * `preprint` and `conferencePaper` have no `DOI` field in Zotero's schema, and
@@ -116,7 +186,7 @@ function creatorNames(creators: ZoteroCreator[] | undefined): string[] {
   const authors = all.filter((creator) => creator.creatorType === "author");
   // An edited volume has editors and no authors. Dropping them would leave the
   // row with nobody's name on it, which is worse than the wrong kind of name.
-  const chosen = authors.length > 0 ? authors : all;
+  const chosen = (authors.length > 0 ? authors : all).slice(0, MAX_AUTHORS);
   return chosen
     .map((creator) => {
       const whole = text(creator.name);
@@ -131,6 +201,7 @@ function creatorNames(creators: ZoteroCreator[] | undefined): string[] {
           .join(", "),
       );
     })
+    .map((name) => name.slice(0, MAX_AUTHOR_CHARS))
     .filter((name) => name.length > 0);
 }
 
@@ -165,25 +236,29 @@ export function toReference(item: ZoteroItem): ZoteroReference | null {
   const data = item.data;
   if (!SCHOLARLY.has(data.itemType)) return null;
 
-  const title = firstText(data.title);
+  const title = clip(firstText(data.title), MAX_TITLE_CHARS);
   if (title === undefined) return null;
 
   const key = text(item.key);
-  if (key === undefined) return null;
+  if (key === undefined || key.length === 0 || key.length > MAX_KEY_CHARS) {
+    return null;
+  }
 
   return {
     zoteroItemKey: key,
     title,
     authors: creatorNames(data.creators),
-    year: readYear(text(data.date)),
-    venue: firstText(
-      data.publicationTitle,
-      data.proceedingsTitle,
-      data.bookTitle,
+    year: plausibleYear(readYear(text(data.date))),
+    venue: clip(
+      firstText(data.publicationTitle, data.proceedingsTitle, data.bookTitle),
+      MAX_VENUE_CHARS,
     ),
-    doi: firstText(data.DOI) ?? doiFromExtra(text(data.extra)),
-    abstract: firstText(data.abstractNote),
-    url: firstText(data.url),
+    doi: clip(
+      firstText(data.DOI) ?? doiFromExtra(text(data.extra)),
+      MAX_DOI_CHARS,
+    ),
+    abstract: clip(firstText(data.abstractNote), MAX_ABSTRACT_CHARS),
+    url: webUrl(firstText(data.url)),
   };
 }
 

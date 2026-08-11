@@ -334,7 +334,15 @@ export type SyncHeaders = {
   lastModifiedVersion: number | null;
   /** How many objects match, or `null` if the response did not say. */
   totalResults: number | null;
-  /** How long to wait before the next request, or `null` for "don't wait". */
+  /**
+   * How long to pause before the next page, or `null` for "do not pause here".
+   *
+   * `null` is two answers with one instruction. Zotero asked for nothing, or
+   * Zotero asked for longer than `MAX_BACKOFF_MS` — and above that ceiling the
+   * honest response is to end the run rather than hold an action open waiting,
+   * because a run is one page and the sweep's hourly cadence honours a long
+   * backoff far better than a socket does. Either way the caller does not wait.
+   */
   backoffMs: number | null;
 };
 

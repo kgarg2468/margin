@@ -113,6 +113,7 @@ type ZoteroStatus = {
   connected: boolean;
   libraryName: string | null;
   collectionName: string | null;
+  scopeAccepted: boolean;
   lastSyncAt: number | null;
   lastSyncFailed: { at: number; statusCode: number } | null;
   progress: { checked: number; total: number; imported: number } | null;
@@ -206,15 +207,25 @@ function scopeLine(status: ZoteroStatus): string {
 /** What is linked, how far along it is, how to narrow it, and how to stop. */
 function Linked({ labId, status }: { labId: Id<"labs">; status: ZoteroStatus }) {
   const disconnect = useMutation(api.zotero.disconnect);
+  const acceptScope = useMutation(api.zotero.acceptScope);
   /**
-   * The picker is open on arrival only when nothing has been chosen yet, and
+   * The picker is open on arrival only until the member has answered it, and
    * it stays open across the library write. That second half is the load-
    * bearing part: choosing a library *is* a `chooseScope`, so a panel whose
    * visibility was read off the status query would close itself the moment the
    * library landed — and the collection step lives on the far side of that
    * write, so nobody would ever see it.
+   *
+   * `scopeAccepted` rather than `libraryName === null`, which is what this
+   * asked before and which is not the same question. A member who is happy
+   * with their whole library never names one, so the old test stayed true
+   * forever: the panel re-opened on every settings visit, spending two
+   * requests to api.zotero.org each time to re-offer a question that had been
+   * answered — the thing `ScopeForm`'s own doc says a settings page must not
+   * do. Done now writes that answer down, and "Change what syncs" is how it is
+   * re-opened by somebody who means to.
    */
-  const [choosing, setChoosing] = useState(status.libraryName === null);
+  const [choosing, setChoosing] = useState(!status.scopeAccepted);
   const [error, setError] = useState<string | null>(null);
 
   return (
@@ -232,7 +243,17 @@ function Linked({ labId, status }: { labId: Id<"labs">; status: ZoteroStatus }) 
       )}
 
       {choosing ? (
-        <ScopeForm labId={labId} onDone={() => setChoosing(false)} />
+        <ScopeForm
+          labId={labId}
+          onDone={() => {
+            setChoosing(false);
+            // Closed first, recorded after. The panel shutting is the answer
+            // to the press, and a member who loses the write — offline, a tab
+            // closed on the way out — is asked once more rather than left
+            // looking at a panel that did not respond.
+            void acceptScope({ labId }).catch(() => undefined);
+          }}
+        />
       ) : (
         <button
           type="button"
@@ -424,9 +445,6 @@ function ScopeForm({
 
       {chosen !== null && (
         <div className="flex flex-col gap-2">
-          <label className={labelClass} htmlFor="zotero-collection">
-            Collection
-          </label>
           {/* The waiting block goes as soon as something has gone wrong: a
               shape promising a list that is not coming reads as a hang, and
               the sentence underneath has already said what happened. */}
@@ -440,32 +458,43 @@ function ScopeForm({
                 one in Zotero if you would rather the lab saw only part.
               </p>
             ) : (
-              <select
-                id="zotero-collection"
-                className={selectClass}
-                defaultValue=""
-                disabled={pending}
-                onChange={(event) => {
-                  const next = collections.find(
-                    (entry) => entry.key === event.target.value,
-                  );
-                  if (next !== undefined) void pickCollection(next);
-                }}
-              >
-                {/*
-                  The default is the whole library, and it says so rather than
-                  saying "choose one" — the library is already saved as the
-                  scope by the time this list renders, so an empty selection is
-                  not a missing answer. Picking a collection narrows it;
-                  leaving it alone and pressing Done accepts what is true.
-                */}
-                <option value="">Everything in this library</option>
-                {collections.map((entry) => (
-                  <option key={entry.key} value={entry.key}>
-                    {entry.name}
-                  </option>
-                ))}
-              </select>
+              /* The label lives with the control it names rather than above
+                 the branch: a library with no collections renders a sentence
+                 and no `select`, and a `htmlFor` pointing at an element that
+                 was never rendered is a label a screen reader announces with
+                 nothing behind it. */
+              <>
+                <label className={labelClass} htmlFor="zotero-collection">
+                  Collection
+                </label>
+                <select
+                  id="zotero-collection"
+                  className={selectClass}
+                  defaultValue=""
+                  disabled={pending}
+                  onChange={(event) => {
+                    const next = collections.find(
+                      (entry) => entry.key === event.target.value,
+                    );
+                    if (next !== undefined) void pickCollection(next);
+                  }}
+                >
+                  {/*
+                    The default is the whole library, and it says so rather
+                    than saying "choose one" — the library is already saved as
+                    the scope by the time this list renders, so an empty
+                    selection is not a missing answer. Picking a collection
+                    narrows it; leaving it alone and pressing Done accepts
+                    what is true.
+                  */}
+                  <option value="">Everything in this library</option>
+                  {collections.map((entry) => (
+                    <option key={entry.key} value={entry.key}>
+                      {entry.name}
+                    </option>
+                  ))}
+                </select>
+              </>
             ))}
         </div>
       )}

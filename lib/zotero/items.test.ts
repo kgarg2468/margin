@@ -186,6 +186,99 @@ describe("toReference", () => {
   });
 });
 
+describe("the size of somebody else's library", () => {
+  /**
+   * Every string here came out of a library Margin does not control, and a
+   * Convex document is capped at 1 MiB. An unbounded field is not one unusable
+   * row: the item sits at a fixed offset in an offset-paginated walk, so every
+   * run from then on fetches it, fails to write the page, and stops in the same
+   * place. The cursor never gets past it and the rest of the library never
+   * arrives — which is the difference between a bad row and a dead sync.
+   */
+  const huge = (n: number) => "x".repeat(n);
+
+  it("clips the prose fields rather than refusing the paper", () => {
+    // Half an abstract is still an abstract, and the numbers are the ones the
+    // rest of the product already holds to: `cleanTitle`'s 500,
+    // `clampAbstract`'s 4,000.
+    const bloated = toReference({
+      ...article,
+      data: {
+        ...article.data,
+        title: huge(9_000),
+        abstractNote: huge(500_000),
+        publicationTitle: huge(9_000),
+        DOI: huge(9_000),
+      },
+    });
+    expect(bloated?.title).toHaveLength(500);
+    expect(bloated?.abstract).toHaveLength(4_000);
+    expect(bloated?.venue).toHaveLength(300);
+    expect(bloated?.doi).toHaveLength(200);
+  });
+
+  it("caps how many names one paper can carry, and how long each is", () => {
+    const crowd = Array.from({ length: 400 }, (_, n) => ({
+      creatorType: "author",
+      name: `${huge(4_000)} ${n}`,
+    }));
+    const entry = toReference({
+      ...article,
+      data: { ...article.data, creators: crowd },
+    });
+    expect(entry?.authors).toHaveLength(60);
+    expect(entry?.authors.every((name) => name.length <= 200)).toBe(true);
+  });
+
+  it("refuses an item key it would have to truncate", () => {
+    // Clipped rather than refused everywhere else, and the opposite here on
+    // purpose: a *truncated* key is a different item's identity, and it would
+    // collide on `by_lab_and_zotero_item` rather than fail — one Zotero item
+    // silently patching another's row every hour.
+    expect(toReference({ ...article, key: huge(65) })).toBeNull();
+    expect(toReference({ ...article, key: "" })).toBeNull();
+    expect(toReference({ ...article, key: huge(64) })?.zoteroItemKey).toHaveLength(64);
+  });
+
+  it("says nothing about the year rather than making one up", () => {
+    // `readYear` takes the first four-digit run in a free-text field, which is
+    // right for `2024-03-15` and wrong for a page range. Clamping a `9999` to
+    // this year would state a fact about the paper that nobody said; the shelf
+    // already renders a paper with no year.
+    for (const date of ["9999", "0042", "pp. 1200-1299"]) {
+      expect(
+        toReference({ ...article, data: { ...article.data, date } })?.year,
+      ).toBeUndefined();
+    }
+    expect(
+      toReference({ ...article, data: { ...article.data, date: "1923" } })?.year,
+    ).toBe(1923);
+  });
+
+  it("offers the browser only a URL a browser should be offered", () => {
+    // `url` is stored as `sourceUrl` and rendered as the paper's "Publisher
+    // page" link, so this is a member's own library choosing an `href`. A
+    // `javascript:` URL arriving that way is trusted shelf state that looks
+    // exactly like every other paper's.
+    for (const url of [
+      "javascript:alert(1)",
+      "data:text/html,<script>1</script>",
+      "not a url at all",
+      `https://example.org/${huge(3_000)}`,
+    ]) {
+      expect(
+        toReference({ ...article, data: { ...article.data, url } })?.url,
+      ).toBeUndefined();
+    }
+    expect(
+      toReference({
+        ...article,
+        data: { ...article.data, url: "http://example.org/paper" },
+      })?.url,
+    ).toBe("http://example.org/paper");
+  });
+});
+
 describe("doiFromExtra", () => {
   it("reads a DOI: line whatever its case and spacing", () => {
     expect(doiFromExtra("doi:10.1000/xyz")).toBe("10.1000/xyz");

@@ -218,7 +218,15 @@ export async function zoteroFetch(
     // Zotero's own body — `Invalid key`, `Forbidden` — is genuinely the most
     // useful thing in the log and carries no secret. The key does, so it is
     // never logged and never put in an error.
-    const detail = await response.text().catch(() => "");
+    //
+    // Which is a claim about a body Margin does not write, so it is enforced
+    // rather than asserted. `GET /keys/current` echoes the credential in its
+    // *successful* body, and an error page is free to reflect any of the
+    // request back at us; either one reaching this line puts the key inside a
+    // refusal, and every caller of this transport logs `String(caught)`. One
+    // replacement here covers all of them.
+    const body = await response.text().catch(() => "");
+    const detail = apiKey.length === 0 ? body : body.replaceAll(apiKey, "[key]");
     throw new ZoteroRefusal(
       `${response.status} ${detail}`.trim().slice(0, 200),
       response.status,
@@ -261,8 +269,18 @@ async function linkFor(
     .unique();
 }
 
-/** The library a link points at, in the shape `lib/zotero/api.ts` addresses. */
-export function libraryOf(link: Doc<"zoteroLinks">): ZoteroLibrary {
+/**
+ * The library a link points at, in the shape `lib/zotero/api.ts` addresses.
+ *
+ * Structural rather than `Doc<"zoteroLinks">` because the two callers hold
+ * different things — a picker holds `syncPayload`'s answer, a run holds its
+ * own copy of the scope — and neither is a document. What they share is the
+ * pair of fields, which is exactly what this asks for.
+ */
+export function libraryOf(link: {
+  libraryType: "user" | "group";
+  libraryId: string;
+}): ZoteroLibrary {
   return { type: link.libraryType, id: link.libraryId };
 }
 
@@ -391,9 +409,20 @@ export const saveLink = internalMutation({
       libraryName: undefined,
       collectionKey: undefined,
       collectionName: undefined,
+      scopeAcceptedAt: undefined,
       lastVersion: undefined,
       syncCursor: undefined,
-      lastSyncAt: undefined,
+      // Stamped, not cleared, and this is the one field here that is not
+      // simply forgetting the old key. `connect` points a fresh link at the
+      // member's *whole personal library* — it is the only scope nameable
+      // without a second round trip — and the sweep takes anything that has
+      // never been looked at first. Left absent, the next hourly tick can walk
+      // twenty-five papers out of a decade of half-read PDFs onto the lab's
+      // shelf before the member has finished choosing a collection, and
+      // unlinking does not take them back off. So the clock starts now: an
+      // hour is longer than choosing a scope takes, and Sync now is untouched
+      // for the member who genuinely wants their whole library.
+      lastSyncAt: Date.now(),
       lastSync: undefined,
     };
 
@@ -540,28 +569,60 @@ export const listLibraries = action({
   }),
   handler: async (ctx, args) => {
     const link = await callerLink(ctx, args.labId);
-    const identity = parseKeyPermissions(
-      await bodyOf(await zoteroFetch(keysCurrentUrl(), link.apiKey)),
-    );
-    if (identity === null) {
-      throw new ConvexError(
-        "Zotero answered something Margin couldn't read. Try again in a minute.",
+    try {
+      const identity = parseKeyPermissions(
+        await bodyOf(await zoteroFetch(keysCurrentUrl(), link.apiKey)),
       );
+      if (identity === null) {
+        throw new ConvexError(
+          "Zotero answered something Margin couldn't read. Try again in a minute.",
+        );
+      }
+      const response = await zoteroFetch(
+        groupsUrl(identity.userId),
+        link.apiKey,
+      );
+      const groups = parseGroups(await bodyOf(response));
+      return {
+        libraries: [
+          { type: "user" as const, id: identity.userId, name: "My library" },
+          ...groups.map((group) => ({
+            type: "group" as const,
+            id: group.id,
+            name: group.name,
+          })),
+        ],
+      };
+    } catch (caught) {
+      throw pickerRefusal(caught);
     }
-    const response = await zoteroFetch(groupsUrl(identity.userId), link.apiKey);
-    const groups = parseGroups(await bodyOf(response));
-    return {
-      libraries: [
-        { type: "user" as const, id: identity.userId, name: "My library" },
-        ...groups.map((group) => ({
-          type: "group" as const,
-          id: group.id,
-          name: group.name,
-        })),
-      ],
-    };
   },
 });
+
+/**
+ * What a picker says when Zotero declines, rather than what it would say.
+ *
+ * A `ZoteroRefusal` is an ordinary `Error`, and Convex redacts one of those on
+ * its way to a client — so a picker that let it through rendered the client's
+ * own fallback, "Could not reach Zotero", next to a settings row already
+ * saying, correctly, that the key was refused. Two sentences about one event
+ * and the wrong one is the specific one. `connect` has caught this since it
+ * was written; the pickers are the same door and had not.
+ *
+ * `permanentStatus` is what makes the honest version possible: 403 and 404 are
+ * the member's to fix and earn the sentence that asks for a new key, and
+ * everything else is a bad minute at api.zotero.org and gets told as one.
+ */
+function pickerRefusal(caught: unknown): unknown {
+  if (!(caught instanceof ZoteroRefusal)) return caught;
+  console.error(`A Zotero picker was refused: ${String(caught)}`);
+  const status = permanentStatus(caught);
+  return new ConvexError(
+    status === 403 || status === 404
+      ? "Zotero turned that key down — it may have been deleted, or it may not reach that library any more. Paste a new key."
+      : "Zotero didn't answer just now. Try again in a minute; nothing has been changed.",
+  );
+}
 
 /** The collections in whichever library is currently chosen. */
 export const listCollections = action({
@@ -571,11 +632,15 @@ export const listCollections = action({
   }),
   handler: async (ctx, args) => {
     const link = await callerLink(ctx, args.labId);
-    const response = await zoteroFetch(
-      collectionsUrl({ type: link.libraryType, id: link.libraryId }),
-      link.apiKey,
-    );
-    return { collections: parseCollections(await bodyOf(response)) };
+    try {
+      const response = await zoteroFetch(
+        collectionsUrl(libraryOf(link)),
+        link.apiKey,
+      );
+      return { collections: parseCollections(await bodyOf(response)) };
+    } catch (caught) {
+      throw pickerRefusal(caught);
+    }
   },
 });
 
@@ -655,10 +720,46 @@ export const chooseScope = mutation({
       libraryName: args.libraryName,
       collectionKey: args.collectionKey,
       collectionName: args.collectionName,
+      // Picking a scope is accepting one. `acceptScope` exists for the member
+      // who accepts the default without touching anything; this is the same
+      // fact arriving the other way, and recording it here means a member who
+      // narrowed their scope and then closed the tab is not asked again.
+      scopeAcceptedAt: Date.now(),
       lastVersion: undefined,
       syncCursor: undefined,
       lastSync: undefined,
     });
+    return null;
+  },
+});
+
+/**
+ * "This scope is the one I want" — the answer Done gives.
+ *
+ * Without a durable record of it there is nowhere to put the answer, and the
+ * picker's own visibility test would be "has this member named a library",
+ * which is false for everybody who is happy with the default: they press Done,
+ * and the panel opens itself again on the next visit, and on the one after
+ * that, spending two requests to `api.zotero.org` each time to re-offer a
+ * question they have already answered. The panel's own doc argues against
+ * exactly that ("a settings page nobody came here to change should not spend
+ * a request"), so the answer is stored rather than inferred.
+ *
+ * A timestamp rather than a boolean, for the reason `connectedAt` is one: when
+ * somebody accepted a scope is a fact worth having if a later question is ever
+ * asked about which scope they accepted. Nothing reads it as a time yet.
+ */
+export const acceptScope = mutation({
+  args: { labId: v.id("labs") },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const membership = await requireMembership(ctx, args.labId);
+    const link = await linkFor(ctx, args.labId, membership.userId);
+    // Nothing to accept, and nothing to say about it: the settings row already
+    // renders the unlinked state, and a member who unlinked in another tab
+    // does not need this to raise.
+    if (link === null) return null;
+    await ctx.db.patch(link._id, { scopeAcceptedAt: Date.now() });
     return null;
   },
 });
@@ -720,6 +821,8 @@ export const status = query({
     connected: v.boolean(),
     libraryName: v.union(v.null(), v.string()),
     collectionName: v.union(v.null(), v.string()),
+    /** Whether this member has said which part of their library they meant. */
+    scopeAccepted: v.boolean(),
     lastSyncAt: v.union(v.null(), v.number()),
     /** The last refusal, if the key is currently being refused. */
     lastSyncFailed: v.union(
@@ -743,6 +846,7 @@ export const status = query({
       connected: false,
       libraryName: null,
       collectionName: null,
+      scopeAccepted: false,
       lastSyncAt: null,
       lastSyncFailed: null,
       progress: null,
@@ -766,6 +870,7 @@ export const status = query({
       connected: true,
       libraryName: link.libraryName ?? null,
       collectionName: link.collectionName ?? null,
+      scopeAccepted: link.scopeAcceptedAt !== undefined,
       lastSyncAt: link.lastSyncAt ?? null,
       lastSyncFailed:
         stale || last.statusCode === undefined
@@ -968,11 +1073,34 @@ export const newAmong = internalQuery({
  * reason `insertFromDoi` re-checks (`convex/papers.ts:850-868`): two members
  * can be syncing overlapping libraries at once, and the gap between the query
  * and this mutation is a real interval.
+ *
+ * ## Four ways a page can arrive too late, and one answer to all of them
+ *
+ * The run that assembled this page held a key, a scope and an offset, and any
+ * of the three can have moved while it was fetching — the member in the
+ * settings page, the hourly sweep, a second tab. Each mismatch is checked
+ * below and each one discards the whole page, storage included, because a page
+ * is only meaningful against the state it was read from:
+ *
+ *   - the link is **gone** (unlinked mid-run),
+ *   - the **key** was replaced (`connectedAt`),
+ *   - the **scope** was re-pointed (`chooseScope`, which leaves `connectedAt`
+ *     alone — so a run against the old library would otherwise file its papers
+ *     here *and* install its own `targetVersion` as the new scope's cursor),
+ *   - the **cursor** moved (another run already committed a page from this
+ *     offset; adding this page's count to the live value would leave a hole in
+ *     the walk that `lastVersion` then closes over permanently).
  */
 export const commitPage = internalMutation({
   args: {
     linkId: v.id("zoteroLinks"),
     connectedAt: v.number(),
+    /** The scope the run read, so a re-pointed link refuses the old library's page. */
+    libraryType: v.union(v.literal("user"), v.literal("group")),
+    libraryId: v.string(),
+    collectionKey: v.optional(v.string()),
+    /** The offset the run fetched at. This commit only applies to that offset. */
+    fetchedStart: v.number(),
     entries: v.array(
       v.object({
         ...zoteroCandidate.fields,
@@ -982,6 +1110,7 @@ export const commitPage = internalMutation({
     /** How many items the page held, imported or not — what `start` advances by. */
     walked: v.number(),
     targetVersion: v.number(),
+    /** `Total-Results`, for the progress line. Never what closes a walk. */
     total: v.number(),
     /** True when Zotero gave back a short page: there is no more to walk. */
     exhausted: v.boolean(),
@@ -990,17 +1119,30 @@ export const commitPage = internalMutation({
   handler: async (ctx, args) => {
     const link = await ctx.db.get(args.linkId);
     const nothing = { imported: 0, skipped: 0, done: true };
-    if (link === null) return nothing;
 
-    if (link.connectedAt !== args.connectedAt) {
-      // The member replaced their key while this run was in flight. Drop the
-      // files it fetched rather than leaving them in storage unreferenced.
+    /** Throw the page away, and the files it fetched with it. */
+    const discard = async () => {
+      // A blob with nothing pointing at it is a file nobody will ever find
+      // again and nothing will ever collect.
       for (const entry of args.entries) {
         if (entry.storageId !== undefined) {
           await ctx.storage.delete(entry.storageId);
         }
       }
       return nothing;
+    };
+
+    if (link === null) return await discard();
+    if (link.connectedAt !== args.connectedAt) return await discard();
+    if (
+      link.libraryType !== args.libraryType ||
+      link.libraryId !== args.libraryId ||
+      link.collectionKey !== args.collectionKey
+    ) {
+      return await discard();
+    }
+    if ((link.syncCursor?.start ?? 0) !== args.fetchedStart) {
+      return await discard();
     }
 
     const shelf = await ctx.db
@@ -1045,13 +1187,21 @@ export const commitPage = internalMutation({
         // adding a near-duplicate; leave the file alone, because a PDF on the
         // shelf has a text layer and annotations anchored to it and swapping
         // that out is `attachPdf`'s job, not a background sync's.
+        //
+        // Every field falls back to what the row already holds, because
+        // `db.patch` reads an `undefined` as *delete this field* and a Zotero
+        // item is routinely thinner than the paper Margin has: a `.bib` import
+        // or a DOI walk fills in a venue and an abstract that the member's own
+        // Zotero row never had. Without the fallbacks, claiming a paper for a
+        // Zotero item strips it — and `chooseScope` resets `lastVersion`, so
+        // every scope change re-walks and re-strips the same rows.
         await ctx.db.patch(byKey._id, {
           title,
-          authors,
-          year: entry.year,
-          venue: entry.venue,
-          abstract: entry.abstract,
-          doi: doi ?? byKey.doi,
+          authors: authors ?? byKey.authors,
+          year: entry.year ?? byKey.year,
+          venue: entry.venue ?? byKey.venue,
+          abstract: entry.abstract ?? byKey.abstract,
+          doi: await keptDoi(ctx, link.labId, byKey, doi),
         });
         if (entry.storageId !== undefined) await ctx.storage.delete(entry.storageId);
         skipped += 1;
@@ -1117,9 +1267,23 @@ export const commitPage = internalMutation({
       imported += 1;
     }
 
-    const start = (link.syncCursor?.start ?? 0) + args.walked;
+    const start = args.fetchedStart + args.walked;
     const walkedImported = (link.syncCursor?.imported ?? 0) + imported;
-    const done = args.exhausted || start >= args.total;
+    /**
+     * A short page, and nothing else, ends a walk.
+     *
+     * `start >= total` was the other half of this and it is gone, because
+     * `total` is `Total-Results` and Zotero does not always send one. Absent,
+     * the only honest fallback is the page in hand — and a *full* first page
+     * with no header then reads as "25 items, 25 walked, finished", which
+     * closes the walk and moves `lastVersion` past everything it never
+     * fetched. What the arithmetic bought was one saved request at the end of
+     * a walk whose length divides evenly; what it cost was the rest of the
+     * library. A short page is Zotero's own answer to "is there more", it
+     * needs no header, and the extra empty page at the end is an hourly
+     * request nobody notices.
+     */
+    const done = args.exhausted;
     const at = Date.now();
 
     await ctx.db.patch(link._id, {
@@ -1134,7 +1298,10 @@ export const commitPage = internalMutation({
         : {
             targetVersion: args.targetVersion,
             start,
-            total: args.total,
+            // Display only, and never below what has actually been walked: a
+            // progress line reading "50 of about 25" is a worse answer than a
+            // rough one.
+            total: Math.max(args.total, start),
             imported: walkedImported,
           },
       lastSyncAt: at,
@@ -1159,12 +1326,53 @@ export const commitPage = internalMutation({
   },
 });
 
+/**
+ * Which DOI a claimed row keeps when the member corrects one upstream.
+ *
+ * `by_lab_and_doi` is a dedupe key, which is a promise that one DOI is one
+ * paper per lab — and a correction is the one edit that can break it from
+ * outside: the member fixes a typo in Zotero, the corrected DOI is the one
+ * another row on the shelf has held since a `.bib` import, and writing it here
+ * would leave two rows under it. From then on the lookups that dedupe against
+ * that DOI find whichever row Convex hands back first, which is a fact about
+ * an index rather than about the lab.
+ *
+ * The existing row wins, because it was here first and the sync is the guest.
+ * The Zotero item keeps its own row and its own key; what it does not get is
+ * somebody else's identifier.
+ */
+async function keptDoi(
+  ctx: MutationCtx,
+  labId: Id<"labs">,
+  paper: Doc<"papers">,
+  doi: string | undefined,
+): Promise<string | undefined> {
+  if (doi === undefined || doi === paper.doi) return paper.doi;
+  const owner = await ctx.db
+    .query("papers")
+    .withIndex("by_lab_and_doi", (q) => q.eq("labId", labId).eq("doi", doi))
+    .first();
+  return owner === null || owner._id === paper._id ? doi : paper.doi;
+}
+
 /** Record that a run looked and found nothing, or was refused. */
 export const markSwept = internalMutation({
   args: {
     linkId: v.id("zoteroLinks"),
     connectedAt: v.number(),
     statusCode: v.union(v.number(), v.null()),
+    /**
+     * Also abandon the walk in progress, because the library moved under it.
+     *
+     * Offset pagination is only stable while the set underneath holds still,
+     * and Zotero's protocol says so: a `Last-Modified-Version` above the one a
+     * walk pinned means an item was added, edited or deleted while the walk
+     * was part-way through, and every offset after the change points at
+     * something else. Dropping the cursor restarts the walk on the next run,
+     * which re-reads pages Margin has already seen — cheap, because they
+     * dedupe — rather than silently stepping over the items the shift moved.
+     */
+    dropCursor: v.optional(v.boolean()),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
@@ -1173,6 +1381,7 @@ export const markSwept = internalMutation({
     const at = Date.now();
     await ctx.db.patch(link._id, {
       lastSyncAt: at,
+      syncCursor: args.dropCursor === true ? undefined : link.syncCursor,
       lastSync: {
         at,
         connectedAt: args.connectedAt,
@@ -1252,6 +1461,13 @@ async function downloadAttachment(
  * Two requests at worst and often none: `pickPdfAttachment` reads `linkMode`,
  * `contentType` and `md5` off the children listing, so a snapshot, a linked
  * file and a WebDAV-stored PDF are all refused before a download is spent.
+ *
+ * A `Backoff` on these responses is deliberately not read, where the item page
+ * honours one. These requests are serial, bounded at twenty-five of each per
+ * run, and followed by a mutation that has to happen — pausing between two of
+ * them holds an action open in the middle of a page whose files are already
+ * half-fetched. The page's own backoff is honoured after the commit instead,
+ * which is where a pause costs nothing and the cursor is already durable.
  */
 async function fetchPdfFor(
   ctx: { storage: { store: (blob: Blob) => Promise<Id<"_storage">> } },
@@ -1300,10 +1516,7 @@ export const syncLink = internalAction({
     });
     if (payload === null) return nothing;
 
-    const library: ZoteroLibrary = {
-      type: payload.libraryType,
-      id: payload.libraryId,
-    };
+    const library = libraryOf(payload);
     const cursor = payload.syncCursor;
     const start = cursor?.start ?? 0;
 
@@ -1347,6 +1560,30 @@ export const syncLink = internalAction({
     }
 
     const headers = readSyncHeaders(response.headers);
+
+    if (
+      cursor !== undefined &&
+      headers.lastModifiedVersion !== null &&
+      headers.lastModifiedVersion > cursor.targetVersion
+    ) {
+      // The library moved while this walk was part-way through it, which is
+      // the one thing offset pagination cannot survive: an item added or
+      // deleted before the current offset shifts every page after it, so the
+      // next `start` points somewhere the walk has already been or somewhere
+      // it has skipped. Zotero's own sync protocol says to start again, and
+      // that is all this does — drop the cursor, leave `lastVersion` where it
+      // was, and let the next run walk from the top against the new version.
+      // Restarting costs re-reading pages that dedupe to nothing; continuing
+      // costs the items the shift stepped over, permanently.
+      await ctx.runMutation(internal.zotero.markSwept, {
+        linkId: args.linkId,
+        connectedAt: payload.connectedAt,
+        statusCode: null,
+        dropCursor: true,
+      });
+      return nothing;
+    }
+
     const body = await bodyOf(response);
     if (!Array.isArray(body)) {
       // A `200` Margin could not read is a refusal, not an empty page, and the
@@ -1367,7 +1604,13 @@ export const syncLink = internalAction({
       });
       return nothing;
     }
-    const items = body;
+    // What Zotero was asked for, whatever it sent. `limit=25` is a request,
+    // and a page that ignores it — a proxy, a future API, something hostile —
+    // would otherwise buy 100 `/children` requests and 100 downloads inside
+    // one action, which is the exact shape `SYNC_PAGE_ITEMS` exists to refuse.
+    // The offset arithmetic stays honest because it counts what was kept, and
+    // so does `exhausted`: a page sliced down to 25 is not a short page.
+    const items = body.slice(0, SYNC_PAGE_ITEMS);
     const targetVersion =
       cursor?.targetVersion ?? headers.lastModifiedVersion ?? payload.lastVersion ?? 0;
     const total = cursor?.total ?? headers.totalResults ?? items.length;
@@ -1396,6 +1639,12 @@ export const syncLink = internalAction({
     const outcome = await ctx.runMutation(internal.zotero.commitPage, {
       linkId: args.linkId,
       connectedAt: payload.connectedAt,
+      // Everything this page was read against travels with it, and the
+      // mutation refuses the page if any of it has moved since.
+      libraryType: payload.libraryType,
+      libraryId: payload.libraryId,
+      collectionKey: payload.collectionKey,
+      fetchedStart: start,
       entries,
       walked: items.length,
       targetVersion,
