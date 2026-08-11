@@ -123,6 +123,8 @@ const briefSection = v.object({
   key: briefSectionKey,
   heading: v.string(),
   droppedCount: v.number(),
+  /** See the schema — the cross-paper scan behind this section was cut short. */
+  crossPaperCapped: v.optional(v.boolean()),
   items: v.array(briefItem),
 });
 
@@ -313,10 +315,21 @@ async function writeBrief(
     Id<"users">,
     Id<"sessions">
   >[] = [];
+  let neighboursRead = 0;
   for (const other of neighbours) {
     if (other._id === session.paperId) {
       continue;
     }
+    // The query above takes one paper more than the budget so it can afford to
+    // spend one on this meeting's own. When this paper is *older* than all
+    // thirteen it comes back in none of them, the skip above never fires, and
+    // the spare would be read as a thirteenth neighbour — 1,950 rows against a
+    // budget that says 1,800. The bound is a promise about reads, so it is
+    // counted here rather than inferred from the `take`.
+    if (neighboursRead >= CROSS_PAPER_PAPERS) {
+      break;
+    }
+    neighboursRead += 1;
     const rows = await ctx.db
       .query("annotations")
       .withIndex("by_paper_and_visibility", (q) =>

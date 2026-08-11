@@ -440,6 +440,7 @@ function Entry({
   count,
   ink,
   dropped = 0,
+  scanCapped = false,
   children,
 }: {
   position: number;
@@ -447,6 +448,8 @@ function Entry({
   count: number;
   ink: string;
   dropped?: number;
+  /** The search behind this section stopped at its budget. See `BriefSection`. */
+  scanCapped?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -471,6 +474,16 @@ function Entry({
           <p className="font-sans text-xs text-ink-faint tabular-nums">
             +{dropped} more {dropped === 1 ? "line" : "lines"} the brief held
             back.
+          </p>
+        )}
+        {scanCapped && (
+          // The line above is a count; this one deliberately is not. The whole
+          // point of a capped scan is that the number of lines it never
+          // reached is the one number nobody has, and a section that printed
+          // "+0 more" here would be making the claim the cap exists to refuse.
+          <p className="font-sans text-xs text-ink-faint">
+            The search across other papers stopped at its limit, so there may be
+            more it never got to.
           </p>
         )}
       </div>
@@ -505,6 +518,7 @@ function BriefSection({
       count={section.items.length}
       ink={ink}
       dropped={section.droppedCount}
+      scanCapped={section.crossPaperCapped === true}
     >
       <ul className="flex flex-col gap-5">
         {section.items.map((item, index) => (

@@ -290,6 +290,67 @@ describe("the paper boundary", () => {
     expect(items[0]?.crossPaperIds).toBeUndefined();
     expect(items.at(-1)?.crossPaperIds).toHaveLength(1);
   });
+
+  it("says so when the scan stopped at its budget rather than at its candidates", () => {
+    // The defect this guards: a capped scan and a complete one produce the
+    // same *kind* of section, so a section that carries only `droppedCount`
+    // claims nothing was omitted while the search that fed it was cut short.
+    // A budget of zero comparisons is the sharpest version — no lines at all,
+    // and the section must still not read as "there were none".
+    const near = ann({ memberId: "ana", type: "hypothesis", paperId: "p1", quote: CLAIM });
+    const far = ann({ memberId: "ben", type: "critique", paperId: "p2", quote: CLAIM });
+    const assembled = assembleBrief({
+      pool: [near, far],
+      paperId: "p1",
+      paperTitle: "This paper",
+      priorSessions: new Map(),
+      crossPaper: {
+        scan: detectCrossPaperCollisions([near, far], 0),
+        paperTitles: new Map([["p1", "This paper"], ["p2", "The other one"]]),
+      },
+    });
+    const collisions = sectionOf(assembled, "collisions");
+    expect(collisions.items).toEqual([]);
+    expect(collisions.crossPaperCapped).toBe(true);
+  });
+
+  it("leaves the mark off a scan that ran to the end of its candidates", () => {
+    const near = ann({ memberId: "ana", type: "hypothesis", paperId: "p1", quote: CLAIM });
+    const far = ann({ memberId: "ben", type: "critique", paperId: "p2", quote: CLAIM });
+    const assembled = assembleBrief({
+      pool: [near, far],
+      paperId: "p1",
+      paperTitle: "This paper",
+      priorSessions: new Map(),
+      crossPaper: {
+        scan: detectCrossPaperCollisions([near, far]),
+        paperTitles: new Map([["p1", "This paper"], ["p2", "The other one"]]),
+      },
+    });
+    expect(sectionOf(assembled, "collisions").crossPaperCapped).toBeUndefined();
+  });
+
+  it("leaves the mark off every section a cross-paper scan cannot explain", () => {
+    // Only the collisions section is fed by the scan. A capped mark on the
+    // floor would be a claim about a search that never ran over it.
+    const near = ann({ memberId: "ana", type: "hypothesis", paperId: "p1", quote: CLAIM });
+    const far = ann({ memberId: "ben", type: "critique", paperId: "p2", quote: CLAIM });
+    const assembled = assembleBrief({
+      pool: [near, far],
+      paperId: "p1",
+      paperTitle: "This paper",
+      priorSessions: new Map(),
+      crossPaper: {
+        scan: detectCrossPaperCollisions([near, far], 0),
+        paperTitles: new Map([["p1", "This paper"], ["p2", "The other one"]]),
+      },
+    });
+    expect(
+      assembled.sections
+        .filter((one) => one.key !== "collisions")
+        .map((one) => one.crossPaperCapped),
+    ).toEqual([undefined, undefined, undefined]);
+  });
 });
 
 describe("open questions", () => {

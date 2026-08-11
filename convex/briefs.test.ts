@@ -259,3 +259,38 @@ describe("the brief past the paper boundary", () => {
     expect(line?.crossPaperIds).toHaveLength(1);
   });
 });
+
+describe("what the boundary lift costs", () => {
+  it("reads twelve neighbours at most, however many papers the lab has", async () => {
+    // `CROSS_PAPER_PAPERS` is a promise about how many documents one press of
+    // the button reads, and the papers query takes thirteen so it can afford
+    // to skip this meeting's own paper. When this paper is older than all
+    // thirteen the skip never fires — so the loop has to stop itself, or the
+    // budget is 1,950 rows rather than the 1,800 it says.
+    const ctx = new FakeCtx();
+    const seed = await seedLab(ctx);
+    for (let i = 0; i < 14; i++) {
+      const other = await ctx.db.insert("papers", {
+        labId: seed.labId,
+        title: `Neighbour ${i}`,
+        addedBy: seed.pi,
+        ingestStatus: "ready",
+      });
+      await seedAnnotation(
+        ctx,
+        { ...seed, memberId: seed.member },
+        { paperId: other, type: "critique" },
+      );
+    }
+
+    ctx.auth = { userId: seed.pi };
+    await handlerOf(generate)(ctx, { sessionId: seed.sessionId } as never);
+
+    // One read for this paper's own pool, twelve for the neighbours.
+    expect(
+      ctx.db.reads.filter(
+        (read) => read.index === "by_paper_and_visibility",
+      ),
+    ).toHaveLength(1 + 12);
+  });
+});

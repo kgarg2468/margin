@@ -145,6 +145,24 @@ export type BriefSection<
   items: BriefItem<AnnotationId, SessionId>[];
   /** Candidates the cap kept out, so the panel can say so instead of pretending. */
   droppedCount: number;
+  /**
+   * True when the cross-paper scan behind this section stopped at its
+   * comparison budget instead of at the end of its candidates.
+   *
+   * The collisions section only, and it is `droppedCount`'s other half rather
+   * than a detail: that number counts lines this function *saw* and had no
+   * room for, and it is silent about lines the search never reached. A capped
+   * scan and a complete one otherwise produce the same shaped section, so
+   * without this a section fed by a truncated search reads as a finished one —
+   * which is the failure `CrossPaperScan.capped` exists to prevent
+   * (`lib/digest/engine.ts`), carried the last step to a reader.
+   *
+   * Set only when true. Absent and `false` mean the same thing, the stored
+   * field has to be optional anyway (rows written before this have no opinion
+   * on it), and one representation of one fact is what keeps the panel's test
+   * a single comparison.
+   */
+  crossPaperCapped?: boolean;
 };
 
 /**
@@ -406,7 +424,17 @@ export function assembleBrief<
     });
 
   const sections: BriefSection<A, S>[] = [
-    section<A, S>("collisions", [...collisionItems, ...crossItems], cap),
+    {
+      ...section<A, S>("collisions", [...collisionItems, ...crossItems], cap),
+      // Carried on the section rather than on the brief, which is where the
+      // digest keeps the same flag (`AssembledDigest.crossPaperCapped`): a
+      // digest is one flat list, and a brief has four sections of which
+      // exactly one was fed by the scan. A brief-level flag would be a claim
+      // the floor and the open questions have no part in.
+      ...(input.crossPaper?.scan.capped === true
+        ? { crossPaperCapped: true }
+        : {}),
+    },
     section<A, S>(
       "open-questions",
       fresh.map((a) => ({ text: noteLine(a), annotationIds: [a.id] })),

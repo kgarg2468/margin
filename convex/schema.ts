@@ -1824,6 +1824,18 @@ export default defineSchema({
         heading: v.string(),
         /** Candidates the per-section cap held back, so the panel can say so. */
         droppedCount: v.number(),
+        /**
+         * True when the cross-paper scan behind this section ran out of
+         * comparison budget before it ran out of candidates.
+         *
+         * The collisions section only, and optional in both senses: rows
+         * written before the boundary lift have no opinion on it, and a scan
+         * that finished simply omits it. `droppedCount` counts lines that were
+         * found and did not fit; this is the count that cannot be taken —
+         * without it a section fed by a truncated search is indistinguishable
+         * from a finished one. See `lib/brief/assemble.ts`.
+         */
+        crossPaperCapped: v.optional(v.boolean()),
         items: v.array(
           v.object({
             text: v.string(),
