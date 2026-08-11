@@ -11,7 +11,10 @@ import {
 } from "./_generated/server";
 import { gateItems } from "../lib/citations/gate";
 import { indexByLabel, issueLabels } from "../lib/citations/labels";
-import { redactWhenAnyWithdrawn } from "../lib/citations/redaction";
+import {
+  allCitationsShared,
+  redactWhenAnyWithdrawn,
+} from "../lib/citations/redaction";
 import { isStillShared } from "../lib/citations/visibility";
 import { getMembership, requireUserId } from "./lib/authz";
 import { recordEvent } from "./lib/ledger";
@@ -60,7 +63,12 @@ import {
  * 2. The visibility rule is enforced *inside the index* — the search read
  *    fixes `visibility: "lab"` as a filter field, so there is no result set
  *    this query could receive that contains somebody's private note. That is
- *    what `annotations.search_body` carries `visibility` for.
+ *    what `annotations.search_body` carries `visibility` for. The gather's
+ *    other source has no index to hide behind and so states the rule out
+ *    loud: a brief's collision line is *stored prose* built out of two
+ *    members' words, and `gatherBriefCollisions` re-resolves every citation
+ *    before the line travels, exactly as `briefs.getForSession` does on every
+ *    read. A snapshot is not a permission.
  * 3. Subject state is re-validated on entry. `runAfter` is a separate
  *    transaction and the question may have been settled — or, for an
  *    annotation subject, taken private — in between; the brief chain re-runs
@@ -77,6 +85,14 @@ import {
  * exactly like one that is still there, and the test that proves the point
  * (`convex/delegations.privacy.test.ts`) hands the prompt builder a hostile
  * result set to make sure it still says no.
+ *
+ * The brief's collision lines get one of the two, and the asymmetry is a fact
+ * about them rather than an omission. Both gates test *rows*, and a line is
+ * prose: `gatherBriefCollisions` resolves its citations and drops the line if
+ * any of them has moved, but nothing downstream can re-derive whether a
+ * sentence quotes a note it did not name. So the rule holds where the rows
+ * are, once, and the notes behind a surviving line are then read fresh and
+ * pass through both gates like any other candidate.
  *
  * ## Nothing here writes human speech
  *
@@ -166,6 +182,28 @@ export const MAX_BATCH_QUESTIONS = MAX_ACTIVE_PER_LAB;
  * constant.
  */
 export const MAX_BATCH_CANDIDATES = MAX_CANDIDATES * 2;
+
+/**
+ * How many of the brief's collision lines one run may carry.
+ *
+ * `lib/brief/assemble.ts`'s own per-section cap (`MAX_SECTION_ITEMS`), because
+ * the lines are that section: a run that carried more than the brief itself
+ * shows would be reading past the artifact it came from. Not imported — this
+ * is a bound on what a *stored* row may spend a prompt on, and a row is
+ * untrusted whatever wrote it.
+ */
+export const MAX_COLLISION_LINES = 6;
+
+/**
+ * And how much of one line, in characters.
+ *
+ * A collision line is composed prose — two members' names and two members'
+ * words — so it is bounded by two annotation bodies rather than by anything
+ * the assembler promises. Four hundred is a couple of sentences, which is what
+ * the line is for; past that the prompt is spending its budget re-quoting
+ * notes it is already showing under labels of their own.
+ */
+export const MAX_COLLISION_LINE_CHARS = 400;
 
 /** The search index's own limit, which the question text is reduced to fit. */
 export const MAX_SEARCH_LENGTH = 200;
@@ -667,6 +705,41 @@ export type Candidate = {
   body: string;
 };
 
+/**
+ * One row, reduced to what a run may hold of it.
+ *
+ * Extracted because there are two sources now — the search read and the
+ * brief's collision lines — and a note that arrived through one of them has to
+ * be indistinguishable from the same note arriving through the other. Two
+ * mappings would be two chances to drop the three fields the gate above
+ * depends on, and the second one would be dropped in a file nobody was
+ * thinking about privacy in.
+ */
+function toCandidate(row: Doc<"annotations">): Candidate {
+  return {
+    _id: row._id,
+    labId: row.labId,
+    paperId: row.paperId,
+    visibility: row.visibility,
+    deletedAt: row.deletedAt,
+    type: row.type,
+    status: row.status,
+    body: row.body,
+  };
+}
+
+/**
+ * One line off the brief, and the notes it was built out of.
+ *
+ * The ids ride along for the same reason they do on a finding item: the line
+ * is a paraphrase of *these* notes, and a line the model cannot cite is a line
+ * it can only paraphrase again.
+ */
+export type CollisionLine = {
+  text: string;
+  annotationIds: Id<"annotations">[];
+};
+
 export type Gathered = {
   candidates: Candidate[];
   coverage: {
@@ -723,16 +796,7 @@ export async function gatherLabVisible(
   // one failure this whole feature is not allowed to have.
   const candidates: Candidate[] = rows
     .filter((row) => isStillShared(row, labId) && row._id !== exclude)
-    .map((row) => ({
-      _id: row._id,
-      labId: row.labId,
-      paperId: row.paperId,
-      visibility: row.visibility,
-      deletedAt: row.deletedAt,
-      type: row.type,
-      status: row.status,
-      body: row.body,
-    }));
+    .map(toCandidate);
 
   return {
     candidates,
@@ -742,6 +806,96 @@ export async function gatherLabVisible(
       queriesRun: 1,
     },
   };
+}
+
+/**
+ * The brief's own collision lines, re-checked against the margin as it stands.
+ *
+ * §6.3 says the gather reads the brief row rather than recomputing
+ * `detectCollisions`, and the row is a snapshot: its lines are *composed
+ * prose*, built out of two members' names and two members' words, frozen at
+ * assembly time. `briefs.getForSession` re-resolves every citation on read and
+ * redacts a line whose notes have moved — so a gather that read the row
+ * directly would be the one reader in this codebase that skips the check, and
+ * a note taken private since the brief was built would walk into a prompt.
+ *
+ * Same rule, same helper (`allCitationsShared`), one difference: a prompt has
+ * no reader to be honest with, so a line that fails is dropped rather than
+ * replaced with a sentence saying it was here. The notes behind the surviving
+ * lines are read fresh and added as candidates, because a line the model
+ * cannot cite is a line it can only paraphrase.
+ */
+async function gatherBriefCollisions(
+  ctx: QueryCtx,
+  delegation: Doc<"delegations">,
+  exclude?: Id<"annotations">,
+): Promise<{ lines: CollisionLine[]; candidates: Candidate[]; read: boolean }> {
+  if (delegation.briefId === undefined) {
+    return { lines: [], candidates: [], read: false };
+  }
+  const brief = await ctx.db.get(delegation.briefId);
+  // A stored id is a claim about a row, and this one crosses a table.
+  if (brief === null || brief.labId !== delegation.labId) {
+    return { lines: [], candidates: [], read: false };
+  }
+
+  const items =
+    brief.sections.find((section) => section.key === "collisions")?.items ?? [];
+  const live = await stillSharedAmong(
+    ctx,
+    delegation.labId,
+    items.flatMap((item) => item.annotationIds),
+  );
+  const kept = items
+    .filter(
+      (item) =>
+        allCitationsShared(item.annotationIds, live) &&
+        !item.annotationIds.some((id) => id === exclude),
+    )
+    .slice(0, MAX_COLLISION_LINES);
+
+  const candidates: Candidate[] = [];
+  for (const id of new Set(kept.flatMap((item) => item.annotationIds))) {
+    const row = await ctx.db.get(id);
+    // Belt to the check above's braces, and the same predicate the search
+    // read filters with: one rule, applied wherever a row enters a run.
+    if (row === null || !isStillShared(row, delegation.labId) || id === exclude) {
+      continue;
+    }
+    candidates.push(toCandidate(row));
+  }
+
+  return {
+    lines: kept.map((item) => ({
+      text: item.text.slice(0, MAX_COLLISION_LINE_CHARS),
+      annotationIds: [...item.annotationIds],
+    })),
+    candidates,
+    read: true,
+  };
+}
+
+/**
+ * Two sources, one list, still bounded by what one run may read.
+ *
+ * Deduped by `_id` because the same note is often both a search hit and half a
+ * collision, and a note laid out twice would be one piece of material under
+ * two labels — the ambiguity the batch's single label space exists to prevent.
+ * The search's ranking leads, and `MAX_CANDIDATES` is unmoved: a second source
+ * is a better answer out of the same budget, not a reason to raise it.
+ */
+function mergeCandidates(...sources: readonly Candidate[][]): Candidate[] {
+  const merged: Candidate[] = [];
+  const seen = new Set<Id<"annotations">>();
+  for (const source of sources) {
+    for (const candidate of source) {
+      if (merged.length >= MAX_CANDIDATES) return merged;
+      if (seen.has(candidate._id)) continue;
+      seen.add(candidate._id);
+      merged.push(candidate);
+    }
+  }
+  return merged;
 }
 
 /* -------------------------------------------------------------------------
@@ -800,6 +954,12 @@ export type BatchQuestion = {
   ref: string;
   question: string;
   candidates: readonly Candidate[];
+  /**
+   * The lines the brief already drew between two members' notes, re-checked.
+   * Optional because only the brief path has a brief: a member asking on one
+   * question has no artifact behind them, and neither does the eval harness.
+   */
+  collisionLines?: readonly CollisionLine[];
 };
 
 export type BatchPrompt = {
@@ -892,11 +1052,28 @@ export function buildBatchPrompt(
   );
 
   const payload = {
-    questions: questions.map((one) => ({
-      ref: one.ref,
-      question: one.question,
-      labels: [...(allowed.get(one.ref) ?? [])],
-    })),
+    questions: questions.map((one) => {
+      const citable = allowed.get(one.ref) ?? new Set<string>();
+      return {
+        ref: one.ref,
+        question: one.question,
+        labels: [...citable],
+        // A line travels with the labels of the notes it was drawn from —
+        // through the same set the question may cite, not through the batch's
+        // whole vocabulary. A note that fell off `MAX_CANDIDATES` can still
+        // carry a label a *neighbour* put in the layout, and offering it here
+        // would promise this question a citation the gate drops as invented:
+        // the item lost and the reason invisible. Unlabelled, the line is
+        // prose the model may read and not cite, which is what it is.
+        collisions: (one.collisionLines ?? []).map((line) => ({
+          text: line.text,
+          labels: line.annotationIds.flatMap((id) => {
+            const label = labelOf.get(id);
+            return label === undefined || !citable.has(label) ? [] : [label];
+          }),
+        })),
+      };
+    }),
     annotations: labelled.map((one) => ({
       label: one.label,
       type: one.type,
@@ -912,6 +1089,7 @@ export function buildBatchPrompt(
     "- Answer every question in the material, under the same `ref` it was given.",
     "- Every item you report must cite at least one label, written as [A1], and only labels listed for that question.",
     "- Report only what the cited annotations support. Do not infer, conclude, or recommend.",
+    "- A question's `collisions` are lines its brief already drew between two members' notes. They are material, cited by the labels listed on each line.",
     "- Do not address the reader, do not suggest next steps, and do not say what the lab should do.",
     "- Never state where the lab stands on a claim; that is recorded elsewhere and rendered from the record.",
     `- At most ${MAX_FINDING_ITEMS} items per question, each at most ${MAX_FINDING_ITEM_CHARS} characters.`,
@@ -1330,6 +1508,12 @@ export const candidateShape = v.object({
  * is re-checked so an abandoned run cannot keep reading, and the subject is
  * re-validated because the question may have been settled — or taken private
  * — since the claim.
+ *
+ * Two of §6.3's three sources, and they answer different questions. The search
+ * finds what the lab has written *about this question*; the brief's collision
+ * lines carry a signal an index cannot produce — that two members wrote on the
+ * same passage — and they come with their own re-check, because they are prose
+ * a snapshot froze rather than rows read now.
  */
 export const gather = internalQuery({
   args: { delegationId: v.id("delegations"), lease: v.string() },
@@ -1337,6 +1521,12 @@ export const gather = internalQuery({
     v.object({
       question: v.string(),
       candidates: v.array(candidateShape),
+      collisions: v.array(
+        v.object({
+          text: v.string(),
+          annotationIds: v.array(v.id("annotations")),
+        }),
+      ),
       coverage: v.object({
         annotationsSearched: v.number(),
         papersTouched: v.number(),
@@ -1363,14 +1553,35 @@ export const gather = internalQuery({
     // A note never cites itself. The subject *is* one of the lab's
     // annotations, and it would otherwise come back as its own best match —
     // a finding whose only source is the question is a finding that says
-    // nothing.
-    const gathered = await gatherLabVisible(
+    // nothing. Both sources take the same exclusion, for the same reason.
+    const searched = await gatherLabVisible(
       ctx,
       delegation.labId,
       subject.question,
       delegation.annotationId,
     );
-    return { question: subject.question, ...gathered };
+    const fromBrief = await gatherBriefCollisions(
+      ctx,
+      delegation,
+      delegation.annotationId,
+    );
+    const candidates = mergeCandidates(
+      searched.candidates,
+      fromBrief.candidates,
+    );
+    return {
+      question: subject.question,
+      candidates,
+      collisions: fromBrief.lines,
+      coverage: {
+        // Recomputed over the merged list rather than added up: the two
+        // sources overlap, and a count that summed them would be counting the
+        // same note twice in the one number the honest null rests on.
+        annotationsSearched: candidates.length,
+        papersTouched: new Set(candidates.map((one) => one.paperId)).size,
+        queriesRun: searched.coverage.queriesRun + (fromBrief.read ? 1 : 0),
+      },
+    };
   },
 });
 
@@ -1741,6 +1952,7 @@ type Claimed = {
   ref: string;
   question: string;
   candidates: Candidate[];
+  collisionLines: CollisionLine[];
   coverage: Gathered["coverage"];
 };
 
@@ -1837,7 +2049,10 @@ export const runForBrief = internalAction({
           // into the prompt, since a ref the model was never shown is a ref
           // nothing can come back under.
           ref: `Q${claimed.length + 1}`,
-          ...gathered,
+          question: gathered.question,
+          candidates: gathered.candidates,
+          collisionLines: gathered.collisions,
+          coverage: gathered.coverage,
         });
         holding = null;
       }

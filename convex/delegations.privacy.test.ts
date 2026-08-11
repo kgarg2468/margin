@@ -240,6 +240,119 @@ describe("the retrieval gate", () => {
 });
 
 /* -------------------------------------------------------------------------
+ * 1b. The brief the run came from
+ * ---------------------------------------------------------------------- */
+
+describe("the brief's collision lines", () => {
+  /** A brief whose collision line was built from two notes, one of which has since gone private. */
+  async function briefed(over: { secondVisibility: "private" | "lab" }) {
+    const built = await world();
+    const { ctx, seed, shared } = built;
+    const partner = await seedAnnotation(
+      ctx,
+      { ...seed, memberId: seed.member },
+      { body: `${SECRET} in a collision`, visibility: over.secondVisibility },
+    );
+    const briefId = await ctx.db.insert("briefs", {
+      sessionId: seed.sessionId,
+      labId: seed.labId,
+      paperId: seed.paperId,
+      generation: 1,
+      generatedAt: 1,
+      generatedBy: seed.pi,
+      trigger: "scheduled",
+      sections: [
+        {
+          key: "collisions",
+          heading: "Where the lab disagrees",
+          droppedCount: 0,
+          items: [
+            {
+              // Composed prose: it carries both members' names and both
+              // bodies. This is the string the row holds and the string
+              // `briefs.getForSession` redacts on read.
+              text: `Ana Ruiz on the incubation step, against Ben Okafor: ${SECRET} in a collision`,
+              annotationIds: [shared, partner],
+              pairType: "possible answer",
+            },
+          ],
+        },
+      ],
+    });
+    return { ...built, partner, briefId };
+  }
+
+  /** A queued run pointed at the seeded question, carrying the brief it came from. */
+  async function queueFrom(
+    ctx: FakeCtx,
+    seed: Awaited<ReturnType<typeof seedLab>>,
+    briefId: Id<"briefs">,
+  ) {
+    return ctx.db.insert("delegations", {
+      labId: seed.labId,
+      agentKind: "scout.corpus",
+      trigger: "brief",
+      briefId,
+      annotationId: seed.questionId,
+      requestedBy: seed.pi,
+      requestedAt: Date.now(),
+      status: "queued",
+    });
+  }
+
+  it("drops a whole line when one of its notes has stopped being shared", async () => {
+    const { ctx, seed, briefId } = await briefed({ secondVisibility: "private" });
+    wire(ctx);
+    const delegationId = await queueFrom(ctx, seed, briefId);
+    const calls = registerFakeScoutModel(ctx);
+
+    await handlerOf(runForBrief)(ctx, { delegationIds: [delegationId] } as never);
+
+    // The line is the leak: the row still holds prose built out of a note its
+    // author has taken back, and reading the row without re-checking the
+    // citations is exactly the way around `visibility: "private"` that
+    // `briefs.getForSession` closes on every read.
+    expect(JSON.stringify(calls)).not.toContain(SECRET);
+    expect(
+      JSON.stringify([ctx.db.all("findings"), ctx.db.all("events")]),
+    ).not.toContain(SECRET);
+  });
+
+  it("carries a line whose notes are all still shared, and makes them citable", async () => {
+    const { ctx, seed, briefId, partner } = await briefed({ secondVisibility: "lab" });
+    wire(ctx);
+    const delegationId = await queueFrom(ctx, seed, briefId);
+    const calls = registerFakeScoutModel(ctx);
+
+    await handlerOf(runForBrief)(ctx, { delegationIds: [delegationId] } as never);
+
+    // The collision is a signal the search index cannot produce: two members
+    // wrote on the same passage. Its notes are labelled material like any
+    // other, so a finding can rest on them.
+    expect(rowAt(calls).prompt).toContain("against Ben Okafor");
+    const cited = ctx.db
+      .all("findings")
+      .flatMap((finding) => finding.items.flatMap((item) => item.citedAnnotationIds));
+    expect(cited).toContain(partner);
+  });
+
+  it("does not read a brief belonging to another lab", async () => {
+    // A stored `briefId` is a claim about a row, like every other stored id,
+    // and this one crosses a table. A run whose `briefId` points somewhere
+    // else reads nothing rather than reading it.
+    const { ctx, seed, briefId } = await briefed({ secondVisibility: "lab" });
+    wire(ctx);
+    await ctx.db.patch(briefId, { labId: "labs_999" as Id<"labs"> });
+    const delegationId = await queueFrom(ctx, seed, briefId);
+    const calls = registerFakeScoutModel(ctx);
+
+    await handlerOf(runForBrief)(ctx, { delegationIds: [delegationId] } as never);
+
+    expect(rowAt(calls).prompt).not.toContain("against Ben Okafor");
+  });
+});
+
+/* -------------------------------------------------------------------------
  * 2. The prompt refuses, it does not filter
  * ---------------------------------------------------------------------- */
 

@@ -601,12 +601,22 @@ describe("a run, start to finish", () => {
 
 /** The material the prompt actually carries, read back the way a model would. */
 function materialOf(prompt: string): {
-  questions: { ref: string; question: string; labels: string[] }[];
+  questions: {
+    ref: string;
+    question: string;
+    labels: string[];
+    collisions: { text: string; labels: string[] }[];
+  }[];
   annotations: { label: string; body: string }[];
 } {
   const marker = "MATERIAL (JSON):\n";
   return JSON.parse(prompt.slice(prompt.indexOf(marker) + marker.length)) as {
-    questions: { ref: string; question: string; labels: string[] }[];
+    questions: {
+      ref: string;
+      question: string;
+      labels: string[];
+      collisions: { text: string; labels: string[] }[];
+    }[];
     annotations: { label: string; body: string }[];
   };
 }
@@ -897,6 +907,77 @@ describe("the batch's candidate cap", () => {
       expect(shown).toBeLessThan(MAX_CANDIDATES);
       expect(finding?.coverage.annotationsSearched).toBe(shown);
     }
+  });
+
+  it("offers a collision line no label its own question may not cite", () => {
+    // A line's notes are merged into its own question's gather, so normally
+    // both ends are citable. Not when one of them falls off `MAX_CANDIDATES`
+    // and a *neighbour* puts it in the layout anyway — the state this batch
+    // stands in for by pointing the line at the other question's note. The
+    // label exists, this question may not use it, and offering it would
+    // promise a citation the gate drops as invented: the item lost and the
+    // reason invisible.
+    const mine = question(0, 2);
+    const neighbour = question(1, 2);
+    const ours = rowAt(mine.candidates)._id;
+    const theirs = rowAt(neighbour.candidates)._id;
+    const gate = buildBatchPrompt(labId, [
+      {
+        ...mine,
+        collisionLines: [
+          { text: "Two members, one passage.", annotationIds: [ours, theirs] },
+        ],
+      },
+      neighbour,
+    ]);
+
+    const asked = rowAt(materialOf(gate.prompt).questions);
+    const line = rowAt(asked.collisions);
+    // The end this question gathered, named, and nothing else.
+    expect(line.labels).toHaveLength(1);
+    expect(gate.byLabel.get(rowAt(line.labels))?._id).toBe(ours);
+    expect(asked.labels).toContain(rowAt(line.labels));
+
+    // The neighbour's note is in the batch's vocabulary all the same. Being
+    // labelled is what makes it worth withholding here.
+    const theirLabel = [...gate.byLabel].find(
+      ([, candidate]) => candidate._id === theirs,
+    )?.[0];
+    expect(theirLabel).toBeDefined();
+    expect(line.labels).not.toContain(theirLabel);
+  });
+
+  it("counts the brief read in `queriesRun`, so coverage cannot overstate either", async () => {
+    // `coverage` is the honest null's whole credibility: a reader who is told
+    // nothing was found has to be able to see how hard the machine looked.
+    // Two sources means two queries, and a hardcoded 1 would make the number
+    // a decoration.
+    const { ctx, seed } = await seeded();
+    await corpus(ctx, seed);
+    const briefId = await ctx.db.insert("briefs", {
+      sessionId: seed.sessionId,
+      labId: seed.labId,
+      paperId: seed.paperId,
+      generation: 1,
+      generatedAt: 1,
+      generatedBy: seed.pi,
+      trigger: "scheduled",
+      sections: [],
+    });
+
+    await run(ctx, await queue(ctx, seed, { briefId }));
+    expect(rowAt(ctx.db.all("findings")).coverage.queriesRun).toBe(2);
+  });
+
+  it("counts one query for a run with no brief behind it", async () => {
+    // The on-demand path (v1.5) has no brief to read, and a run that claimed
+    // two queries on the strength of a source it never had would be lying in
+    // the one field the reader is asked to trust.
+    const { ctx, seed } = await seeded();
+    await corpus(ctx, seed);
+
+    await run(ctx, await queue(ctx, seed));
+    expect(rowAt(ctx.db.all("findings")).coverage.queriesRun).toBe(1);
   });
 
   it("leaves a union that fits alone, however many questions share it", () => {
