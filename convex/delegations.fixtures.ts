@@ -380,6 +380,12 @@ const MATERIAL_MARKER = "MATERIAL (JSON):\n";
  * paraphrases: a stub that invented prose could clear the citation gate while
  * saying something about notes it had not read, and a fixture that lies is
  * worse than none.
+ *
+ * It answers per question, out of `questions[].labels` rather than out of the
+ * shared `annotations` layout — the batch prompt gives every question the same
+ * vocabulary and a different subset of it to use, and a fixture that cited the
+ * whole layout would be a fixture that cannot fail the per-question gate. A
+ * stand-in that could only pass is not a stand-in.
  */
 export function fakeScoutModel(prompt: string): {
   ok: true;
@@ -393,15 +399,18 @@ export function fakeScoutModel(prompt: string): {
     );
   }
   const payload = JSON.parse(prompt.slice(at + MATERIAL_MARKER.length)) as {
-    annotations: { label: string }[];
+    questions: { ref: string; labels: string[] }[];
   };
   return {
     ok: true,
     model: STUB_MODEL,
     text: JSON.stringify({
-      items: payload.annotations.map((one) => ({
-        text: `The lab has written on this before [${one.label}].`,
-        citations: [one.label],
+      answers: payload.questions.map((one) => ({
+        ref: one.ref,
+        items: one.labels.map((label) => ({
+          text: `The lab has written on this before [${label}].`,
+          citations: [label],
+        })),
       })),
     }),
   };

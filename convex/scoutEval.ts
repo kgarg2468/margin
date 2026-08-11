@@ -5,6 +5,8 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { internalAction, internalQuery } from "./_generated/server";
 import {
   MAX_CANDIDATES,
+  SOLE_QUESTION_REF,
+  answersByRef,
   buildScoutPrompt,
   candidateShape,
   gatherLabVisible,
@@ -509,7 +511,8 @@ export const retrieve = internalQuery({
  * Prompt, model seam, citation gate — `buildScoutPrompt` (which is also the
  * second privacy gate, and throws rather than filters), the
  * `internal.delegations.callScoutModel` action, and `sanitizeFindingItems`, in
- * the order `runOne` calls them. What comes back is the finding's citations in
+ * the order `runForBrief` calls them — over a batch of one, which is what a
+ * question scored on its own is. What comes back is the finding's citations in
  * item order, which *is* the scout's ranking as a reader receives it.
  *
  * The seam is now a call the harness makes through `ctx`, which is why this
@@ -548,7 +551,15 @@ async function scoutRanking(
     );
   }
   const parsed = parseScoutJson(result.text);
-  const { items } = sanitizeFindingItems(parsed ?? {}, byLabel);
+  // A batch of one. The seam answers in the `answers` envelope whatever it was
+  // asked, so the harness unwraps it the way the product does rather than
+  // reading a shape only a one-question call would produce — a report scored
+  // against a different wire format than the run is a report about nothing.
+  const answers = parsed === null ? null : answersByRef(parsed);
+  const { items } = sanitizeFindingItems(
+    answers?.get(SOLE_QUESTION_REF) ?? {},
+    byLabel,
+  );
   return {
     ranked: topN(items.flatMap((item) => item.citedAnnotationIds)),
     model: result.model,

@@ -464,6 +464,120 @@ describe("a full run over a corpus containing private notes", () => {
 });
 
 /* -------------------------------------------------------------------------
+ * 3b. One prompt, and still one question's material per finding
+ * ---------------------------------------------------------------------- */
+
+describe("a batch of two questions", () => {
+  /** Queue a run whose subject is `annotationId`, in `labId`. */
+  async function queueIn(
+    ctx: FakeCtx,
+    seed: Awaited<ReturnType<typeof seedLab>>,
+    labId: Id<"labs">,
+    annotationId: Id<"annotations">,
+  ) {
+    return ctx.db.insert("delegations", {
+      labId,
+      agentKind: "scout.corpus",
+      trigger: "brief",
+      annotationId,
+      requestedBy: seed.pi,
+      requestedAt: Date.now(),
+      status: "queued",
+    });
+  }
+
+  it("lets no question cite the material only the other one gathered", async () => {
+    // Labels are batch-global so the prompt is unambiguous; the right to cite
+    // is per-question, because a finding's `coverage` describes *its* gather
+    // and an item resting on somebody else's retrieval would make that number
+    // one the code cannot stand behind.
+    const { ctx, seed } = await world();
+    wire(ctx);
+    const secondQuestion = await seedAnnotation(
+      ctx,
+      { ...seed, memberId: seed.member },
+      { type: "open-question", body: "Which cohort ran the second replicate?" },
+    );
+    // The gather excludes each run's own subject, so each question's material
+    // contains the *other* question's note and not its own.
+    const first = await queueIn(ctx, seed, seed.labId, seed.questionId);
+    const second = await queueIn(ctx, seed, seed.labId, secondQuestion);
+
+    ctx.register(internal.delegations.callScoutModel, {
+      _handler: (_c: unknown, args: { prompt: string }) => {
+        const payload = JSON.parse(
+          args.prompt.slice(
+            args.prompt.indexOf("MATERIAL (JSON):\n") + "MATERIAL (JSON):\n".length,
+          ),
+        ) as { questions: { ref: string; labels: string[] }[] };
+        const [q1, q2] = payload.questions;
+        if (q1 === undefined || q2 === undefined) throw new Error("expected two questions");
+        // Found rather than hardcoded: which label lands on which note is the
+        // batch's business, and a test that guessed would be asserting the
+        // ordering instead of the gate.
+        const onlyTheOthers = q2.labels.find((label) => !q1.labels.includes(label));
+        return {
+          ok: true,
+          model: "test",
+          text: JSON.stringify({
+            answers: [
+              { ref: q1.ref, items: [{ text: `Borrowed [${onlyTheOthers}].`, citations: [onlyTheOthers] }] },
+              { ref: q2.ref, items: [{ text: `Honest [${q2.labels[0]}].`, citations: [q2.labels[0]] }] },
+            ],
+          }),
+        };
+      },
+    });
+
+    await handlerOf(runForBrief)(ctx, {
+      delegationIds: [first, second],
+    } as never);
+
+    expect(ctx.db.all("findings")).toHaveLength(1);
+    expect((await ctx.db.get(first))?.failure).toBe("nothing-citable");
+    expect((await ctx.db.get(second))?.status).toBe("returned");
+  });
+
+  it("refuses a batch whose rows are not all one lab's", async () => {
+    // A batch is one brief's questions and a brief belongs to one lab. Two
+    // labs' writing in one prompt is the disclosure this whole file exists to
+    // prevent, so the batch stops rather than being quietly split in two.
+    const { ctx, seed } = await world();
+    wire(ctx);
+    const strangersQuestion = await seedAnnotation(
+      ctx,
+      { ...seed, memberId: seed.member },
+      {
+        type: "open-question",
+        body: "Whose incubation protocol is this?",
+        labId: "labs_999" as Id<"labs">,
+      },
+    );
+    const mine = await queueIn(ctx, seed, seed.labId, seed.questionId);
+    const theirs = await queueIn(
+      ctx,
+      seed,
+      "labs_999" as Id<"labs">,
+      strangersQuestion,
+    );
+    const calls = registerFakeScoutModel(ctx);
+
+    await handlerOf(runForBrief)(ctx, {
+      delegationIds: [mine, theirs],
+    } as never);
+
+    expect(calls).toEqual([]);
+    for (const id of [mine, theirs]) {
+      const row = await ctx.db.get(id);
+      expect(row?.status).toBe("failed");
+      expect(row?.failure).toBe("run-error");
+      // Failing does not mean stranding: the lease is cleared either way.
+      expect(row?.lease).toBeUndefined();
+    }
+  });
+});
+
+/* -------------------------------------------------------------------------
  * 4. Whole-item redaction
  * ---------------------------------------------------------------------- */
 
@@ -751,11 +865,11 @@ describe("the citation gate", () => {
   });
 
   it("gates a bare list of items as well as the envelope one arrives in", () => {
-    // One question's answer comes back as `{items: […]}`; a batched answer is
-    // sliced into the items belonging to each question before it gets here.
-    // Both are the same claim about the same material, and only the envelope
-    // differs — a gate that read one shape would make the batching decision
-    // for the caller.
+    // A batched answer arrives as each question's `items` array, taken out of
+    // the envelope before it gets here; a wrapper around the same array is the
+    // other shape a model might send. Both are the same claim about the same
+    // material, and only the packaging differs — a gate that read one shape
+    // would make the batching decision for the caller.
     const { byLabel } = material(2);
     const result = sanitizeFindingItems(
       [{ text: "Straight off the batch [A1].", citations: ["A1"] }],

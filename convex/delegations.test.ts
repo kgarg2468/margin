@@ -592,6 +592,122 @@ describe("a run, start to finish", () => {
 });
 
 /* -------------------------------------------------------------------------
+ * One call for the whole brief
+ * ---------------------------------------------------------------------- */
+
+/** The material the prompt actually carries, read back the way a model would. */
+function materialOf(prompt: string): {
+  questions: { ref: string; question: string; labels: string[] }[];
+  annotations: { label: string; body: string }[];
+} {
+  const marker = "MATERIAL (JSON):\n";
+  return JSON.parse(prompt.slice(prompt.indexOf(marker) + marker.length)) as {
+    questions: { ref: string; question: string; labels: string[] }[];
+    annotations: { label: string; body: string }[];
+  };
+}
+
+describe("a brief's questions, in one call", () => {
+  it("asks the model once for the whole batch and stores a finding each", async () => {
+    const { ctx, seed, calls } = await seeded();
+    await corpus(ctx, seed);
+    const second = await seedAnnotation(
+      ctx,
+      { ...seed, memberId: seed.member },
+      { type: "open-question", body: "Which cohort ran the second replicate?" },
+    );
+    const first = await queue(ctx, seed);
+    const other = await queue(ctx, seed, { annotationId: second });
+
+    await handlerOf(runForBrief)(ctx, {
+      delegationIds: [first, other],
+    } as never);
+
+    // The cost bound the design asks for: one brief, one call.
+    expect(calls).toHaveLength(1);
+    expect(ctx.db.all("findings")).toHaveLength(2);
+    for (const row of ctx.db.all("delegations")) {
+      expect(row.status).toBe("returned");
+    }
+  });
+
+  it("labels one note once, however many questions retrieved it", async () => {
+    const { ctx, seed, calls } = await seeded();
+    const noteId = await corpus(ctx, seed);
+    const second = await seedAnnotation(
+      ctx,
+      { ...seed, memberId: seed.member },
+      { type: "open-question", body: "Does the 4°C incubation step matter?" },
+    );
+    await handlerOf(runForBrief)(ctx, {
+      delegationIds: [
+        await queue(ctx, seed),
+        await queue(ctx, seed, { annotationId: second }),
+      ],
+    } as never);
+
+    // Two labels for one note would be two names for one thing in a prompt
+    // that has to be unambiguous — and two rows in the join table.
+    const payload = materialOf(rowAt(calls).prompt);
+    const body = (await ctx.db.get(noteId))?.body;
+    const labels = payload.annotations
+      .filter((one) => one.body === body)
+      .map((one) => one.label);
+    expect(labels).toHaveLength(1);
+    // The label space is batch-global, so the one name is a name both
+    // questions may use — that is what makes sharing the layout safe.
+    for (const question of payload.questions) {
+      expect(question.labels).toContain(rowAt(labels));
+    }
+    expect(new Set(payload.annotations.map((one) => one.label)).size).toBe(
+      payload.annotations.length,
+    );
+
+    const stored = ctx.db.all("findings");
+    expect(stored).toHaveLength(2);
+    for (const finding of stored) {
+      expect(finding.items.flatMap((item) => item.citedAnnotationIds)).toContain(
+        noteId,
+      );
+      expect(
+        ctx.db
+          .all("findingCitations")
+          .filter(
+            (row) =>
+              row.findingId === finding._id && row.annotationId === noteId,
+          ),
+      ).toHaveLength(1);
+    }
+  });
+
+  it("fails every claimed row when the one call fails, and only those", async () => {
+    const { ctx, seed } = await seeded({ modelFailure: "model-timeout" });
+    await corpus(ctx, seed);
+    const withCorpus = await queue(ctx, seed);
+    // A row whose subject has gone never reaches the call and is cancelled.
+    const orphan = await queue(ctx, seed, {
+      annotationId: "annotations_404" as Id<"annotations">,
+    });
+
+    await handlerOf(runForBrief)(ctx, {
+      delegationIds: [withCorpus, orphan],
+    } as never);
+
+    expect((await ctx.db.get(withCorpus))?.failure).toBe("model-timeout");
+    expect((await ctx.db.get(orphan))?.status).toBe("cancelled");
+  });
+
+  it("still spends nothing on a batch that gathered nothing", async () => {
+    const { ctx, seed, calls } = await seeded();
+    await run(ctx, await queue(ctx, seed));
+    // The refusal belongs before the money is spent: an empty corpus is an
+    // answer, and `storeEmpty` is where it is recorded.
+    expect(calls).toEqual([]);
+    expect(rowAt(ctx.db.all("delegations")).status).toBe("empty");
+  });
+});
+
+/* -------------------------------------------------------------------------
  * What a model can do to a run
  * ---------------------------------------------------------------------- */
 
