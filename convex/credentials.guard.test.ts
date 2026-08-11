@@ -440,9 +440,9 @@ describe("no credential ever reaches a client", () => {
 
   it("does put them in the internal queries that need them, so the check is real", () => {
     // The inverse assertion. If the walk could not see a credential field at
-    // all, the one above would pass for the wrong reason forever. The Slack
-    // payloads exist today, so this half keeps the walk provably sighted
-    // while the exhaustive list below waits for Task 3's module.
+    // all, the one above would pass for the wrong reason forever. Named rather
+    // than counted, so a payload that stopped carrying its credential — and
+    // therefore stopped proving anything — fails here with its own name.
     const internalWithCredential = registered
       .filter((fn) => !fn.isPublic && credentialShaped(fn.returns).length > 0)
       .map((fn) => fn.name)
@@ -453,10 +453,7 @@ describe("no credential ever reaches a client", () => {
     expect(internalWithCredential).toContain("slack.synthesisPayload");
   });
 
-  // Un-skipped by B5 Task 3, which creates `zotero.syncPayload`. Skipped and
-  // not deleted so that the exhaustive inverse list cannot be forgotten on
-  // the way.
-  it.skip("names zotero.syncPayload as the only Zotero carrier", () => {
+  it("names zotero.syncPayload as the only Zotero carrier", () => {
     const internalWithCredential = registered
       .filter((fn) => !fn.isPublic && credentialShaped(fn.returns).length > 0)
       .map((fn) => fn.name)
@@ -666,10 +663,10 @@ describe("the Zotero link, specifically", () => {
 });
 
 /* -------------------------------------------------------------------------
- * 3. One module posts to Slack
+ * 3. One module holds each transport
  * ---------------------------------------------------------------------- */
 
-describe("the modules that post to Slack", () => {
+describe("the modules that hold a credential", () => {
   const sources = moduleNames.map((name) => ({
     name,
     // Comments are stripped so the prose explaining a rule cannot break it.
@@ -720,6 +717,53 @@ describe("the modules that post to Slack", () => {
     expect(logged.length).toBeGreaterThan(0);
     for (const call of logged) {
       expect(call).not.toMatch(/webhookUrl/i);
+    }
+  });
+
+  it("names Zotero's host in exactly one place, and means it", () => {
+    // `lib/zotero/api.ts` decides what a Zotero address is. No module under
+    // `convex/` has any business building one, and a second one that did
+    // would be a second place for the "never in a query parameter" rule to
+    // not hold.
+    const naming = sources
+      .flatMap(({ name, code }) => (code.includes("api.zotero.org") ? [name] : []))
+      .sort();
+    expect(naming).toEqual([]);
+  });
+
+  it("routes every Zotero request through the one transport", () => {
+    // A `fetch` carrying a member's API key belongs in exactly one function.
+    // A second one would be a second place for the redirect rule, the retry
+    // rule and the "never put the key in an error" rule to not hold.
+    const carrying = sources
+      .flatMap(({ name, code }) =>
+        code.includes("Zotero-API-Key") ? [name] : [],
+      )
+      .sort();
+    expect(carrying).toEqual(["zotero.ts"]);
+  });
+
+  it("never lets a credentialed request follow a redirect", () => {
+    // The finding this whole rule exists for: `fetch` strips `Authorization`
+    // across a cross-origin redirect and strips nothing else, so a followed
+    // 302 from `/items/<key>/file` hands a member's key to Amazon. Every
+    // `fetch` in the module that carries the key sets `redirect: "manual"`;
+    // the one that does not carry it is the second hop, and it is named.
+    const zotero = sources.find((source) => source.name === "zotero.ts")?.code ?? "";
+    const fetches = [...zotero.matchAll(/\bfetch\(/g)];
+    expect(fetches.length).toBeGreaterThan(0);
+    const manual = [...zotero.matchAll(/redirect:\s*"manual"/g)];
+    expect(manual.length).toBe(fetches.length);
+  });
+
+  it("keeps the Zotero key out of anything that gets logged", () => {
+    const zotero = sources.find((source) => source.name === "zotero.ts");
+    const logged = [
+      ...(zotero?.code.matchAll(/console\.(?:error|warn|log)\(([\s\S]*?)\);/g) ?? []),
+    ].map((match) => match[1] ?? "");
+    expect(logged.length).toBeGreaterThan(0);
+    for (const call of logged) {
+      expect(call).not.toMatch(/apiKey/i);
     }
   });
 });
