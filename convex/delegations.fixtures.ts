@@ -114,6 +114,36 @@ export type IndexRead = {
   constraints: Constraint[];
 };
 
+/** A `filter()` expression, evaluated against one row. */
+type Expr = (row: Row) => unknown;
+
+/**
+ * The `q` handed to a `.filter()` callback.
+ *
+ * Convex offers far more than this — `gt`, `lt`, `add`, `sub` — and every one
+ * of them is deliberately absent rather than approximated. A read that starts
+ * needing one throws here, at the missing method, instead of being filtered by
+ * a builder that quietly returned something truthy; this fixture's whole
+ * bargain is that where it diverges it diverges toward being stricter.
+ */
+class ExpressionBuilder {
+  field(name: string): Expr {
+    return (row) => row[name];
+  }
+  eq(a: Expr, b: Expr | unknown): Expr {
+    return (row) => a(row) === (typeof b === "function" ? (b as Expr)(row) : b);
+  }
+  neq(a: Expr, b: Expr | unknown): Expr {
+    return (row) => a(row) !== (typeof b === "function" ? (b as Expr)(row) : b);
+  }
+  and(...parts: Expr[]): Expr {
+    return (row) => parts.every((part) => part(row) === true);
+  }
+  or(...parts: Expr[]): Expr {
+    return (row) => parts.some((part) => part(row) === true);
+  }
+}
+
 class FakeQuery {
   constructor(
     private readonly rows: Row[],
@@ -121,6 +151,8 @@ class FakeQuery {
     private readonly descending: boolean,
     /** When true, filters are recorded and then ignored — a lying index. */
     private readonly hostile: boolean,
+    /** The `filter()` predicate, applied after the index constraints. */
+    private readonly predicate: Expr | null = null,
   ) {}
 
   order(direction: "asc" | "desc"): FakeQuery {
@@ -129,13 +161,45 @@ class FakeQuery {
       this.constraints,
       direction === "desc",
       this.hostile,
+      this.predicate,
     );
   }
 
+  filter(build: (q: ExpressionBuilder) => Expr): FakeQuery {
+    const predicate = build(new ExpressionBuilder());
+    if (typeof predicate !== "function") {
+      throw new Error(
+        "A `filter()` callback returned something this fixture cannot evaluate; it knows eq/neq/and/or/field and nothing else.",
+      );
+    }
+    return new FakeQuery(
+      this.rows,
+      this.constraints,
+      this.descending,
+      this.hostile,
+      predicate,
+    );
+  }
+
+  private keep(row: Row): boolean {
+    if (this.predicate === null) return true;
+    const verdict = this.predicate(row);
+    // A bare `q.field("x")` as the whole filter is the shape that would
+    // otherwise pass a truthy row and drop a falsy one while looking like a
+    // predicate. Convex requires a boolean here and so does this.
+    if (typeof verdict !== "boolean") {
+      throw new Error(
+        `A \`filter()\` expression answered ${typeof verdict} rather than a boolean; this fixture refuses to guess what that meant.`,
+      );
+    }
+    return verdict;
+  }
+
   private resolve(): Row[] {
-    const kept = this.hostile
+    const indexed = this.hostile
       ? [...this.rows]
       : this.rows.filter((row) => matches(row, this.constraints));
+    const kept = indexed.filter((row) => this.keep(row));
     kept.sort((a, b) => a._creationTime - b._creationTime);
     return this.descending ? kept.reverse() : kept;
   }
@@ -527,11 +591,14 @@ export async function seedAnnotation(
     type: string;
     labId: Id<"labs">;
     paperId: Id<"papers">;
+    /** The meeting it was written under — what makes a note carriable forward. */
+    sessionId: Id<"sessions">;
   }> = {},
 ): Promise<Id<"annotations">> {
   return await ctx.db.insert("annotations", {
     labId: overrides.labId ?? seed.labId,
     paperId: overrides.paperId ?? seed.paperId,
+    sessionId: overrides.sessionId,
     memberId: seed.memberId,
     anchor: {
       quote: "incubation at 4°C",

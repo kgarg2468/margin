@@ -2665,9 +2665,10 @@ export async function cascadeForAction(
  * every read and cannot be stale. The ids come back so a caller can invalidate
  * or count; nothing about a reader's view depends on this function running.
  *
- * Exported and not yet called. The two call sites are in
- * `convex/annotations.ts` (`setVisibility` into `private`, and `remove`), and
- * that file is outside this PR's file allowlist; the follow-up is flagged.
+ * Called from `convex/annotations.ts` at the two moments a note stops being
+ * the lab's to read: `setVisibility` into `private`, and `remove`. In `remove`
+ * it runs *before* the delete, because the no-replies branch takes the row
+ * away and `cancelRow` reads it to place the event.
  */
 export async function cascadeForAnnotation(
   ctx: MutationCtx,

@@ -129,7 +129,9 @@ findings that cite an annotation, not what makes them safe.
 
 ### 5.3 Ledger events
 
-`delegation.requested` · `delegation.returned` (`trigger`, `itemCount`, `droppedForCitation`) · `delegation.failed` · `delegation.cancelled`. Human `actorId` per §3.3; `recordEvent` only.
+`delegation.requested` · `delegation.returned` (`trigger`, `itemCount`, `droppedForCitation`) · `delegation.empty` (`trigger`) · `delegation.failed` · `delegation.cancelled`. Human `actorId` per §3.3; `recordEvent` only.
+
+`delegation.empty` is a settled ending, not a failure: the run worked, the corpus had nothing. C1 shipped it and this list was behind the code.
 
 ### 5.4 Subject lifecycle cascade (new in v2)
 

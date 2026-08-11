@@ -4,6 +4,7 @@ import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { internalMutation, mutation, query } from "./_generated/server";
 import { recordVersion, sweepVersions } from "./annotationVersions";
+import { cascadeForAnnotation } from "./delegations";
 import { getMembership, requireMembership, requireUserId } from "./lib/authz";
 import { recordEvent } from "./lib/ledger";
 import {
@@ -1411,6 +1412,16 @@ export const setVisibility = mutation({
       // somebody once said something about them — which is worse than never
       // having said it. The ledger keeps the fact; the inbox does not.
       await clearNotificationsFor(ctx, annotation._id);
+      // A machine must not keep working on a question its author has taken
+      // back. `userId` rather than the job, because a ledger entry saying a
+      // *machine* cancelled the run would be the one reading of "a note was
+      // taken back" that leaves the person who took it out of it.
+      //
+      // `findingsAffected` is ignored on purpose. Locating a finding is not
+      // redacting it: read-time whole-item redaction is the defense of record,
+      // it re-checks every citation on every read and cannot go stale, and
+      // there is nothing for this mutation to write.
+      await cascadeForAnnotation(ctx, annotation._id, userId);
     } else {
       // And come back when it does. Those replies were written to the lab and
       // were only hidden because their parent was; leaving them private would
@@ -1730,6 +1741,20 @@ export const remove = mutation({
     if (annotation.deletedAt !== undefined) {
       return "withdrawn";
     }
+
+    // Before either ending, and that ordering is the point: the no-replies
+    // branch below hard-deletes the row, and the cascade reads it to place the
+    // cancellation in the ledger. Afterwards there would be nothing to read.
+    // The actor is the author, not the job — a ledger entry saying a *machine*
+    // cancelled the run would leave the person who took the note back out of
+    // the one record of them doing it.
+    //
+    // `findingsAffected` is ignored on purpose. Locating a finding is not
+    // redacting it: read-time whole-item redaction is the defense of record,
+    // it re-checks every citation on every read and cannot go stale, and there
+    // is nothing for this mutation to write.
+    await cascadeForAnnotation(ctx, annotation._id, userId);
+
     const replies = await repliesTo(ctx, annotation._id);
 
     // Attempted inline, where the retention cap guarantees it finishes in one

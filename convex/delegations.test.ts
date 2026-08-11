@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import * as actions from "./actions";
+import * as annotations from "./annotations";
 import {
   DAILY_RUN_BUDGET,
   DELEGATION_LEASE_MS,
@@ -1702,5 +1703,71 @@ describe("the cascade", () => {
         { text: "", citedAnnotationIds: [a], citedPaperIds: [] },
       ]),
     ).toEqual([a, b]);
+  });
+});
+
+describe("a note taken back stops the run on it", () => {
+  it("cancels the active delegation when its subject is made private", async () => {
+    const { ctx, seed } = await seeded();
+    ctx.auth = { userId: seed.pi };
+    const delegationId = await queue(ctx, seed);
+
+    await handlerOf(annotations.setVisibility)(ctx, {
+      annotationId: seed.questionId,
+      visibility: "private",
+    } as never);
+
+    const row = rowAt(ctx.db.all("delegations"));
+    expect(row.status).toBe("cancelled");
+    expect(row.cancellation).toBe("subject-withdrawn");
+    // The lease is cleared, which is what makes the in-flight run's store a
+    // no-op rather than a race.
+    expect(row.lease).toBeUndefined();
+    expect((await ctx.db.get(delegationId))?.settledAt).toBeTypeOf("number");
+  });
+
+  it("cancels it when the note is withdrawn outright", async () => {
+    // `annotations.remove` hard-deletes a note that has no replies, so the
+    // cascade has to run *before* the delete — after it there is no row for
+    // `cancelRow` to read a placement out of.
+    const { ctx, seed } = await seeded();
+    ctx.auth = { userId: seed.pi };
+    await queue(ctx, seed);
+
+    await handlerOf(annotations.remove)(ctx, {
+      annotationId: seed.questionId,
+    } as never);
+
+    expect(ctx.db.all("annotations").map((one) => one._id)).not.toContain(
+      seed.questionId,
+    );
+    expect(rowAt(ctx.db.all("delegations")).status).toBe("cancelled");
+  });
+
+  it("leaves a finding that already returned alone", async () => {
+    // A finding that informed a settlement is exactly the artifact somebody
+    // will want to read afterwards, and read-time whole-item redaction is what
+    // protects the withdrawn note inside it. `supersededAt` means "a newer run
+    // returned" and nothing else; overloading it here would make the one field
+    // that dates a finding mean two things.
+    const { ctx, seed } = await seeded();
+    await corpus(ctx, seed);
+    await run(ctx, await queue(ctx, seed));
+    const pending = await queue(ctx, seed);
+    ctx.auth = { userId: seed.pi };
+
+    await handlerOf(annotations.setVisibility)(ctx, {
+      annotationId: seed.questionId,
+      visibility: "private",
+    } as never);
+
+    expect(rowAt(ctx.db.all("findings")).supersededAt).toBeUndefined();
+    expect((await ctx.db.get(pending))?.status).toBe("cancelled");
+    // The ledger records the cancellation with the human who took the note
+    // back, not with the machine that noticed.
+    const cancelled = ctx.db
+      .all("events")
+      .find((event) => event.type === "delegation.cancelled");
+    expect(cancelled?.actorId).toBe(seed.pi);
   });
 });
