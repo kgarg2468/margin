@@ -39,7 +39,7 @@ Independent of each other; parallelizable. All small-to-medium.
 - [x] **B2 — Email delivery finished** (#65) (retry with idempotency key, paced fan-out, guard tests enforcing the constitution; operator steps in the PR body).
 - [x] **B3 — Slack delivery** (#69) for briefs, digests, synthesis write-ups (webhook-level, not an app; the write-up is the distribution artifact — treat formatting as first-class).
 - [x] **B4 — Session-agenda templates.** (#70)
-- [ ] **B5 — Native Zotero sync** (import shipped via BibTeX/RIS in #47; this is the live-sync upgrade — lower priority than B1–B3).
+- [x] **B5 — Native Zotero sync.** (#77) Link with an API key, pick a scope, and the shelf follows: hourly one-page walk with a durable resumable cursor (`lastVersion` moves only on completion), Sync now, DOI-deduped items with PDFs. `syncPayload` is the one guard-tested key carrier; `commitPage` is fenced by a `(start, lastVersion, generation)` compare-and-set; a walk restarts only when its result set shrinks, re-baselined so it then advances. (Import shipped via BibTeX/RIS in #47.)
 
 ## 3. Track C — The scout (agent delegation) + eval
 
