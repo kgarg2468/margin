@@ -9,6 +9,10 @@ import {
   mutation,
   query,
 } from "./_generated/server";
+import { gateItems } from "../lib/citations/gate";
+import { indexByLabel, issueLabels } from "../lib/citations/labels";
+import { redactWhenAnyWithdrawn } from "../lib/citations/redaction";
+import { isStillShared } from "../lib/citations/visibility";
 import { getMembership, requireUserId } from "./lib/authz";
 import { recordEvent } from "./lib/ledger";
 import {
@@ -16,7 +20,6 @@ import {
   delegationStatus,
   delegationTrigger,
 } from "./schema";
-import { isStillShared } from "./synthesis";
 
 /**
  * The scout: handing one of the lab's open questions to a machine.
@@ -706,19 +709,21 @@ export async function gatherLabVisible(
 
 export type LabelledCandidate = Candidate & { label: string };
 
-/** `[A1]`, `[A2]`, … — the citation vocabulary the model is held to. */
+/**
+ * `[A1]`, `[A2]`, … — the citation vocabulary the model is held to.
+ *
+ * The numbering is `lib/citations/labels.ts`, the same code the synthesis
+ * prompt labels its material with. A label only makes a citation checkable
+ * because the side that issues it and the side that resolves it are one
+ * implementation; two surfaces saying `[A1]` from two implementations is the
+ * drift that would make the whole vocabulary decorative.
+ */
 export function labelCandidates(candidates: readonly Candidate[]): {
   labelled: LabelledCandidate[];
   byLabel: Map<string, LabelledCandidate>;
 } {
-  const labelled = candidates.map((candidate, i) => ({
-    ...candidate,
-    label: `A${i + 1}`,
-  }));
-  return {
-    labelled,
-    byLabel: new Map(labelled.map((one) => [one.label, one])),
-  };
+  const labelled = issueLabels(candidates);
+  return { labelled, byLabel: indexByLabel(labelled) };
 }
 
 /**
@@ -814,34 +819,17 @@ export const MALFORMED_OUTPUT_REFUSAL =
   "The scout returned nothing this codebase can read as items.";
 
 /**
- * Pull `[A3]`-shaped labels out of a citation list or out of prose.
- *
- * Accepts both `"[A3]"` and `"A3"` because the two are the same claim, and a
- * gate that rejects one of them is a gate that turns a formatting difference
- * into a lost finding.
- */
-export function parseLabels(source: unknown): string[] {
-  const text =
-    typeof source === "string"
-      ? source
-      : Array.isArray(source)
-        ? source.filter((one) => typeof one === "string").join(" ")
-        : "";
-  return [...text.matchAll(/\[?\b(A\d{1,3})\b\]?/g)].flatMap((match) =>
-    match[1] === undefined ? [] : [match[1]],
-  );
-}
-
-/**
  * What may be stored, out of what came back.
  *
- * Per item, and drop-and-count rather than fail-the-batch: one hallucinated
- * label should cost the lab that line, not the four beside it that cited real
- * notes. `droppedForCitation` is then shown to the reader, because a finding
- * that quietly lost half of itself is a finding nobody can calibrate against.
+ * The rule is `lib/citations/gate.ts`: per item, drop-and-count rather than
+ * fail-the-batch, citations read from the declared list *and* from the
+ * sentence, every label real or the item does not get stored, paper ids
+ * derived from the citations and never asked of the model. What this function
+ * adds is the two things the shared gate cannot have — the Convex id types,
+ * and the refusal.
  *
- * Paper ids are *derived* from the surviving citations and never asked of the
- * model. A model that is asked which paper it is talking about will answer.
+ * Either shape is accepted: the `{items: […]}` envelope one question's answer
+ * arrives in, or the bare array a batched answer is sliced into.
  */
 export function sanitizeFindingItems(
   raw: unknown,
@@ -852,63 +840,26 @@ export function sanitizeFindingItems(
     raw !== null &&
     Array.isArray((raw as { items?: unknown }).items)
       ? (raw as { items: unknown[] }).items
-      : null;
-  if (rawItems === null) {
-    throw new ConvexError(MALFORMED_OUTPUT_REFUSAL);
-  }
-
-  const items: FindingItem[] = [];
-  let droppedForCitation = 0;
-
-  for (const entry of rawItems.slice(0, MAX_FINDING_ITEMS)) {
-    if (typeof entry !== "object" || entry === null) {
-      droppedForCitation += 1;
-      continue;
-    }
-    const record = entry as { text?: unknown; citations?: unknown };
-    const text =
-      typeof record.text === "string"
-        ? record.text.trim().slice(0, MAX_FINDING_ITEM_CHARS)
-        : "";
-
-    const cited: Id<"annotations">[] = [];
-    const papers: Id<"papers">[] = [];
-    let invented = false;
-    // Both sources, never one or the other. A model that writes
-    // `{text: "…[A2] extends [A1]", citations: ["A1"]}` is claiming to rest
-    // on A2 in the sentence a scientist reads, and an item whose stored
-    // citations omit A2 is an item A2's withdrawal cannot redact — the
-    // paraphrase leak, one layer up from where §3.7 closes it. Reading the
-    // list only would also throw away every legitimate item from a model
-    // that cites inline and sends `citations: []`.
-    for (const label of [
-      ...parseLabels(record.citations),
-      ...parseLabels(record.text),
-    ]) {
-      const candidate = byLabel.get(label);
-      if (candidate === undefined) {
-        invented = true;
-        continue;
-      }
-      if (cited.includes(candidate._id)) continue;
-      cited.push(candidate._id);
-      if (!papers.includes(candidate.paperId)) papers.push(candidate.paperId);
-    }
-
-    // An item that cited anything unreal is an item that was made up. Not the
-    // part that was made up — the item. A label nobody issued is evidence
-    // about how this sentence was produced, and "half of it checks out" is
-    // not a property a scientist can use: they would have to know which half,
-    // which is the work the scout was supposed to do. It does not get stored
-    // with a caveat; it does not get stored.
-    if (text.length === 0 || cited.length === 0 || invented) {
-      droppedForCitation += 1;
-      continue;
-    }
-    items.push({ text, citedAnnotationIds: cited, citedPaperIds: papers });
-  }
-
-  return { items, droppedForCitation };
+      : raw;
+  // One row object per label, built once. `resolveCitations` keeps a cited row
+  // once by identity — labels are one-to-one with rows — so a resolver that
+  // minted a fresh object per lookup would store the same note twice for an
+  // item that cites `[A1]` in its list and again in its sentence.
+  const rows = new Map(
+    [...byLabel].map(([label, candidate]) => [
+      label,
+      { id: candidate._id, paperId: candidate.paperId },
+    ]),
+  );
+  const gated = gateItems<Id<"annotations">, Id<"papers">>(
+    rawItems,
+    (label) => rows.get(label),
+    { maxItems: MAX_FINDING_ITEMS, maxChars: MAX_FINDING_ITEM_CHARS },
+  );
+  // The loud failure lives here rather than in `lib/`: the refusal is a
+  // sentence a person reads, and `lib/` has no users.
+  if (gated === null) throw new ConvexError(MALFORMED_OUTPUT_REFUSAL);
+  return gated;
 }
 
 /* -------------------------------------------------------------------------
@@ -947,15 +898,12 @@ export function redactWithdrawnItems<I extends RedactableItem>(
   items: readonly I[],
   stillShared: ReadonlySet<Id<"annotations">>,
 ): { items: I[]; redactedCount: number } {
-  let redactedCount = 0;
-  const applied = items.map((item) => {
-    if (item.citedAnnotationIds.every((id) => stillShared.has(id))) {
-      return item;
-    }
-    redactedCount += 1;
-    return { ...item, text: REDACTED_ITEM_TEXT };
-  });
-  return { items: applied, redactedCount };
+  return redactWhenAnyWithdrawn(
+    items,
+    stillShared,
+    (item) => item.citedAnnotationIds,
+    (item) => ({ ...item, text: REDACTED_ITEM_TEXT }),
+  );
 }
 
 /** Which of a set of cited notes the lab may still be shown. One read each. */
