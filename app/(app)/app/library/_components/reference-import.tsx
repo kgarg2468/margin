@@ -17,12 +17,15 @@ import {
   chipClass,
   errorClass,
   labelClass,
+  linkButtonClass,
   primaryButtonClass,
   secondaryButtonClass,
   textareaClass,
 } from "@/lib/ui";
 import { useAction, useMutation } from "convex/react";
 import { useEffect, useRef, useState } from "react";
+import type { PanelHold } from "./upload-flow";
+import { importHold } from "./upload-flow";
 
 type Preview = {
   format: ReferenceFormat;
@@ -43,7 +46,7 @@ export function ReferenceImport({
    * costs most, because the outcomes list is the only record of which entries
    * landed and which did not.
    */
-  onBusy?: (busy: boolean) => void;
+  onBusy?: (hold: PanelHold | null) => void;
 }) {
   const createFromDoi = useAction(api.papers.createFromDoi);
   const createFromMetadata = useMutation(api.papers.createFromMetadata);
@@ -61,8 +64,19 @@ export function ReferenceImport({
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  /** Not an error: what a withdrawal left behind, in the member's own words. */
+  const [note, setNote] = useState<string | null>(null);
+  /**
+   * Read between entries by the worker loop. A ref rather than state because
+   * the loop is already running when this is written and would never see a
+   * re-render's copy of it.
+   */
+  const stopped = useRef(false);
+
+  const hold = importHold(importing);
+
   useEffect(() => {
-    onBusy?.(importing);
+    onBusy?.(importHold(importing));
   }, [importing, onBusy]);
 
   function prepare(text: string, name: string | null) {
@@ -110,6 +124,7 @@ export function ReferenceImport({
     setOutcomes(new Map());
     setImporting(false);
     setError(null);
+    setNote(null);
   }
 
   async function confirmImport() {
@@ -118,9 +133,12 @@ export function ReferenceImport({
     }
     setImporting(true);
     setError(null);
+    setNote(null);
     setOutcomes(new Map());
+    stopped.current = false;
 
     const results = await importReferences({
+      cancelled: () => stopped.current,
       entries: preview.entries,
       selected: [...selected].sort((left, right) => left - right),
       createFromDoi: async (entry) => {
@@ -155,6 +173,26 @@ export function ReferenceImport({
 
     setImporting(false);
     setOutcomes(results);
+    if (stopped.current) {
+      // The outcomes stay on screen: they are the record of which references
+      // made it in, and the reason stopping this is a cancel and not a discard.
+      // The sentence points at that list rather than counting it — a count of
+      // outcomes is not a count of additions, since some of them failed and
+      // some were already here.
+      setNote("Stopped. What is listed above was sent; nothing else was.");
+    }
+  }
+
+  /**
+   * A real one, unlike the panel's other two waits.
+   *
+   * An import is one round trip per entry, so it is the longest wait here and
+   * the only one that can be stopped part-done and still leave something worth
+   * keeping. The entry already in the air finishes — cancelling it would only
+   * throw away an answer that has been paid for — and nothing further is sent.
+   */
+  function stopImporting() {
+    stopped.current = true;
   }
 
   const withinBatchDuplicates =
@@ -330,9 +368,22 @@ export function ReferenceImport({
           </ul>
 
           {importing && (
-            <p role="status" className="font-sans text-sm text-ink-muted">
-              Importing {outcomes.size} of {selected.size}…
-            </p>
+            <div className="flex flex-wrap items-baseline gap-x-4 gap-y-2">
+              <p role="status" className="font-sans text-sm text-ink-muted">
+                Importing {outcomes.size} of {selected.size}…
+              </p>
+              {/* No wait without a way out of it — and this was the longest
+                  wait in the panel with no control on it at all. */}
+              {hold !== null && (
+                <button
+                  type="button"
+                  onClick={stopImporting}
+                  className={`${linkButtonClass} tap-target text-xs`}
+                >
+                  {hold.label}
+                </button>
+              )}
+            </div>
           )}
 
           <div className="flex flex-wrap items-center gap-4">
@@ -361,6 +412,17 @@ export function ReferenceImport({
           </div>
         </>
       )}
+
+      {/* Mounted always, and `sr-only` while empty — a live region that arrives
+          holding its text is the shape several screen readers ignore, and being
+          out of flow costs the panel no gap. Same reasoning as `add-paper`'s
+          `Note`, which this cannot import: that module imports this one. */}
+      <p
+        role="status"
+        className={note === null ? "sr-only" : "font-sans text-sm text-ink-muted"}
+      >
+        {note ?? ""}
+      </p>
 
       {error !== null && (
         <p role="alert" className={errorClass}>

@@ -10,6 +10,82 @@ const entries: ReferenceEntry[] = [
   { title: "Metadata duplicate", authors: [] },
 ];
 
+describe("importReferences, called off part-way", () => {
+  const many: ReferenceEntry[] = Array.from({ length: 20 }, (_, index) => ({
+    title: `Paper ${index}`,
+    authors: [],
+    doi: `10.1/p${index}`,
+  }));
+
+  it("stops issuing round trips and keeps what already landed", async () => {
+    let calls = 0;
+    let stop = false;
+    const outcomes = await importReferences({
+      entries: many,
+      selected: many.map((_, index) => index),
+      concurrency: 1,
+      cancelled: () => stop,
+      createFromDoi: async (entry) => {
+        calls++;
+        // Called off while the fourth is in the air: it is one round trip and
+        // is not interruptible, so it still lands and is still reported.
+        if (calls === 4) {
+          stop = true;
+        }
+        return { paperId: `doi:${entry.doi}`, alreadyInLibrary: false };
+      },
+      createFromMetadata: async () => {
+        throw new Error("no metadata entry in this batch");
+      },
+    });
+
+    expect(calls).toBe(4);
+    expect(outcomes.size).toBe(4);
+    expect(outcomes.get(3)).toEqual({
+      status: "added",
+      paperId: "doi:10.1/p3",
+    });
+    // The rest were never sent, so they have no outcome rather than a failure.
+    expect(outcomes.has(4)).toBe(false);
+  });
+
+  it("does nothing at all when it is called off before the first entry", async () => {
+    let calls = 0;
+    const outcomes = await importReferences({
+      entries: many,
+      selected: [0, 1, 2],
+      cancelled: () => true,
+      createFromDoi: async () => {
+        calls++;
+        return { paperId: "unreachable", alreadyInLibrary: false };
+      },
+      createFromMetadata: async () => {
+        throw new Error("unreachable");
+      },
+    });
+
+    expect(calls).toBe(0);
+    expect(outcomes.size).toBe(0);
+  });
+
+  it("runs the whole batch when nothing calls it off", async () => {
+    const outcomes = await importReferences({
+      entries: many,
+      selected: many.map((_, index) => index),
+      cancelled: () => false,
+      createFromDoi: async (entry) => ({
+        paperId: `doi:${entry.doi}`,
+        alreadyInLibrary: false,
+      }),
+      createFromMetadata: async () => {
+        throw new Error("no metadata entry in this batch");
+      },
+    });
+
+    expect(outcomes.size).toBe(many.length);
+  });
+});
+
 describe("importReferences", () => {
   it("routes DOI and metadata entries and reports each outcome independently", async () => {
     const updates: Array<[number, string]> = [];

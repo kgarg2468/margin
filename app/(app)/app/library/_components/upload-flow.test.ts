@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
-import type { UploadStage } from "./upload-flow";
+import type { PanelHold, UploadStage } from "./upload-flow";
 import {
   bytesProgress,
   cancelOffer,
   formatBytes,
-  holdsPanel,
+  importHold,
   isCancellation,
+  lookupHold,
   percentSent,
   stageAnnouncement,
   stageLabel,
@@ -120,21 +121,46 @@ describe("cancelOffer", () => {
   });
 });
 
-describe("holdsPanel", () => {
-  it("holds the panel shut through every wait", () => {
-    expect(holdsPanel({ kind: "reading", pagesDone: 0, pageCount: 0 })).toBe(true);
-    expect(holdsPanel({ kind: "sending", loaded: 0, total: 0 })).toBe(true);
-    expect(holdsPanel({ kind: "filing" })).toBe(true);
+describe("what holds the panel shut", () => {
+  it("holds it through every wait the upload has", () => {
+    expect(cancelOffer({ kind: "reading", pagesDone: 0, pageCount: 0 })).not.toBeNull();
+    expect(cancelOffer({ kind: "sending", loaded: 0, total: 0 })).not.toBeNull();
+    expect(cancelOffer({ kind: "filing" })).not.toBeNull();
   });
   it("lets it go where nothing is in flight", () => {
-    expect(holdsPanel({ kind: "empty" })).toBe(false);
-    expect(holdsPanel({ kind: "read" })).toBe(false);
+    expect(cancelOffer({ kind: "empty" })).toBeNull();
+    expect(cancelOffer({ kind: "read" })).toBeNull();
   });
-  it("never holds it shut without a way out on screen", () => {
-    // The property that makes the guard safe rather than a trap: Escape is
-    // only ever inert where the member has something else to press.
-    for (const stage of EVERY_STAGE) {
-      expect(holdsPanel(stage)).toBe(cancelOffer(stage) !== null);
+
+  it("holds it while a DOI lookup runs, and offers the abandon", () => {
+    expect(lookupHold(true)).toEqual({ kind: "abandon", label: "Stop waiting" });
+    expect(lookupHold(false)).toBeNull();
+  });
+  it("holds it while an import runs, and offers a real abort", () => {
+    // Not an abandon: this one can genuinely stop, and what it has already
+    // added stays on screen.
+    expect(importHold(true)).toEqual({ kind: "abort", label: "Stop importing" });
+    expect(importHold(false)).toBeNull();
+  });
+
+  // The property the whole busy guard rests on, and the one the first attempt
+  // at it broke: two tabs reported themselves busy through a bare boolean and
+  // had no control to end the wait, so every exit went inert and none of them
+  // came back. A hold is now the way out, so a wait that cannot be ended is
+  // not expressible — but only if every hold really does carry a label.
+  it("never holds it shut without naming the way out", () => {
+    const holds: (PanelHold | null)[] = [
+      ...EVERY_STAGE.map(cancelOffer),
+      lookupHold(true),
+      lookupHold(false),
+      importHold(true),
+      importHold(false),
+    ];
+    expect(holds.filter((hold) => hold !== null)).not.toHaveLength(0);
+    for (const hold of holds) {
+      if (hold !== null) {
+        expect(hold.label.trim()).not.toBe("");
+      }
     }
   });
 });

@@ -18,14 +18,15 @@ import { useAction, useMutation } from "convex/react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { ReactNode } from "react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { PdfDropzone } from "./pdf-dropzone";
 import { parseAuthors, titleFromFilename, uploadPdf } from "./pdf-ingest";
 import { ReferenceImport } from "./reference-import";
+import type { PanelHold } from "./upload-flow";
 import {
   cancelOffer,
-  holdsPanel,
   isCancellation,
+  lookupHold,
   percentSent,
   stageAnnouncement,
   stageLabel,
@@ -79,7 +80,8 @@ export function AddPaper({
 }) {
   const [tab, setTab] = useState<"doi" | "upload" | "references">("doi");
   /**
-   * Set by whichever tab is mounted; only one ever is.
+   * What the mounted tab is doing, and how to stop it. Only one tab is ever
+   * mounted, so only one thing is ever in flight.
    *
    * Every route out of this panel unmounts the tab that is working, and none of
    * them stopped the work: the run carried on and reached back into a page that
@@ -87,13 +89,27 @@ export function AddPaper({
    * the member had put the form away; a DOI lookup called `onAdded`, which
    * re-opened the panel blank and threw its own result away. So while something
    * is in flight, every exit that would discard it is inert, and the wait's own
-   * named control — `Cancel the upload`, `Stop waiting` — is the only door.
+   * named control is the only door.
    *
-   * Inert rather than a dialog asking whether they meant it: the member is one
-   * press away from the honest answer already, and the exits that stay live are
-   * the ones that say what they will cost.
+   * The tab reports the door itself rather than a bare "I am busy" — see
+   * `PanelHold`. The first version of this took a boolean, and two tabs used it
+   * to bolt the panel shut from the inside with nothing to press.
    */
-  const [busy, setBusy] = useState(false);
+  const [hold, setHold] = useState<PanelHold | null>(null);
+  const busy = hold !== null;
+
+  /**
+   * By value, not by identity. `cancelOffer` builds a fresh object on every
+   * render, and the upload re-renders once per progress event — comparing the
+   * two fields keeps a 40 MB file from re-rendering the whole panel per chunk.
+   */
+  const report = useCallback((next: PanelHold | null) => {
+    setHold((current) =>
+      current?.kind === next?.kind && current?.label === next?.label
+        ? current
+        : next,
+    );
+  }, []);
 
   useEffect(() => {
     onBusyChange?.(busy);
@@ -143,16 +159,31 @@ export function AddPaper({
         />
       </div>
 
+      {/* The reason the tabs are refusing, said once and out loud rather than
+          in a `title` — a `title` needs a pointer that hovers, which rules out
+          every keyboard and every touchscreen. Named after the control that
+          actually ends the wait, so the sentence is a direction and not just a
+          refusal. */}
+      {hold !== null && (
+        <p id={HELD_REASON_ID} className="font-sans text-xs text-ink-faint">
+          Something is still running. Press &ldquo;{hold.label}&rdquo; to stop
+          it before leaving this panel.
+        </p>
+      )}
+
       {tab === "doi" ? (
-        <DoiTab labId={labId} onAdded={onAdded} onBusy={setBusy} />
+        <DoiTab labId={labId} onAdded={onAdded} onBusy={report} />
       ) : tab === "upload" ? (
-        <UploadTab labId={labId} onBusy={setBusy} />
+        <UploadTab labId={labId} onBusy={report} />
       ) : (
-        <ReferenceImport labId={labId} onAdded={onAdded} onBusy={setBusy} />
+        <ReferenceImport labId={labId} onAdded={onAdded} onBusy={report} />
       )}
     </section>
   );
 }
+
+/** Where the panel says why it is refusing to be left. */
+const HELD_REASON_ID = "add-paper-held";
 
 function TabButton({
   id,
@@ -170,7 +201,7 @@ function TabButton({
 }) {
   // The tab that is already open is not a way out of anything, so it never
   // goes dim — only the two that would take the work with them.
-  const disabled = held && !active;
+  const refused = held && !active;
   return (
     <button
       type="button"
@@ -178,12 +209,20 @@ function TabButton({
       id={`add-paper-tab-${id}`}
       aria-selected={active}
       aria-controls={`add-paper-panel-${id}`}
-      disabled={disabled}
-      title={disabled ? "Stop what's running first." : undefined}
-      onClick={onSelect}
+      // `aria-disabled`, not `disabled`. A disabled button leaves the tab order
+      // altogether, so the member most likely to need telling why — the one
+      // arriving by keyboard — is the one who can no longer reach the control
+      // or the sentence explaining it. This stays focusable and says why.
+      aria-disabled={refused}
+      aria-describedby={refused ? HELD_REASON_ID : undefined}
+      onClick={() => {
+        if (!refused) {
+          onSelect();
+        }
+      }}
       className={
         "-mb-px border-b-2 pb-2 font-sans text-sm pressable " +
-        "disabled:cursor-not-allowed disabled:opacity-50 " +
+        "aria-disabled:cursor-not-allowed aria-disabled:opacity-50 " +
         (active
           ? "border-accent text-ink-strong"
           : "border-transparent text-ink-faint hover:text-ink-muted")
@@ -210,7 +249,7 @@ function DoiTab({
 }: {
   labId: Id<"labs">;
   onAdded?: () => void;
-  onBusy: (busy: boolean) => void;
+  onBusy: (hold: PanelHold | null) => void;
 }) {
   const createFromDoi = useAction(api.papers.createFromDoi);
   const textLayer = useTextLayer();
@@ -218,13 +257,40 @@ function DoiTab({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<DoiResult | null>(null);
+  /** Not an error: what a withdrawal left behind, in the member's own words. */
+  const [note, setNote] = useState<string | null>(null);
+  /**
+   * Which lookup is allowed to speak. `Stop waiting` bumps it; an action that
+   * resolves afterwards checks it and keeps its hands off a panel that has
+   * moved on.
+   */
+  const attempt = useRef(0);
+
+  const hold = lookupHold(pending);
 
   // A lookup in flight holds the panel: closing it used to let `createFromDoi`
   // resolve into `onAdded`, which re-opened the panel blank and took the
   // outcome sentence — the whole point of the lookup — down with it.
   useEffect(() => {
-    onBusy(pending);
+    onBusy(lookupHold(pending));
   }, [pending, onBusy]);
+
+  /**
+   * Nothing to abort, so what is given back is the panel and the truth.
+   *
+   * `createFromDoi` is a Crossref round trip inside a Convex action; it takes
+   * no signal and will finish whatever happens here. An upstream that has hung
+   * is exactly when this is needed, and exactly when there is nothing to
+   * cancel — so this is the same honest abandon the upload's last stage offers,
+   * in the same words.
+   */
+  function stopWaiting() {
+    attempt.current += 1;
+    setPending(false);
+    setNote(
+      "Stopped waiting. If the lookup did land, the paper is on the shelf already — look before adding it again.",
+    );
+  }
 
   return (
     <div
@@ -247,9 +313,14 @@ function DoiTab({
           event.preventDefault();
           setError(null);
           setResult(null);
+          setNote(null);
+          const mine = ++attempt.current;
           setPending(true);
           try {
             const outcome = await createFromDoi({ labId, doi });
+            if (attempt.current !== mine) {
+              return;
+            }
             setResult(outcome);
             setDoi("");
             onAdded?.();
@@ -262,9 +333,16 @@ function DoiTab({
               void textLayer.read(outcome.paperId);
             }
           } catch (caught) {
+            if (attempt.current !== mine) {
+              return;
+            }
             setError(readableError(caught, "That lookup didn't work."));
           } finally {
-            setPending(false);
+            // Only this run's own wait. An abandoned lookup already cleared it,
+            // and a newer one has its own to keep.
+            if (attempt.current === mine) {
+              setPending(false);
+            }
           }
         }}
       >
@@ -294,14 +372,17 @@ function DoiTab({
           </p>
         )}
 
-        <button
-          type="submit"
-          disabled={pending}
-          className={`${primaryButtonClass} self-start`}
-        >
-          {pending ? "Looking it up…" : "Add paper"}
-        </button>
+        <div className="flex flex-wrap items-center gap-4">
+          <button type="submit" disabled={pending} className={primaryButtonClass}>
+            {pending ? "Looking it up…" : "Add paper"}
+          </button>
+          {/* No wait without a way out of it. This one had none at all: the
+              submit disables itself, and the panel now refuses to be left. */}
+          <CancelControl offer={hold} onWithdraw={stopWaiting} />
+        </div>
       </form>
+
+      <Note note={note} />
 
       {/* Keyed to this result's own paper: a second DOI can be submitted while
           the first one's pages are still being read, and the sentence below
@@ -421,7 +502,7 @@ function UploadTab({
   onBusy,
 }: {
   labId: Id<"labs">;
-  onBusy: (busy: boolean) => void;
+  onBusy: (hold: PanelHold | null) => void;
 }) {
   const generateUploadUrl = useMutation(api.papers.generateUploadUrl);
   const createFromUpload = useMutation(api.papers.createFromUpload);
@@ -442,9 +523,10 @@ function UploadTab({
    */
   const attempt = useRef(0);
 
-  // The stage decides this, not a second flag beside it — see `holdsPanel`.
+  // The same offer the control below is drawn from, so the panel can never be
+  // held shut by a stage whose exit is not on screen.
   useEffect(() => {
-    onBusy(holdsPanel(phase));
+    onBusy(cancelOffer(phase));
   }, [phase, onBusy]);
 
   async function read(file: File) {
@@ -642,15 +724,7 @@ function UploadTab({
         {stageAnnouncement(phase)}
       </p>
 
-      {/* Announced, because the completion of a cancellation is otherwise
-          silent: the stage's live region goes empty at the same moment, and
-          the button that was pressed unmounts under the finger. This sentence
-          is the only evidence anything happened. */}
-      {note !== null && (
-        <p role="status" className="font-sans text-sm text-ink-muted">
-          {note}
-        </p>
-      )}
+      <Note note={note} />
       {error !== null && (
         <p role="alert" className={errorClass}>
           {error}
@@ -689,11 +763,36 @@ function Progress({ phase }: { phase: UploadPhase }) {
   );
 }
 
+/**
+ * A withdrawal's last word, and it has to be spoken.
+ *
+ * The completion of a cancellation is otherwise silent: the stage's live region
+ * empties at the same moment, and the button that was pressed unmounts under
+ * the finger. This sentence is the only evidence anything happened.
+ *
+ * Mounted always, not with the sentence. A live region that arrives already
+ * holding its text is the pattern several screen readers ignore — the region
+ * has to be there first for the change to be a change. Empty, it is `sr-only`,
+ * which is out of flow and so costs the panel no gap; it is never
+ * `display: none`, which would take it out of the accessibility tree and lose
+ * the announcement it exists for.
+ */
+function Note({ note }: { note: string | null }) {
+  return (
+    <p
+      role="status"
+      className={note === null ? "sr-only" : "font-sans text-sm text-ink-muted"}
+    >
+      {note ?? ""}
+    </p>
+  );
+}
+
 function CancelControl({
   offer,
   onWithdraw,
 }: {
-  offer: { kind: "abort" | "abandon"; label: string } | null;
+  offer: PanelHold | null;
   onWithdraw: () => void;
 }) {
   if (offer === null) {

@@ -17,6 +17,19 @@ type ImportReferencesOptions = {
   ) => Promise<{ paperId: string; alreadyInLibrary: boolean }>;
   onOutcome?: (index: number, outcome: ReferenceImportOutcome) => void;
   concurrency?: number;
+  /**
+   * Asked before each round trip; a true answer stops the workers issuing any
+   * more of them and returns what has already landed.
+   *
+   * A question rather than an `AbortSignal` because the two mean different
+   * things. A signal promises rejection, and rejecting here would throw away
+   * the outcomes collected so far — which are the point of the import, the only
+   * record of which references made it in. Stopping this one is not an error to
+   * unwind from; it is an early return with the results intact. Round trips
+   * already in the air are left to finish, since cancelling them would only
+   * lose their answers.
+   */
+  cancelled?: () => boolean;
 };
 
 /** Later DOI-less records with the same title and year point to the first. */
@@ -50,6 +63,7 @@ export async function importReferences({
   createFromMetadata,
   onOutcome,
   concurrency = 3,
+  cancelled,
 }: ImportReferencesOptions): Promise<Map<number, ReferenceImportOutcome>> {
   const pending = selected.filter((index) => entries[index] !== undefined);
   const duplicates = findWithinBatchDuplicates(entries, pending);
@@ -59,6 +73,12 @@ export async function importReferences({
 
   async function worker() {
     while (cursor < queued.length) {
+      // Between entries is the only honest place to ask: one entry is a single
+      // round trip and is not interruptible, so this stops the queue rather
+      // than the request in flight.
+      if (cancelled?.() === true) {
+        return;
+      }
       const index = queued[cursor];
       cursor++;
       if (index === undefined) {

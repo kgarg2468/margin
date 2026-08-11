@@ -297,20 +297,40 @@ function Library({
             onBusyChange={setAddBusy}
           />
           {!isEmpty && (
-            <button
-              type="button"
-              onClick={() => setAdding(false)}
-              // Held while the panel is working, for the same reason its own
-              // Escape is: this closes the form without stopping anything, and
-              // the run then reaches back into a page that has moved on.
-              disabled={addBusy}
-              title={addBusy ? "Stop what's running first." : undefined}
-              // The way out of a panel should not be quieter than the way in:
-              // this is the same control as `Add a paper` above, run backwards.
-              className={`${secondaryButtonClass} tap-target self-start`}
-            >
-              Done adding
-            </button>
+            <>
+              <button
+                type="button"
+                // Held while the panel is working, for the same reason its own
+                // Escape is: this closes the form without stopping anything,
+                // and the run then reaches back into a page that has moved on.
+                //
+                // `aria-disabled` rather than `disabled`, so the control keeps
+                // its place in the tab order and can carry the sentence saying
+                // why — a `disabled` button is unreachable by the keyboard, and
+                // a `title` needs a pointer that hovers.
+                aria-disabled={addBusy}
+                aria-describedby={addBusy ? "library-add-held" : undefined}
+                onClick={() => {
+                  if (!addBusy) {
+                    setAdding(false);
+                  }
+                }}
+                // The way out of a panel should not be quieter than the way in:
+                // this is the same control as `Add a paper` above, run
+                // backwards.
+                className={`${secondaryButtonClass} tap-target self-start aria-disabled:cursor-not-allowed aria-disabled:opacity-50`}
+              >
+                Done adding
+              </button>
+              {addBusy && (
+                <p
+                  id="library-add-held"
+                  className="font-sans text-xs text-ink-faint"
+                >
+                  The panel is still working. Stop it there to close this.
+                </p>
+              )}
+            </>
           )}
         </div>
       ) : (

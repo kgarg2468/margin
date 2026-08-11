@@ -77,9 +77,42 @@ export type UploadStage =
  * may have landed, which is what "abandon" means and why it is not called
  * "cancel".
  */
-export function cancelOffer(
-  stage: UploadStage,
-): { kind: "abort" | "abandon"; label: string } | null {
+/**
+ * What is holding the panel shut, and the named control that ends it.
+ *
+ * A hold cannot be expressed without a label, and that is the whole point. The
+ * first attempt at the busy guard reported a bare boolean: two of the three
+ * tabs said "I am working", the panel dutifully made every exit inert, and
+ * neither tab had a control to end the wait — so the guard meant to remove
+ * unnamed doors left a room with no door at all. Reporting the exit instead of
+ * a flag makes that unsayable: to hold the panel you must hand over the way out.
+ */
+export type PanelHold = { kind: "abort" | "abandon"; label: string };
+
+/**
+ * The DOI lookup's hold. `createFromDoi` is one action and cannot be recalled —
+ * it is a Crossref round trip that will finish whatever anyone here does — so
+ * what is on offer is the abandon, in the same words the upload's last stage
+ * uses.
+ */
+export function lookupHold(pending: boolean): PanelHold | null {
+  return pending ? { kind: "abandon", label: "Stop waiting" } : null;
+}
+
+/**
+ * The reference import's hold, and the one genuine abort of the three.
+ *
+ * An import is one round trip per selected entry, so a 200-entry export runs
+ * for minutes; it is also the only wait here that can be stopped part-done and
+ * still leave something worth keeping. Cancelling stops it issuing further
+ * round trips and leaves the outcomes it has already collected on screen, which
+ * is the record of what landed and is the expensive thing to lose.
+ */
+export function importHold(importing: boolean): PanelHold | null {
+  return importing ? { kind: "abort", label: "Stop importing" } : null;
+}
+
+export function cancelOffer(stage: UploadStage): PanelHold | null {
   switch (stage.kind) {
     case "empty":
     case "read":
@@ -99,26 +132,6 @@ export function cancelOffer(
       // to write; the compiler can.
       return stage satisfies never;
   }
-}
-
-/**
- * Whether the panel belongs to the work rather than to the member.
- *
- * Escape used to put the panel away without stopping a single thing it was
- * doing, and the orphaned run went on reaching back into a page that had moved
- * on — most visibly by navigating to the new paper's record half a minute after
- * the member had closed the form. The answer is not a dialog asking whether
- * they meant it. It is that while something is in flight the dismissal is inert
- * and the wait's own named exit is the only door out.
- *
- * Defined as "there is a way out on screen" rather than listing the stages
- * again, which is what makes the guard safe by construction: a stage can only
- * ever hold the panel shut while `cancelOffer` is offering something to press.
- * A stage that held it shut with no exit would be a trap, and this cannot
- * express one.
- */
-export function holdsPanel(stage: UploadStage): boolean {
-  return cancelOffer(stage) !== null;
 }
 
 /**
