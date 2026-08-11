@@ -150,3 +150,45 @@ test.describe("reduced motion", () => {
     expect(pressed).toBe("none");
   });
 });
+
+/**
+ * The theme, asserted where it is actually decided.
+ *
+ * Playwright's context asks for `prefers-color-scheme: light` unless told
+ * otherwise, which is exactly the condition the old behaviour got wrong: the
+ * product followed the system, so a light laptop got a light Margin and the
+ * README's "dark mode throughout" was false on half the machines that opened
+ * it. The assertion is the used page colour rather than a class name — the
+ * class is only how it is done.
+ *
+ * `/signin` and not `/app`: this suite runs with no backend on purpose (see
+ * `playwright.config.ts`), and the sign-in page is a real page rendered by the
+ * same root layout.
+ */
+test.describe("theme", () => {
+  test.use({ colorScheme: "light" });
+
+  test("a first visit is dark even when the system asks for light", async ({
+    page,
+  }) => {
+    await page.goto("/signin");
+    const background = await page.evaluate(
+      () => getComputedStyle(document.body).backgroundColor,
+    );
+    // --page, dark branch: #16110e.
+    expect(background).toBe("rgb(22, 17, 14)");
+  });
+
+  test("the decision is in the served HTML, not in an effect", async ({
+    request,
+  }) => {
+    // The no-flash guarantee, stated as the only thing that can prove it: the
+    // script is in the document React hydrates into, so the class is on <html>
+    // before React has run at all. Matched on `documentElement.classList`
+    // rather than on a whole call, because the script aliases the list once and
+    // then works through the alias.
+    const html = await (await request.get("/signin")).text();
+    expect(html).toContain("margin-theme");
+    expect(html).toContain("documentElement.classList");
+  });
+});

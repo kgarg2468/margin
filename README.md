@@ -32,7 +32,7 @@
 
 Margin is where a research group runs its journal club. A lab brings in a paper by DOI, annotates it together in a shared margin before the meeting, and runs the discussion off the passages it flagged. Every note carries a type — hypothesis, method note, critique, definition, connection, open question — so the reading leaves a structured record instead of a drawer of highlights, and that record is what the next session, the next member, and the write-up are built from. The model layer only ever quotes and attributes what the lab already said.
 
-The product stays in its warm brown dark mode throughout:
+The product opens in its warm brown dark mode and stays there unless you say otherwise — the rail carries an auto/light/dark switch, and dark is what a first visit gets whatever the machine underneath asks for:
 
 <p align="center">
   <img src="docs/assets/screenshots/landing-dark.png" alt="Margin landing page in warm dark mode, with the first annotation visible" width="100%">
@@ -57,7 +57,7 @@ The product stays in its warm brown dark mode throughout:
 <p align="center">
   <img src="docs/assets/screenshots/synthesis.png" alt="Margin session write-up in warm dark mode, with attribution and citations" width="72%">
 </p>
-<p align="center"><em>Fig. 5 — The write-up: every claim is quoted from an annotation and attributed to its author.</em></p>
+<p align="center"><em>Fig. 5 — The write-up: every claim carries the notes it was drawn from and the members who wrote them.</em></p>
 
 ## First Session
 
