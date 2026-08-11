@@ -9,6 +9,7 @@ import {
   FAILURE_SENTENCES,
   MAX_ACTIVE_PER_LAB,
   MAX_BATCH_CANDIDATES,
+  MAX_BATCH_QUESTIONS,
   MAX_CANDIDATES,
   MAX_SEARCH_LENGTH,
   actionSubjectIsOpen,
@@ -773,14 +774,17 @@ describe("the batch's candidate cap", () => {
     })),
   });
 
-  it("truncates a union past the cap and still gives every question its best", () => {
-    // Three questions at the per-question ceiling is 120 distinct notes, and
-    // a lab whose notes run long would put a megabyte in one input — not a
-    // slow call but a `context_length_exceeded` the whole brief dies of,
-    // repeated exactly every brief, since the corpus does not change.
-    const questions = [0, 1, 2].map((index) =>
+  /** The largest batch the caps allow, each question at its own ceiling. */
+  const fullBatch = () =>
+    Array.from({ length: MAX_BATCH_QUESTIONS }, (_, index) =>
       question(index, MAX_CANDIDATES),
     );
+
+  it("truncates a union past the cap and still gives every question its best", () => {
+    // The batch the budgets are derived for: eight questions at the
+    // per-question ceiling is 320 distinct notes, and a lab whose notes run
+    // long would put a megabyte in one input.
+    const questions = fullBatch();
     const gate = buildBatchPrompt(labId, questions);
     const payload = materialOf(gate.prompt);
 
@@ -788,15 +792,18 @@ describe("the batch's candidate cap", () => {
     // Round-robin by rank: every question's best note is laid out before any
     // question's second, so a cap that bites takes the tail off all of them
     // rather than the whole of the last one.
-    expect(payload.annotations.slice(0, 3).map((one) => one.body)).toEqual([
-      "note 0/0",
-      "note 1/0",
-      "note 2/0",
-    ]);
+    expect(
+      payload.annotations
+        .slice(0, MAX_BATCH_QUESTIONS)
+        .map((one) => one.body),
+    ).toEqual(questions.map((_, index) => `note ${index}/0`));
     for (const [index, one] of payload.questions.entries()) {
       expect(one.labels).toContain(`A${index + 1}`);
+      // The ten the constant's comment promises, at the size it promises it
+      // for — a guarantee derived at eight questions and tested at three is a
+      // guarantee about a batch nobody runs.
       expect(one.labels.length).toBeGreaterThanOrEqual(
-        Math.floor(MAX_BATCH_CANDIDATES / questions.length),
+        Math.floor(MAX_BATCH_CANDIDATES / MAX_BATCH_QUESTIONS),
       );
     }
   });
@@ -806,10 +813,7 @@ describe("the batch's candidate cap", () => {
     // question told it may cite a note that fell off the end would be a
     // question whose every citation of it is dropped as invented — the item
     // lost and the reason invisible.
-    const gate = buildBatchPrompt(
-      labId,
-      [0, 1, 2].map((index) => question(index, MAX_CANDIDATES)),
-    );
+    const gate = buildBatchPrompt(labId, fullBatch());
     const payload = materialOf(gate.prompt);
     const laid = new Set(payload.annotations.map((one) => one.label));
 
@@ -820,6 +824,78 @@ describe("the batch's candidate cap", () => {
         expect(gate.byLabel.has(label)).toBe(true);
       }
       expect([...(gate.allowed.get(one.ref) ?? [])]).toEqual(one.labels);
+    }
+  });
+
+  it("counts a finding's coverage off what its question was shown", async () => {
+    // The number the reader is given has to be one the code can stand behind.
+    // Until the cap, "searched" and "shown" were the same set; a truncated
+    // question's gather count is a claim about material the model never saw.
+    const { ctx, seed, calls } = await seeded();
+    const notes: Id<"annotations">[] = [];
+    for (let index = 0; index < 3 * MAX_CANDIDATES; index += 1) {
+      notes.push(
+        await seedAnnotation(
+          ctx,
+          { ...seed, memberId: seed.pi },
+          { type: "note", body: `Note ${index} on the incubation step` },
+        ),
+      );
+    }
+    const subjects = [seed.questionId];
+    for (const which of ["second", "third"]) {
+      subjects.push(
+        await seedAnnotation(
+          ctx,
+          { ...seed, memberId: seed.member },
+          {
+            type: "open-question",
+            body: `Which cohort ran the ${which} replicate?`,
+          },
+        ),
+      );
+    }
+    const delegationIds = [];
+    for (const annotationId of subjects) {
+      delegationIds.push(await queue(ctx, seed, { annotationId }));
+    }
+
+    // Three full gathers, disjoint, so the union really is 120 — which the
+    // in-memory search index cannot produce on its own, since every question
+    // reads the same rows out of it.
+    const rows = await Promise.all(notes.map((id) => ctx.db.get(id)));
+    const slices = new Map(
+      delegationIds.map((id, index) => [
+        id,
+        rows
+          .slice(index * MAX_CANDIDATES, (index + 1) * MAX_CANDIDATES)
+          .flatMap((row) => (row === null ? [] : [row])),
+      ]),
+    );
+    ctx.register(internal.delegations.gather, {
+      _handler: (_inner: unknown, args: { delegationId: Id<"delegations"> }) => ({
+        question: "Does the 4°C incubation step matter?",
+        candidates: slices.get(args.delegationId) ?? [],
+        coverage: {
+          annotationsSearched: MAX_CANDIDATES,
+          papersTouched: 1,
+          queriesRun: 1,
+        },
+      }),
+    });
+
+    await handlerOf(runForBrief)(ctx, { delegationIds } as never);
+
+    const payload = materialOf(rowAt(calls).prompt);
+    expect(payload.annotations).toHaveLength(MAX_BATCH_CANDIDATES);
+    for (const [index, annotationId] of subjects.entries()) {
+      const finding = ctx.db
+        .all("findings")
+        .find((row) => row.annotationId === annotationId);
+      const shown = rowAt(payload.questions, index).labels.length;
+      // Each question gathered forty and was shown a share of eighty.
+      expect(shown).toBeLessThan(MAX_CANDIDATES);
+      expect(finding?.coverage.annotationsSearched).toBe(shown);
     }
   });
 

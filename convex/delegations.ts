@@ -145,16 +145,25 @@ export const MAX_BATCH_QUESTIONS = MAX_ACTIVE_PER_LAB;
  * `MAX_CANDIDATES` bounds one question's gather, and nothing bounded their
  * union until the questions shared a prompt. Eight questions at forty each is
  * 320 annotations in one input, and a note tops out at 4,000 characters
- * (`annotations.MAX_BODY_LENGTH`) — over a megabyte, which is not a slow call
- * but a `context_length_exceeded` the whole brief fails on. The corpus does
- * not change between briefs, so that failure would repeat exactly, and a big
- * lab's scout would go dark permanently rather than noisily.
+ * (`annotations.MAX_BODY_LENGTH`) — over a megabyte, growing with the lab and
+ * unbounded above.
  *
  * Twice one question's ceiling. The layout is round-robin by each question's
  * own rank (`buildBatchPrompt`), so a cap that bites takes the tail off every
  * question instead of the whole of the last one, and every question keeps at
  * least `MAX_BATCH_CANDIDATES / MAX_BATCH_QUESTIONS` — ten — of its own best
  * notes however many its neighbours brought.
+ *
+ * What this bounds is the *count*, and it is worth being exact about what that
+ * buys. Eighty notes at the 4,000-character ceiling is 320,000 characters,
+ * which at `CHARS_PER_TOKEN` is around 107,000 tokens — a real number rather
+ * than an unbounded one, comfortable for the default model's context, and
+ * nowhere near the megabyte the union could reach on its own. It is not a
+ * character budget: a lab that writes at the ceiling still produces a much
+ * larger prompt than one that writes in sentences, and an operator who points
+ * `SCOUT_MODEL` at a smaller-context model has to account for that worst case
+ * themselves. A budget measured in characters is a design change, not a
+ * constant.
  */
 export const MAX_BATCH_CANDIDATES = MAX_CANDIDATES * 2;
 
@@ -1396,10 +1405,17 @@ const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 
 const SCOUT_REASONING_EFFORT = "low";
 
-/** Conservative in the direction a budget wants: short tokens mean more of them. */
+/**
+ * An estimate, not a measurement: English prose runs nearer four characters a
+ * token, and three is the conservative direction for a budget — short tokens
+ * mean more of them. Nothing tokenizes anything here.
+ */
 const CHARS_PER_TOKEN = 3;
 
-/** What JSON adds around the prose: refs, labels, braces, quoting. */
+/**
+ * An estimate of what JSON adds around the prose — refs, labels, braces,
+ * quoting. Sized by inspection of the envelope rather than by counting.
+ */
 const ANSWER_JSON_OVERHEAD = 1.2;
 
 /**
@@ -1429,6 +1445,16 @@ const REASONING_TOKENS_PER_QUESTION = 4_000;
  *
  * A ceiling is not a bill — only the tokens actually written are charged — so
  * the honest move is to size it for the worst case the prompt permits.
+ *
+ * It does assume a floor, and the assumption is a deployment concern rather
+ * than a code one. This number (~43,500) is sent as `max_output_tokens`, and a
+ * model whose per-response output cap is below it — 16,384 and 32,768 are
+ * common — answers 400 rather than truncating, which fails the whole brief as
+ * `model-unavailable`, identically, every time. So the scout's model must
+ * accept at least ~44,000 output tokens and hold a context large enough for
+ * the input beside it (see `MAX_BATCH_CANDIDATES`: ~107,000 tokens at the
+ * absolute worst). The default satisfies both; `SCOUT_MODEL` is an override an
+ * operator has to check against them, and `.env.example` says so.
  */
 const SCOUT_MAX_OUTPUT_TOKENS =
   Math.ceil(
