@@ -99,6 +99,7 @@ export function MarginRail({
   activeId,
   onActivate,
   onFocusPassage,
+  seedReply,
 }: {
   cards: RailCard[];
   unanchored: RailCard[];
@@ -113,6 +114,8 @@ export function MarginRail({
   activeId: AnnotationId | null;
   onActivate: (id: AnnotationId | null) => void;
   onFocusPassage: (annotation: AnnotationView) => void;
+  /** One card's composer opens on this, for a reader who arrived to answer it. */
+  seedReply?: { annotationId: AnnotationId; body: string };
 }) {
   const elements = useRef(new Map<AnnotationId, HTMLElement>());
   const sizes = useRef<ResizeObserver | null>(null);
@@ -303,6 +306,11 @@ export function MarginRail({
           anchorState={entry.state}
           active={activeId === entry.annotation._id}
           onActivate={onActivate}
+          seedReply={
+            seedReply?.annotationId === entry.annotation._id
+              ? seedReply.body
+              : undefined
+          }
         />
         {/* The paper repaginated and the passage turned up next door. The mark
             is drawn on the sentence in the ordinary way, because that is where
@@ -476,6 +484,11 @@ export function MarginRail({
                 orphaned
                 active={activeId === entry.annotation._id}
                 onActivate={onActivate}
+                seedReply={
+                  seedReply?.annotationId === entry.annotation._id
+                    ? seedReply.body
+                    : undefined
+                }
               />
             </div>
           ))}

@@ -4,8 +4,13 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { citationNumbering } from "@/lib/citations/numbering";
 import { GOLD_PAIRS } from "@/lib/digest/engine";
-import { ownPrivateNotes, tallyContributors } from "@/lib/brief/prep";
+import {
+  lineCitations,
+  ownPrivateNotes,
+  tallyContributors,
+} from "@/lib/brief/prep";
 import { cleanQuote } from "@/lib/quotes";
+import type { KnownNote } from "@/lib/scout/surface";
 import { formatDate, relativeWhen } from "@/lib/sessions-ui";
 import {
   errorClass,
@@ -23,6 +28,7 @@ import { readableError } from "../../../_components/errors";
 import { typeStyle } from "../../../library/[paperId]/read/_components/ontology";
 import type { AnnotationView } from "../../../library/[paperId]/read/_components/types";
 import type { SessionDetail } from "./manage";
+import { ScoutFinding } from "./scout";
 import { CitationRef } from "./session-board";
 import { anchoredIds, groupSessionNotes } from "./session-notes";
 
@@ -85,6 +91,11 @@ type Item = Section["items"][number];
  * call `redactWithdrawn` makes in `convex/briefs.ts`, and it has to be the same
  * one, or the client would draw a live citation link and an ontology label
  * around text the server had already replaced.
+ *
+ * Checked here, but not decided here. The check this side can run is blind to
+ * half of a cross-paper line by construction, so the server's verdict arrives
+ * as `item.redacted` and outranks it (`lib/brief/prep.ts`). One redaction
+ * authority, one field, and no sentence-matching in the browser.
  *
  * ## The numbers, and which of them are links
  *
@@ -151,6 +162,22 @@ export function PresenterBrief({
     () => anchoredIds(groupSessionNotes(rows, session._id)),
     [rows, session._id],
   );
+  // Author and page for every note this page holds a row for, so a finding's
+  // citations can be named instead of counted. Built from the same
+  // subscription the board renders — no second query, and nothing in it that
+  // the page was not already showing.
+  const known = useMemo(
+    () =>
+      new Map(
+        rows
+          .filter((row) => row.visibility === "lab" && !row.deleted)
+          .map((row) => [
+            row._id,
+            { authorName: row.authorName, pageIndex: row.anchor.pageIndex },
+          ]),
+      ),
+    [rows],
+  );
 
   // Nobody else's business. The server answers `null` for anyone who is not
   // the presenter or the PI; this is the same rule, applied before the panel
@@ -180,8 +207,16 @@ export function PresenterBrief({
 
   // The running order is one sequence across the stored sections and the two
   // live ones, because that is how it is read.
+  //
+  // Empty sections are left out — an agenda lists what is on it — with one
+  // exception, and the exception is the whole point of the flag: a capped scan
+  // that surfaced nothing looks identical to a complete scan that found
+  // nothing, and only one of those two is a fact about the lab. Dropping the
+  // section here would throw away the sentence `Entry` draws for exactly that
+  // case ("the search stopped at its limit"), so a section whose search ran
+  // out of budget is kept and says so, even with no lines under it.
   const stored = (brief?.sections ?? []).filter(
-    (section) => section.items.length > 0,
+    (section) => section.items.length > 0 || section.crossPaperCapped === true,
   );
   let position = 0;
 
@@ -192,11 +227,7 @@ export function PresenterBrief({
   const numbering = citationNumbering(
     stored.flatMap((section) =>
       section.items.map((item) => ({
-        annotationIds: item.annotationIds.every((id) =>
-          visibleAnnotationIds.has(id),
-        )
-          ? item.annotationIds
-          : [],
+        annotationIds: lineCitations(item, visibleAnnotationIds).cited,
       })),
     ),
   );
@@ -268,6 +299,8 @@ export function PresenterBrief({
                 visibleAnnotationIds={visibleAnnotationIds}
                 numbering={numbering}
                 anchored={anchored}
+                paperId={session.paperId}
+                known={known}
               />
             );
           })}
@@ -440,6 +473,7 @@ function Entry({
   count,
   ink,
   dropped = 0,
+  scanCapped = false,
   children,
 }: {
   position: number;
@@ -447,6 +481,8 @@ function Entry({
   count: number;
   ink: string;
   dropped?: number;
+  /** The search behind this section stopped at its budget. See `BriefSection`. */
+  scanCapped?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -473,6 +509,16 @@ function Entry({
             back.
           </p>
         )}
+        {scanCapped && (
+          // The line above is a count; this one deliberately is not. The whole
+          // point of a capped scan is that the number of lines it never
+          // reached is the one number nobody has, and a section that printed
+          // "+0 more" here would be making the claim the cap exists to refuse.
+          <p className="font-sans text-xs text-ink-faint">
+            The search across other papers stopped at its limit, so there may be
+            more it never got to.
+          </p>
+        )}
       </div>
     </li>
   );
@@ -484,6 +530,8 @@ function BriefSection({
   visibleAnnotationIds,
   numbering,
   anchored,
+  paperId,
+  known,
 }: {
   position: number;
   section: Section;
@@ -492,6 +540,10 @@ function BriefSection({
   numbering: ReadonlyMap<Id<"annotations">, number>;
   /** The notes the board on this page really has an anchor for. */
   anchored: ReadonlySet<string>;
+  /** The paper this session is about, which a finding's citations link into. */
+  paperId: Id<"papers">;
+  /** The notes this page can name, for a finding's citations. */
+  known: ReadonlyMap<Id<"annotations">, KnownNote>;
 }) {
   const ink = SECTION_INK[section.key];
   return (
@@ -505,6 +557,7 @@ function BriefSection({
       count={section.items.length}
       ink={ink}
       dropped={section.droppedCount}
+      scanCapped={section.crossPaperCapped === true}
     >
       <ul className="flex flex-col gap-5">
         {section.items.map((item, index) => (
@@ -515,6 +568,9 @@ function BriefSection({
             visibleAnnotationIds={visibleAnnotationIds}
             numbering={numbering}
             anchored={anchored}
+            paperId={paperId}
+            known={known}
+            scouted={section.key === "carried-over"}
           />
         ))}
       </ul>
@@ -528,19 +584,29 @@ function BriefLine({
   visibleAnnotationIds,
   numbering,
   anchored,
+  paperId,
+  known,
+  scouted,
 }: {
   item: Item;
   ink: string;
   visibleAnnotationIds: ReadonlySet<Id<"annotations">>;
   numbering: ReadonlyMap<Id<"annotations">, number>;
   anchored: ReadonlySet<string>;
+  paperId: Id<"papers">;
+  known: ReadonlyMap<Id<"annotations">, KnownNote>;
+  /** Whether this line's section is the one the scout was pointed at. */
+  scouted: boolean;
 }) {
-  const cited = item.annotationIds.filter((id) => visibleAnnotationIds.has(id));
-  // All or nothing, which is the rule the server applies on the way out. A
-  // collision line is built from both the notes it cites and names both
-  // members, so one of the two going is not a line with a gap in it — it is a
-  // line that is still about somebody who took their note back.
-  const withdrawn = cited.length < item.annotationIds.length;
+  // One rule, two call sites (the registry above folds the same function over
+  // the same lines), and it lives in `lib/` because the interesting half is
+  // the deferral: a cross-paper citation is not on this page's paper, so this
+  // page has no standing to call it withdrawn — and therefore no standing to
+  // call the line live either, which is why the server's `redacted` verdict
+  // goes in with it. A line held back is drawn as its sentence and nothing
+  // else: no label, no numbers.
+  const { withdrawn, cited } = lineCitations(item, visibleAnnotationIds);
+  const firstId = item.annotationIds[0];
   const label = item.pairType === undefined ? undefined : GOLD_PAIRS[item.pairType];
 
   return (
@@ -590,6 +656,18 @@ function BriefLine({
               );
             })}
           </p>
+
+          {/* Only the carried-over lens has subjects: `assembleBrief` builds it
+              from unanswered open questions one id at a time, and
+              `briefs.writeBrief` hands those same ids to `enqueueForBrief`. One
+              definition of "what the scout was pointed at", read twice. */}
+          {scouted && firstId !== undefined && (
+            <ScoutFinding
+              subject={{ kind: "annotation", annotationId: firstId }}
+              paperId={paperId}
+              known={known}
+            />
+          )}
         </>
       )}
     </li>

@@ -67,6 +67,29 @@ const single = (): Section => ({
   ],
 });
 
+/**
+ * A collision whose second half is a note on a *different* paper.
+ *
+ * The shape the panel cannot judge for itself: it subscribes to one paper's
+ * margin, so it has no row for `note(4)` and never will, and treating that
+ * absence as a withdrawal would blank every cross-paper line in the product.
+ * It defers — which leaves this function the only reader that can tell a live
+ * far note from a withdrawn one.
+ */
+const crossPaper = (): Section => ({
+  key: "collisions",
+  heading: "Where the lab collided",
+  droppedCount: 0,
+  items: [
+    {
+      text: "Ana Ruiz hypothesised here what Ben Okafor critiqued in another paper",
+      annotationIds: [note(1), note(4)],
+      pairType: "critique x hypothesis",
+      crossPaperIds: [note(4)],
+    },
+  ],
+});
+
 const shared = (...ids: Id<"annotations">[]) => new Set(ids);
 
 describe("redactWithdrawn", () => {
@@ -127,6 +150,38 @@ describe("redactWithdrawn", () => {
     expect(section?.heading).toBe("Where the lab disagrees");
     expect(section?.droppedCount).toBe(0);
     expect(section?.items).toHaveLength(1);
+  });
+
+  it("redacts a cross-paper line when the far half is the one that went", () => {
+    const [section] = redactWithdrawn([crossPaper()], shared(note(1)));
+    expect(section?.items[0]?.text).toBe(WITHDRAWN_ITEM_TEXT);
+  });
+
+  it("says it held the line back, rather than leaving the text to say it", () => {
+    // The verdict travels as a field because this is the only place it can be
+    // reached. On a far-withdrawn line every citation the panel can see is
+    // still live, so a client re-running the rule concludes the line stands
+    // and draws the gold-pair label and the citation numbers around a sentence
+    // that says the notes are gone. A redacted line shows its sentence and
+    // nothing else, and this is what lets the panel know which it has.
+    const [section] = redactWithdrawn([crossPaper()], shared(note(1)));
+    expect(section?.items[0]?.redacted).toBe(true);
+  });
+
+  it("says nothing about a line that stands, so absent means live", () => {
+    const [section] = redactWithdrawn([crossPaper()], shared(note(1), note(4)));
+    expect(section?.items[0]?.text).toBe(crossPaper().items[0]?.text);
+    expect(section?.items[0]?.redacted).toBeUndefined();
+  });
+
+  it("marks a same-paper line it redacted too — one verdict, one field", () => {
+    const [section] = redactWithdrawn([collision()], shared(note(1)));
+    expect(section?.items[0]?.redacted).toBe(true);
+  });
+
+  it("keeps the far citations on a redacted cross-paper line", () => {
+    const [section] = redactWithdrawn([crossPaper()], shared(note(1)));
+    expect(section?.items[0]?.crossPaperIds).toEqual([note(4)]);
   });
 
   it("does not mutate the row it was handed", () => {
@@ -223,5 +278,74 @@ describe("the scout rides the brief", () => {
     expect(
       ctx.scheduled.filter((call) => call.name.includes("enqueueForBrief")),
     ).toEqual([]);
+  });
+});
+
+describe("the brief past the paper boundary", () => {
+  it("draws a line between two papers and marks the far citation", async () => {
+    const ctx = new FakeCtx();
+    const seed = await seedLab(ctx);
+    const claim =
+      "data were collected from two independent cohorts under identical conditions";
+    const other = await ctx.db.insert("papers", {
+      labId: seed.labId,
+      title: "The other one",
+      addedBy: seed.pi,
+      ingestStatus: "ready",
+    });
+    await seedAnnotation(ctx, { ...seed, memberId: seed.pi }, {
+      type: "hypothesis",
+      quote: claim,
+    });
+    await seedAnnotation(ctx, { ...seed, memberId: seed.member }, {
+      type: "critique",
+      paperId: other,
+      quote: claim,
+    });
+
+    ctx.auth = { userId: seed.pi };
+    await handlerOf(generate)(ctx, { sessionId: seed.sessionId } as never);
+
+    const brief = rowAt(ctx.db.all("briefs"));
+    const line = brief.sections
+      .find((s) => s.key === "collisions")
+      ?.items.find((item) => item.crossPaperIds !== undefined);
+    expect(line?.text).toContain("The other one");
+    expect(line?.crossPaperIds).toHaveLength(1);
+  });
+});
+
+describe("what the boundary lift costs", () => {
+  it("reads twelve neighbours at most, however many papers the lab has", async () => {
+    // `CROSS_PAPER_PAPERS` is a promise about how many documents one press of
+    // the button reads, and the papers query takes thirteen so it can afford
+    // to skip this meeting's own paper. When this paper is older than all
+    // thirteen the skip never fires — so the loop has to stop itself, or the
+    // budget is 1,950 rows rather than the 1,800 it says.
+    const ctx = new FakeCtx();
+    const seed = await seedLab(ctx);
+    for (let i = 0; i < 14; i++) {
+      const other = await ctx.db.insert("papers", {
+        labId: seed.labId,
+        title: `Neighbour ${i}`,
+        addedBy: seed.pi,
+        ingestStatus: "ready",
+      });
+      await seedAnnotation(
+        ctx,
+        { ...seed, memberId: seed.member },
+        { paperId: other, type: "critique" },
+      );
+    }
+
+    ctx.auth = { userId: seed.pi };
+    await handlerOf(generate)(ctx, { sessionId: seed.sessionId } as never);
+
+    // One read for this paper's own pool, twelve for the neighbours.
+    expect(
+      ctx.db.reads.filter(
+        (read) => read.index === "by_paper_and_visibility",
+      ),
+    ).toHaveLength(1 + 12);
   });
 });

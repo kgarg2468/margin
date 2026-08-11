@@ -929,6 +929,12 @@ export const eventDoc = v.union(
     sessionId: v.id("sessions"),
     actionId: v.id("actions"),
     kind: actionKind,
+    /**
+     * What informed it, when a scout's report did. An id and nothing else —
+     * the ledger carries no prose, least of all a machine's paraphrase of
+     * notes whose authors can un-share them tomorrow.
+     */
+    findingId: v.optional(v.id("findings")),
   }),
   /**
    * And back open, because the answer didn't hold.
@@ -1951,6 +1957,19 @@ export default defineSchema({
      */
     settledAt: v.optional(v.number()),
     settledBy: v.optional(v.id("users")),
+    /**
+     * The scout's report a human had in front of them when they settled it.
+     *
+     * Provenance, not authority: a machine still settles nothing (§3.2), and
+     * this field changes no permission and no outcome. What it buys is the
+     * question a lab asks itself six months later — *why did we decide that* —
+     * having an answer that survives the reasoning being forgotten.
+     *
+     * Cleared on reopen. A question that came back open is not a question that
+     * was settled with a report; the ledger keeps both events, which is where
+     * a walk between states is supposed to live.
+     */
+    settledWithFindingId: v.optional(v.id("findings")),
   })
     .index("by_session", ["sessionId"])
     /** The carry-forward read: one paper's outcomes, newest first. */
@@ -2142,6 +2161,18 @@ export default defineSchema({
         heading: v.string(),
         /** Candidates the per-section cap held back, so the panel can say so. */
         droppedCount: v.number(),
+        /**
+         * True when the cross-paper scan behind this section ran out of
+         * comparison budget before it ran out of candidates.
+         *
+         * The collisions section only, and optional in both senses: rows
+         * written before the boundary lift have no opinion on it, and a scan
+         * that finished simply omits it. `droppedCount` counts lines that were
+         * found and did not fit; this is the count that cannot be taken —
+         * without it a section fed by a truncated search is indistinguishable
+         * from a finished one. See `lib/brief/assemble.ts`.
+         */
+        crossPaperCapped: v.optional(v.boolean()),
         items: v.array(
           v.object({
             text: v.string(),
@@ -2151,14 +2182,24 @@ export default defineSchema({
              * Never empty. Every line in a brief is a rearrangement of notes
              * the lab wrote, so a line that cited nothing would be the one
              * thing this feature exists to refuse — and `briefs.getForSession`
-             * re-resolves each id on read and redacts a line whose notes have
-             * all been withdrawn, the same discipline `synthesis.getForSession`
-             * applies. A stored citation is a claim about a row, and a claim is
-             * worth re-reading.
+             * re-resolves each id on read and redacts the line as soon as
+             * *any* one of them stops being shared, which is stricter than the
+             * discipline `synthesis.getForSession` applies to a paraphrase. A
+             * stored citation is a claim about a row, and a claim is worth
+             * re-reading.
              */
             annotationIds: v.array(v.id("annotations")),
             /** The gold matrix cell, on collision lines only. */
             pairType: v.optional(v.string()),
+            /**
+             * Which of this line's citations sit on another paper.
+             *
+             * Cross-paper collision lines only. Stored rather than re-derived,
+             * because the reader that needs it — the presenter's panel — has
+             * one paper's margin and no way to ask which document a foreign id
+             * belongs to. See `lib/brief/assemble.ts`.
+             */
+            crossPaperIds: v.optional(v.array(v.id("annotations"))),
             /**
              * Which earlier session left this open, and when it was held — on
              * carried-over lines only. An epoch number, not a formatted date:

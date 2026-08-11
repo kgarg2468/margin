@@ -174,3 +174,52 @@ export function ownPrivateNotes<A extends string, U extends string>(
     )
     .sort((x, y) => x.anchor.pageIndex - y.anchor.pageIndex);
 }
+
+/**
+ * Which of a line's citations this page may judge, and what it concludes.
+ *
+ * The panel re-applies the server's redaction threshold against what *this*
+ * reader can currently see, so one check is one place to be wrong. That works
+ * because a brief line's citations are on the paper the page has subscribed
+ * to — with one exception, which is why this function exists: a cross-paper
+ * collision cites a note in another document, the subscription has no row for
+ * it, and "no row" would otherwise be read as "withdrawn".
+ *
+ * So the local test runs over the near citations only, and stays
+ * all-or-nothing over them: a collision line names both members and quotes
+ * each, and there is no version of it with one member removed that is still a
+ * true sentence. The far citation is deferred to the server, which re-resolved
+ * it against the *lab* rather than the paper (`stillSharedAmong`) — the check
+ * that was always the one of record.
+ *
+ * Which is exactly why the server's own verdict is read first. Deferral makes
+ * this side blind on purpose, and a line whose *far* half was withdrawn passes
+ * the local test with nothing to object to: every near citation is still
+ * there, so the panel would declare the line live and draw its gold-pair label
+ * and its citation numbers around text the server had already replaced with
+ * the redaction sentence. `redacted` is that server verdict as a field
+ * (`convex/briefs.ts`), not as prose to be recognised — this side never
+ * re-derives redaction from what a line says, because a client that decided by
+ * matching a sentence would be one copy-edit away from showing a withdrawn
+ * member's name again.
+ */
+export function lineCitations<A extends string>(
+  item: {
+    annotationIds: readonly A[];
+    crossPaperIds?: readonly A[];
+    /** The server held this line back. Absent means it stands. */
+    redacted?: boolean;
+  },
+  visible: ReadonlySet<A>,
+): { withdrawn: boolean; cited: A[] } {
+  const far = new Set<A>(item.crossPaperIds ?? []);
+  const withdrawn =
+    item.redacted === true ||
+    item.annotationIds.some((id) => !far.has(id) && !visible.has(id));
+  return {
+    withdrawn,
+    cited: withdrawn
+      ? []
+      : item.annotationIds.filter((id) => far.has(id) || visible.has(id)),
+  };
+}

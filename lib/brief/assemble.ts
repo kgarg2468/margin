@@ -34,15 +34,24 @@
  * 4. **What drew a crowd?** — critiques and method notes with the most replies.
  *    A thread the lab already argued in is a thread worth reopening out loud.
  *
- * ## What is deliberately not here
+ * ## What was deliberately not here, and now is
  *
- * No cross-paper anything: `detectCollisions` stops at the paper boundary and
- * this does not reach past it (that boundary is Phase 2's to lift). No per-item
- * dedupe against the collisions section either — a "possible answer" collision
- * is *definition × open-question*, so the open question inside it belongs in
- * both places, and hiding the second copy would cost the presenter the link
- * between them. The digest dedupes because five lines is a hard budget; a brief
- * is a page someone reads on purpose.
+ * Cross-paper collisions. `detectCollisions` still stops at the paper boundary
+ * and always will — a collision inside one document is a *passage*, and a
+ * passage has no meaning across two files. The second detector is the one that
+ * crosses (`detectCrossPaperCollisions`, shipped for the digest in #56): same
+ * claim, two papers, two members, gold type pair, and a sixty-character floor
+ * so a methods boilerplate sentence cannot link two literatures. It arrives
+ * here as an argument rather than as a call, because a pool spanning papers is
+ * not on its own a request to pair across them — the same rule `assembleDigest`
+ * follows.
+ *
+ * What is still deliberately not here: no per-item dedupe against the
+ * collisions section — a "possible answer" collision is *definition ×
+ * open-question*, so the open question inside it belongs in both places, and
+ * hiding the second copy would cost the presenter the link between them. The
+ * digest dedupes because five lines is a hard budget; a brief is a page someone
+ * reads on purpose.
  */
 
 import {
@@ -50,6 +59,7 @@ import {
   collisionLine,
   type AnnotationType,
   type Collision,
+  type CrossPaperScan,
   type DigestAnnotation,
 } from "../digest/engine";
 
@@ -90,13 +100,29 @@ export type BriefItem<
    * The annotations this line was built from.
    *
    * The whole provenance contract in one field: `convex/briefs.ts` re-resolves
-   * every id on read and redacts a line whose notes have all been withdrawn,
-   * exactly as `getForSession` does for a synthesis. A line that cited nothing
-   * could not be checked and is never produced.
+   * every id on read and holds the line back the moment *any* one of them has
+   * been withdrawn — stricter than the synthesis, which keeps a partly
+   * withdrawn item and drops its attribution, because a brief line names its
+   * members and quotes them and there is no true shorter version of it. A line
+   * that cited nothing could not be checked and is never produced.
    */
   annotationIds: AnnotationId[];
   /** The gold matrix cell, on collision items only — e.g. `"critique x hypothesis"`. */
   pairType?: string;
+  /**
+   * The citations on this line that live on a *different* paper.
+   *
+   * On cross-paper collision items only, and the whole reason the field
+   * exists: the panel re-checks a line against the margin it has subscribed
+   * to, which is this paper's. A far citation is not in that margin and never
+   * will be, so without this the client's "is every note behind this line
+   * still shared?" test reads a perfectly live note as a withdrawn one and
+   * holds the line back — silently deleting exactly the lines this boundary
+   * lift exists to draw. The server's check is lab-wide and stands
+   * (`convex/briefs.ts`); this says which citations the browser must leave
+   * to it.
+   */
+  crossPaperIds?: AnnotationId[];
   /**
    * Which earlier session left this open, on carried-over items only, and when
    * that meeting was.
@@ -121,6 +147,24 @@ export type BriefSection<
   items: BriefItem<AnnotationId, SessionId>[];
   /** Candidates the cap kept out, so the panel can say so instead of pretending. */
   droppedCount: number;
+  /**
+   * True when the cross-paper scan behind this section stopped at its
+   * comparison budget instead of at the end of its candidates.
+   *
+   * The collisions section only, and it is `droppedCount`'s other half rather
+   * than a detail: that number counts lines this function *saw* and had no
+   * room for, and it is silent about lines the search never reached. A capped
+   * scan and a complete one otherwise produce the same shaped section, so
+   * without this a section fed by a truncated search reads as a finished one —
+   * which is the failure `CrossPaperScan.capped` exists to prevent
+   * (`lib/digest/engine.ts`), carried the last step to a reader.
+   *
+   * Set only when true. Absent and `false` mean the same thing, the stored
+   * field has to be optional anyway (rows written before this have no opinion
+   * on it), and one representation of one fact is what keeps the panel's test
+   * a single comparison.
+   */
+  crossPaperCapped?: boolean;
 };
 
 /**
@@ -252,8 +296,8 @@ export type AssembledBrief<
  * - `priorSessions` maps each session on this same paper that already happened
  *   to when it was held. An open question written under one of those and never
  *   replied to is the carried-over section; the same question written under
- *   this session, or under none, is ordinary prep. Cross-*paper* memory is
- *   Phase 2 and this function cannot see past its pool.
+ *   this session, or under none, is ordinary prep. Carrying a question over
+ *   from a *different* paper is a different feature and not this one.
  * - `collisions`, when supplied, is a precomputed `detectCollisions(pool)`.
  *
  * A private annotation must never appear in `pool`. The brief is stored and
@@ -269,10 +313,25 @@ export function assembleBrief<
   S extends string,
 >(input: {
   pool: readonly BriefAnnotation<P, A, U, S>[];
+  /** The paper this meeting is about. The near side of every line below. */
+  paperId: P;
   paperTitle: string;
   /** Sessions on this paper that are already behind the lab, and when each was held. */
   priorSessions: ReadonlyMap<S, number>;
   collisions?: readonly Collision<P, A, U>[];
+  /**
+   * A cross-paper scan, and the titles to print it with.
+   *
+   * One field rather than two, because a scan without titles is not a weaker
+   * version of this — it is a line that names one document and cites two, and
+   * a reader sent to the wrong paper for half the evidence reads it as the
+   * product being wrong about its own record. The type makes the pair
+   * inseparable.
+   */
+  crossPaper?: {
+    scan: CrossPaperScan<P, A, U>;
+    paperTitles: ReadonlyMap<P, string>;
+  };
   cap?: number;
 }): AssembledBrief<A, S> {
   const cap = input.cap ?? MAX_SECTION_ITEMS;
@@ -288,6 +347,46 @@ export function assembleBrief<
     annotationIds: [collision.a.id, collision.b.id],
     pairType: collision.pairType,
   }));
+
+  // --- 1b. Collisions that cross a paper ----------------------------------
+  // Ranked strictly below every same-paper line, which is `byPairRank`'s rule
+  // in `lib/digest/engine.ts` — copied as an ordering here rather than
+  // imported, because this concatenates two already-sorted lists instead of
+  // re-sorting one. Scope outranks recency on purpose: the six lines a
+  // presenter reads must never fill up with quote matches while two people's
+  // notes on the same passage of *this* paper go unmentioned.
+  const titleOf = (paperId: P): string | undefined =>
+    paperId === input.paperId
+      ? input.paperTitle
+      : input.crossPaper?.paperTitles.get(paperId);
+
+  const crossItems: BriefItem<A, S>[] = (
+    input.crossPaper?.scan.collisions ?? []
+  ).flatMap((collision) => {
+    // `a` and `b`, not near and far: this pair of titles is only ever handed
+    // to `collisionLine`, which prints them in the collision's own order.
+    const aTitle = titleOf(collision.a.paperId);
+    const bTitle = titleOf(collision.b.paperId);
+    // Exactly one side on this meeting's paper. A pair between two *other*
+    // papers is a real fact and belongs in a digest, not on the agenda for a
+    // meeting about neither of them.
+    const touches =
+      (collision.a.paperId === input.paperId) !==
+      (collision.b.paperId === input.paperId);
+    if (!touches || aTitle === undefined || bTitle === undefined) {
+      return [];
+    }
+    const far =
+      collision.a.paperId === input.paperId ? collision.b : collision.a;
+    return [
+      {
+        text: collisionLine(collision, NOBODY, aTitle, bTitle),
+        annotationIds: [collision.a.id, collision.b.id],
+        pairType: collision.pairType,
+        crossPaperIds: [far.id],
+      },
+    ];
+  });
 
   // --- 2 & 3. Open questions, split by whether the lab has already met on them
   const unanswered = topLevel.filter(
@@ -327,7 +426,17 @@ export function assembleBrief<
     });
 
   const sections: BriefSection<A, S>[] = [
-    section<A, S>("collisions", collisionItems, cap),
+    {
+      ...section<A, S>("collisions", [...collisionItems, ...crossItems], cap),
+      // Carried on the section rather than on the brief, which is where the
+      // digest keeps the same flag (`AssembledDigest.crossPaperCapped`): a
+      // digest is one flat list, and a brief has four sections of which
+      // exactly one was fed by the scan. A brief-level flag would be a claim
+      // the floor and the open questions have no part in.
+      ...(input.crossPaper?.scan.capped === true
+        ? { crossPaperCapped: true }
+        : {}),
+    },
     section<A, S>(
       "open-questions",
       fresh.map((a) => ({ text: noteLine(a), annotationIds: [a.id] })),

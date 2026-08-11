@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { detectCollisions } from "../digest/engine";
+import { detectCollisions, detectCrossPaperCollisions } from "../digest/engine";
 import {
   assembleBrief,
   noteLine,
@@ -38,6 +38,15 @@ function ann(
 
 const PAPER = "Attention Is All You Need";
 
+/**
+ * A sentence long enough to be a claim rather than boilerplate.
+ *
+ * Over `MIN_CROSS_PAPER_QUOTE_CHARS`, which is what lets the cross-paper
+ * detector pair it; the fixture's default quote is deliberately under it.
+ */
+const CLAIM =
+  "data were collected from two independent cohorts under identical conditions";
+
 /** Prior sessions are given as `id` → when they were held. */
 function brief(
   pool: readonly BriefAnnotation[],
@@ -46,6 +55,7 @@ function brief(
 ) {
   return assembleBrief({
     pool,
+    paperId: "p1",
     paperTitle: PAPER,
     priorSessions: new Map(prior.map((id, index) => [id, 500 + index])),
     ...(cap === undefined ? {} : { cap }),
@@ -150,15 +160,6 @@ describe("collisions", () => {
     expect(sectionOf(brief(pool), "collisions").items).toEqual([]);
   });
 
-  it("does not reach across the paper boundary", () => {
-    // Phase 2 lifts this; today a brief is about one paper and says so.
-    const pool = [
-      ann({ memberId: "ana", type: "hypothesis", paperId: "p1" }),
-      ann({ memberId: "ben", type: "critique", paperId: "p2", quote: "different text entirely" }),
-    ];
-    expect(sectionOf(brief(pool), "collisions").items).toEqual([]);
-  });
-
   it("accepts a precomputed detection pass and agrees with its own", () => {
     const pool = [
       ann({ memberId: "ana", type: "hypothesis" }),
@@ -166,6 +167,7 @@ describe("collisions", () => {
     ];
     const precomputed = assembleBrief({
       pool,
+      paperId: "p1",
       paperTitle: PAPER,
       priorSessions: new Map<string, number>(),
       collisions: detectCollisions(pool),
@@ -173,6 +175,181 @@ describe("collisions", () => {
     expect(sectionOf(precomputed, "collisions").items).toEqual(
       sectionOf(brief(pool), "collisions").items,
     );
+  });
+});
+
+describe("the paper boundary", () => {
+  it("does not reach across it when no scan is supplied", () => {
+    const pool = [
+      ann({ memberId: "ana", type: "hypothesis", paperId: "p1", quote: CLAIM }),
+      ann({ memberId: "ben", type: "critique", paperId: "p2", quote: CLAIM }),
+    ];
+    const assembled = assembleBrief({
+      pool,
+      paperId: "p1",
+      paperTitle: "This paper",
+      priorSessions: new Map(),
+    });
+    expect(sectionOf(assembled, "collisions").items).toEqual([]);
+  });
+
+  it("draws a cross-paper line when one is", () => {
+    const pool = [
+      ann({ memberId: "ana", type: "hypothesis", paperId: "p1", quote: CLAIM }),
+      ann({ memberId: "ben", type: "critique", paperId: "p2", quote: CLAIM }),
+    ];
+    const assembled = assembleBrief({
+      pool,
+      paperId: "p1",
+      paperTitle: "This paper",
+      priorSessions: new Map(),
+      crossPaper: {
+        scan: detectCrossPaperCollisions(pool),
+        paperTitles: new Map([
+          ["p1", "This paper"],
+          ["p2", "The other one"],
+        ]),
+      },
+    });
+    const [item] = sectionOf(assembled, "collisions").items;
+    expect(item?.text).toContain("across This paper");
+    expect(item?.text).toContain("and The other one");
+    expect(item?.annotationIds).toHaveLength(2);
+  });
+
+  it("marks the far half, so a client can tell it from a withdrawal", () => {
+    const near = ann({ memberId: "ana", type: "hypothesis", paperId: "p1", quote: CLAIM });
+    const far = ann({ memberId: "ben", type: "critique", paperId: "p2", quote: CLAIM });
+    const assembled = assembleBrief({
+      pool: [near, far],
+      paperId: "p1",
+      paperTitle: "This paper",
+      priorSessions: new Map(),
+      crossPaper: {
+        scan: detectCrossPaperCollisions([near, far]),
+        paperTitles: new Map([["p1", "This paper"], ["p2", "The other one"]]),
+      },
+    });
+    expect(sectionOf(assembled, "collisions").items[0]?.crossPaperIds).toEqual([
+      far.id,
+    ]);
+  });
+
+  it("drops a pair that touches neither side of this meeting's paper", () => {
+    // Two other papers arguing with each other is somebody else's agenda.
+    const a = ann({ memberId: "ana", type: "hypothesis", paperId: "p2", quote: CLAIM });
+    const b = ann({ memberId: "ben", type: "critique", paperId: "p3", quote: CLAIM });
+    const assembled = assembleBrief({
+      pool: [a, b],
+      paperId: "p1",
+      paperTitle: "This paper",
+      priorSessions: new Map(),
+      crossPaper: {
+        scan: detectCrossPaperCollisions([a, b]),
+        paperTitles: new Map([["p2", "Second"], ["p3", "Third"]]),
+      },
+    });
+    expect(sectionOf(assembled, "collisions").items).toEqual([]);
+  });
+
+  it("drops a line whose far paper has no title to print", () => {
+    const near = ann({ memberId: "ana", type: "hypothesis", paperId: "p1", quote: CLAIM });
+    const far = ann({ memberId: "ben", type: "critique", paperId: "p2", quote: CLAIM });
+    const assembled = assembleBrief({
+      pool: [near, far],
+      paperId: "p1",
+      paperTitle: "This paper",
+      priorSessions: new Map(),
+      crossPaper: {
+        scan: detectCrossPaperCollisions([near, far]),
+        paperTitles: new Map([["p1", "This paper"]]),
+      },
+    });
+    expect(sectionOf(assembled, "collisions").items).toEqual([]);
+  });
+
+  it("puts every same-paper line ahead of every cross-paper one", () => {
+    const same = [
+      ann({ memberId: "ana", type: "hypothesis", paperId: "p1", start: 0, end: 40 }),
+      ann({ memberId: "ben", type: "critique", paperId: "p1", start: 10, end: 50 }),
+    ];
+    const across = ann({ memberId: "cara", type: "critique", paperId: "p2", quote: CLAIM });
+    const near = ann({ memberId: "ana", type: "hypothesis", paperId: "p1", quote: CLAIM });
+    const pool = [...same, across, near];
+    const assembled = assembleBrief({
+      pool,
+      paperId: "p1",
+      paperTitle: "This paper",
+      priorSessions: new Map(),
+      crossPaper: {
+        scan: detectCrossPaperCollisions(pool),
+        paperTitles: new Map([["p1", "This paper"], ["p2", "The other one"]]),
+      },
+    });
+    const items = sectionOf(assembled, "collisions").items;
+    expect(items[0]?.crossPaperIds).toBeUndefined();
+    expect(items.at(-1)?.crossPaperIds).toHaveLength(1);
+  });
+
+  it("says so when the scan stopped at its budget rather than at its candidates", () => {
+    // The defect this guards: a capped scan and a complete one produce the
+    // same *kind* of section, so a section that carries only `droppedCount`
+    // claims nothing was omitted while the search that fed it was cut short.
+    // A budget of zero comparisons is the sharpest version — no lines at all,
+    // and the section must still not read as "there were none".
+    const near = ann({ memberId: "ana", type: "hypothesis", paperId: "p1", quote: CLAIM });
+    const far = ann({ memberId: "ben", type: "critique", paperId: "p2", quote: CLAIM });
+    const assembled = assembleBrief({
+      pool: [near, far],
+      paperId: "p1",
+      paperTitle: "This paper",
+      priorSessions: new Map(),
+      crossPaper: {
+        scan: detectCrossPaperCollisions([near, far], 0),
+        paperTitles: new Map([["p1", "This paper"], ["p2", "The other one"]]),
+      },
+    });
+    const collisions = sectionOf(assembled, "collisions");
+    expect(collisions.items).toEqual([]);
+    expect(collisions.crossPaperCapped).toBe(true);
+  });
+
+  it("leaves the mark off a scan that ran to the end of its candidates", () => {
+    const near = ann({ memberId: "ana", type: "hypothesis", paperId: "p1", quote: CLAIM });
+    const far = ann({ memberId: "ben", type: "critique", paperId: "p2", quote: CLAIM });
+    const assembled = assembleBrief({
+      pool: [near, far],
+      paperId: "p1",
+      paperTitle: "This paper",
+      priorSessions: new Map(),
+      crossPaper: {
+        scan: detectCrossPaperCollisions([near, far]),
+        paperTitles: new Map([["p1", "This paper"], ["p2", "The other one"]]),
+      },
+    });
+    expect(sectionOf(assembled, "collisions").crossPaperCapped).toBeUndefined();
+  });
+
+  it("leaves the mark off every section a cross-paper scan cannot explain", () => {
+    // Only the collisions section is fed by the scan. A capped mark on the
+    // floor would be a claim about a search that never ran over it.
+    const near = ann({ memberId: "ana", type: "hypothesis", paperId: "p1", quote: CLAIM });
+    const far = ann({ memberId: "ben", type: "critique", paperId: "p2", quote: CLAIM });
+    const assembled = assembleBrief({
+      pool: [near, far],
+      paperId: "p1",
+      paperTitle: "This paper",
+      priorSessions: new Map(),
+      crossPaper: {
+        scan: detectCrossPaperCollisions([near, far], 0),
+        paperTitles: new Map([["p1", "This paper"], ["p2", "The other one"]]),
+      },
+    });
+    expect(
+      assembled.sections
+        .filter((one) => one.key !== "collisions")
+        .map((one) => one.crossPaperCapped),
+    ).toEqual([undefined, undefined, undefined]);
   });
 });
 

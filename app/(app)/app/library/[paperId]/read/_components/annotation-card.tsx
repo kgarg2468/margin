@@ -7,7 +7,7 @@ import { versionSummary } from "@/lib/annotation-history/history";
 import { collectMentionedIds } from "@/lib/mentions";
 import { errorClass } from "@/lib/ui";
 import { useMutation } from "convex/react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AnnotationHistory } from "./annotation-history";
 import { StatusControl, StatusLine } from "./epistemic-status";
 import type { PickedMention } from "./mention-field";
@@ -79,6 +79,7 @@ export function AnnotationCard({
   active,
   onActivate,
   registerElement,
+  seedReply,
 }: {
   annotation: AnnotationView;
   replies: AnnotationView[];
@@ -89,6 +90,8 @@ export function AnnotationCard({
   active: boolean;
   onActivate: (id: AnnotationId | null) => void;
   registerElement?: (id: AnnotationId, element: HTMLElement | null) => void;
+  /** Pointers to open the reply composer on, for somebody who came here to answer. */
+  seedReply?: string;
 }) {
   const style = typeStyle(annotation.type);
   const anchoring = anchorNote(anchorState, orphaned);
@@ -107,6 +110,16 @@ export function AnnotationCard({
   const [replyPicked, setReplyPicked] = useState<PickedMention[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // Somebody arrived here to answer this, with the notes a scout cited already
+  // in front of them. The composer opens once, on the pointers and none of the
+  // machine's prose (`lib/scout/adopt.ts`); everything typed after this is
+  // theirs.
+  useEffect(() => {
+    if (seedReply === undefined) return;
+    setReplying(true);
+    setReplyBody((current) => (current.length === 0 ? seedReply : current));
+  }, [seedReply]);
 
   const replyMentions = collectMentionedIds(replyBody, replyPicked);
 

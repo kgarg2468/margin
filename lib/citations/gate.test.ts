@@ -140,4 +140,18 @@ describe("gateItems", () => {
     expect(gateItems({ items: [] }, resolve, limits)).toBeNull();
     expect(gateItems(undefined, resolve, limits)).toBeNull();
   });
+
+  it("drops an item whose label is too long to have been issued", () => {
+    // Not a length rule: `A12345` resolves to nothing, and an item citing
+    // something nobody minted is dropped whole. Before the grammar was closed
+    // this item survived with the reference still in its text.
+    const gated = gateItems(
+      [{ text: "the cohorts diverge [A12345]", citations: ["A1"] }],
+      (label) => (label === "A1" ? { id: "ann_1", paperId: "p1" } : undefined),
+      { maxItems: 6, maxChars: 600 },
+    );
+    expect(gated).not.toBeNull();
+    expect(gated?.items).toEqual([]);
+    expect(gated?.droppedForCitation).toBe(1);
+  });
 });

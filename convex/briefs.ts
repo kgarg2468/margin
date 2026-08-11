@@ -16,6 +16,7 @@ import { canApprove } from "./sessions";
 import { WITHDRAWN_ITEM_TEXT } from "./synthesis";
 import { assembleBrief, type BriefAnnotation } from "../lib/brief/assemble";
 import { redactWhenAnyWithdrawn } from "../lib/citations/redaction";
+import { detectCrossPaperCollisions } from "../lib/digest/engine";
 import { isStillShared } from "../lib/citations/visibility";
 
 /**
@@ -43,8 +44,11 @@ import { isStillShared } from "../lib/citations/visibility";
  *
  * A stored citation is a claim about a row, and the margin moves underneath it:
  * notes get withdrawn and members flip one back to private. So `getForSession`
- * re-resolves every cited id on read and redacts a line whose notes have all
- * gone, using the same `isStillShared` predicate every other surface applies
+ * re-resolves every cited id on read and redacts a line the moment *any* one
+ * of its notes has gone — whole-item redaction, the stricter of this
+ * codebase's two rules (`lib/citations/redaction.ts`), because a brief line is
+ * the notes themselves and not a paraphrase of them. It uses the same
+ * `isStillShared` predicate every other surface applies
  * (`lib/citations/visibility.ts`) — imported rather than restated, because a
  * privacy rule with two definitions has one that is out of date.
  *
@@ -79,6 +83,25 @@ import { isStillShared } from "../lib/citations/visibility";
 const POOL_LIMIT = 1000;
 
 /**
+ * How far past this paper one assembly looks, and how much of each neighbour
+ * it reads.
+ *
+ * A brief is built in a mutation that must stay instant — the presenter's
+ * button is a transaction, not a job — so the boundary lift is bought with a
+ * fixed read budget rather than with "every paper the lab has". Twelve
+ * neighbours at 150 rows is 1,800 documents on top of this paper's 1,000: a
+ * fifth of the transaction ceiling, for a lab with a reading list longer than
+ * anyone's memory of it. Newest papers first, because a cross-paper collision
+ * is only interesting while both halves are live reading.
+ *
+ * The pairing itself is bounded separately and reports when it ran out:
+ * `MAX_CROSS_PAPER_COMPARISONS` and `CrossPaperScan.capped`
+ * (`lib/digest/engine.ts`).
+ */
+const CROSS_PAPER_PAPERS = 12;
+const CROSS_PAPER_POOL_LIMIT = 150;
+
+/**
  * How many earlier meetings on this paper the carried-over section reaches
  * back through. A lab that has read one paper across twenty sessions has a
  * different problem than this feature solves.
@@ -93,6 +116,27 @@ const briefItem = v.object({
   text: v.string(),
   annotationIds: v.array(v.id("annotations")),
   pairType: v.optional(v.string()),
+  /** See the schema — the far half of a cross-paper line. */
+  crossPaperIds: v.optional(v.array(v.id("annotations"))),
+  /**
+   * This read's own verdict: the line was held back, and its `text` is the
+   * marker rather than the lab's writing.
+   *
+   * Computed on the way out and never stored — the row is not redacted, the
+   * *answer* is. It exists because the client cannot reach the verdict on its
+   * own: a cross-paper line cites a note on a paper the panel has no
+   * subscription to, so a browser re-running the redaction test sees "not in
+   * my rows" for a note that may be perfectly live or long withdrawn, and has
+   * to defer (`lib/brief/prep.ts`). Deferring on the id while trusting the
+   * text is how a redacted line comes to be drawn with its gold-pair label and
+   * its citation numbers around a sentence saying the notes are gone. So the
+   * server says so in a field, rather than leaving a reader to infer it from
+   * prose it would have to match by hand.
+   *
+   * Set only when true, the way `crossPaperCapped` is: absent means the line
+   * stands, which is the same thing `false` would mean.
+   */
+  redacted: v.optional(v.boolean()),
   fromSessionId: v.optional(v.id("sessions")),
   fromSessionAt: v.optional(v.number()),
 });
@@ -101,6 +145,8 @@ const briefSection = v.object({
   key: briefSectionKey,
   heading: v.string(),
   droppedCount: v.number(),
+  /** See the schema — the cross-paper scan behind this section was cut short. */
+  crossPaperCapped: v.optional(v.boolean()),
   items: v.array(briefItem),
 });
 
@@ -269,10 +315,92 @@ async function writeBrief(
     ...(a.sessionId === undefined ? {} : { sessionId: a.sessionId }),
   }));
 
+  // The one boundary a brief may see past.
+  //
+  // `detectCollisions` stops inside a document because a collision is a
+  // passage; the second detector (#56, shipped for the digest) crosses on an
+  // identical claim of at least sixty characters between two members writing a
+  // gold type pair. A session's prep used to have nothing to pair across
+  // because its pool was one paper — so this reads the neighbours, and reads
+  // them exactly the way the pool above was read: privacy is the index,
+  // `by_paper_and_visibility` at "lab", which cannot return a private row.
+  const paperTitles = new Map<Id<"papers">, string>([[paper._id, paper.title]]);
+  const neighbours = await ctx.db
+    .query("papers")
+    .withIndex("by_lab", (q) => q.eq("labId", session.labId))
+    .order("desc")
+    .take(CROSS_PAPER_PAPERS + 1);
+
+  const across: BriefAnnotation<
+    Id<"papers">,
+    Id<"annotations">,
+    Id<"users">,
+    Id<"sessions">
+  >[] = [];
+  let neighboursRead = 0;
+  for (const other of neighbours) {
+    if (other._id === session.paperId) {
+      continue;
+    }
+    // The query above takes one paper more than the budget so it can afford to
+    // spend one on this meeting's own. When this paper is *older* than all
+    // thirteen it comes back in none of them, the skip above never fires, and
+    // the spare would be read as a thirteenth neighbour — 1,950 rows against a
+    // budget that says 1,800. The bound is a promise about reads, so it is
+    // counted here rather than inferred from the `take`.
+    if (neighboursRead >= CROSS_PAPER_PAPERS) {
+      break;
+    }
+    neighboursRead += 1;
+    const rows = await ctx.db
+      .query("annotations")
+      .withIndex("by_paper_and_visibility", (q) =>
+        q.eq("paperId", other._id).eq("visibility", "lab"),
+      )
+      .order("desc")
+      .take(CROSS_PAPER_POOL_LIMIT);
+    const liveRows = rows.filter((a) => a.deletedAt === undefined);
+    if (liveRows.length === 0) {
+      continue;
+    }
+    paperTitles.set(other._id, other.title);
+    for (const authorId of new Set(liveRows.map((a) => a.memberId))) {
+      if (names.has(authorId)) continue;
+      const user = await ctx.db.get(authorId);
+      names.set(authorId, user?.name ?? user?.email ?? "A lab member");
+    }
+    for (const a of liveRows) {
+      across.push({
+        id: a._id,
+        paperId: a.paperId,
+        memberId: a.memberId,
+        memberName: names.get(a.memberId) ?? "A lab member",
+        type: a.type,
+        pageIndex: a.anchor.pageIndex,
+        start: a.anchor.start,
+        end: a.anchor.end,
+        quote: a.anchor.quote,
+        body: a.body,
+        createdAt: a._creationTime,
+        ...(a.parentId === undefined ? {} : { parentId: a.parentId }),
+        ...(a.sessionId === undefined ? {} : { sessionId: a.sessionId }),
+      });
+    }
+  }
+
   const { sections, citationCount } = assembleBrief({
     pool,
+    paperId: session.paperId,
     paperTitle: paper.title,
     priorSessions: await priorSessions(ctx, session),
+    // The scan gets both sides; the assembler keeps only pairs that touch this
+    // meeting's paper. The neighbours never enter `pool` itself — they are
+    // evidence for one section, not material for the other three, and a
+    // carried-over question from another paper is a different feature.
+    crossPaper: {
+      scan: detectCrossPaperCollisions([...pool, ...across]),
+      paperTitles,
+    },
   });
   if (citationCount === 0) {
     return null;
@@ -459,6 +587,17 @@ async function stillSharedAmong(
 type StoredSection = Doc<"briefs">["sections"][number];
 
 /**
+ * A section on its way to a reader: the stored shape, plus this read's verdict.
+ *
+ * The extra field is view-only by construction — nothing writes it, and a
+ * section that came off the row simply doesn't have it yet. See `briefItem`
+ * above for why the verdict travels as a field rather than as a sentence the
+ * client would have to recognise.
+ */
+type ViewItem = StoredSection["items"][number] & { redacted?: true };
+type ViewSection = Omit<StoredSection, "items"> & { items: ViewItem[] };
+
+/**
  * Re-apply the margin's current state to an assembly that was frozen when it
  * was written.
  *
@@ -480,18 +619,24 @@ type StoredSection = Doc<"briefs">["sections"][number];
  * The ids are left in place. The citations are what a redacted line still
  * honestly is — a line was here, resting on these — and the caller counts
  * withdrawals off them.
+ *
+ * The verdict is left in place too, on `redacted`. This function is the one
+ * authority on whether a line survives — it is the only reader that can see
+ * every citation, including the half of a cross-paper line that lives on
+ * another paper — so it states its answer instead of encoding it in the text
+ * and hoping the next layer reads the sentence the same way.
  */
 export function redactWithdrawn(
   sections: readonly StoredSection[],
   stillShared: ReadonlySet<Id<"annotations">>,
-): StoredSection[] {
+): ViewSection[] {
   return sections.map((section) => ({
     ...section,
-    items: redactWhenAnyWithdrawn(
+    items: redactWhenAnyWithdrawn<Id<"annotations">, ViewItem>(
       section.items,
       stillShared,
       (item) => item.annotationIds,
-      (item) => ({ ...item, text: WITHDRAWN_ITEM_TEXT }),
+      (item) => ({ ...item, text: WITHDRAWN_ITEM_TEXT, redacted: true }),
     ).items,
   }));
 }

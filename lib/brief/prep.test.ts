@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { ownPrivateNotes, tallyContributors, type MarginRow } from "./prep";
+import {
+  lineCitations,
+  ownPrivateNotes,
+  tallyContributors,
+  type MarginRow,
+} from "./prep";
 
 let counter = 0;
 
@@ -174,5 +179,68 @@ describe("ownPrivateNotes", () => {
       "early",
       "late",
     ]);
+  });
+});
+
+describe("lineCitations", () => {
+  const visible = new Set(["a1", "a2"]);
+
+  it("cites what this page can see", () => {
+    expect(lineCitations({ annotationIds: ["a1", "a2"] }, visible)).toEqual({
+      withdrawn: false,
+      cited: ["a1", "a2"],
+    });
+  });
+
+  it("holds a line back whole when one of its own paper's notes has gone", () => {
+    expect(lineCitations({ annotationIds: ["a1", "gone"] }, visible)).toEqual({
+      withdrawn: true,
+      cited: [],
+    });
+  });
+
+  it("defers on a citation that lives on another paper", () => {
+    // The client has no rows for it and no standing to judge it. The server
+    // re-resolved it lab-wide on the way out; treating absence as withdrawal
+    // would blank every cross-paper line.
+    expect(
+      lineCitations(
+        { annotationIds: ["a1", "far"], crossPaperIds: ["far"] },
+        visible,
+      ),
+    ).toEqual({ withdrawn: false, cited: ["a1", "far"] });
+  });
+
+  it("still holds the line back when the near half has gone", () => {
+    expect(
+      lineCitations(
+        { annotationIds: ["gone", "far"], crossPaperIds: ["far"] },
+        visible,
+      ),
+    ).toEqual({ withdrawn: true, cited: [] });
+  });
+
+  it("holds the line back when the far half has gone and the near one has not", () => {
+    // The case deferral cannot see. Every citation this page can judge is
+    // still there, so the local test has nothing to object to — and the line's
+    // text is already the redaction sentence, because the server judged the
+    // far note lab-wide and held the line back. Without its verdict the panel
+    // would draw a gold-pair label and citation numbers around it.
+    expect(
+      lineCitations(
+        {
+          annotationIds: ["a1", "far"],
+          crossPaperIds: ["far"],
+          redacted: true,
+        },
+        visible,
+      ),
+    ).toEqual({ withdrawn: true, cited: [] });
+  });
+
+  it("takes the server's verdict on a line whose citations are all on this paper", () => {
+    expect(
+      lineCitations({ annotationIds: ["a1", "a2"], redacted: true }, visible),
+    ).toEqual({ withdrawn: true, cited: [] });
   });
 });
