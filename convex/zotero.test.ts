@@ -785,6 +785,29 @@ describe("status", () => {
     });
   });
 
+  it("does not claim to have checked a library it has never asked about", async () => {
+    // `lastSyncAt` is stamped at connect so a fresh link sits out its first
+    // hour of the sweep, which means the field answers "when should this row
+    // next be considered" and no longer answers "when did Margin last look".
+    // `lastSync` answers the second one, because only a run writes it.
+    const { ctx, seed } = await world();
+    const linkId = await ctx.db.insert("zoteroLinks", {
+      userId: seed.pi,
+      labId: seed.labId,
+      apiKey: KEY,
+      connectedAt: 1_000,
+      libraryType: "user",
+      libraryId: "475425",
+      lastSyncAt: 2_000,
+    });
+    expect((await read(ctx, seed.labId)).lastSyncAt).toBeNull();
+
+    await ctx.db.patch(linkId, {
+      lastSync: { at: 3_000, connectedAt: 1_000, imported: 0, skipped: 0 },
+    });
+    expect((await read(ctx, seed.labId)).lastSyncAt).toBe(2_000);
+  });
+
   it("carries whether the scope question has been answered", async () => {
     // The picker reads this and nothing else. A member who accepted the default
     // never names a library, so "libraryName is null" is the same shape as

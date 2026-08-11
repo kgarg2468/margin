@@ -871,7 +871,14 @@ export const status = query({
       libraryName: link.libraryName ?? null,
       collectionName: link.collectionName ?? null,
       scopeAccepted: link.scopeAcceptedAt !== undefined,
-      lastSyncAt: link.lastSyncAt ?? null,
+      // Off `lastSync`, not off `lastSyncAt`, because those two stopped being
+      // the same question when `saveLink` started stamping the clock at connect
+      // time to keep a brand-new link out of the very next sweep. `lastSyncAt`
+      // is now "when the sweep should next consider this row"; `lastSync` is
+      // written only by a run that actually looked. Read the other way, a
+      // member who has just pasted a key is told Margin checked their library
+      // moments ago, having never asked Zotero anything.
+      lastSyncAt: link.lastSync === undefined ? null : (link.lastSyncAt ?? null),
       lastSyncFailed:
         stale || last.statusCode === undefined
           ? null
@@ -1087,9 +1094,7 @@ export const newAmong = internalQuery({
  *   - the **scope** was re-pointed (`chooseScope`, which leaves `connectedAt`
  *     alone — so a run against the old library would otherwise file its papers
  *     here *and* install its own `targetVersion` as the new scope's cursor),
- *   - the **cursor** moved (another run already committed a page from this
- *     offset; adding this page's count to the live value would leave a hole in
- *     the walk that `lastVersion` then closes over permanently).
+ *   - the **walk** moved on, which is what `fetchedFrom` is for.
  */
 export const commitPage = internalMutation({
   args: {
@@ -1099,8 +1104,31 @@ export const commitPage = internalMutation({
     libraryType: v.union(v.literal("user"), v.literal("group")),
     libraryId: v.string(),
     collectionKey: v.optional(v.string()),
-    /** The offset the run fetched at. This commit only applies to that offset. */
-    fetchedStart: v.number(),
+    /**
+     * The walk's whole state as this run read it. The commit applies to that
+     * state and to no other.
+     *
+     * A token rather than arithmetic, and the difference is a bug that was
+     * here: comparing `link.syncCursor?.start ?? 0` against a fetched offset
+     * reads "no walk in progress" and "walk sitting at offset zero" as the same
+     * answer, and they are opposites. A run that read page one of a fresh walk
+     * is holding a page from *before* any walk existed; if another run finishes
+     * the entire library while it downloads, the first run's commit is accepted
+     * against the cleared cursor and installs `{ start: 25 }` on top of a
+     * completed walk. The next run then asks `?since=<the finished version>
+     * &start=25` — twenty-five items into a *changed-items* set that is almost
+     * always shorter than that — and everything in it is stepped over, with
+     * `lastVersion` closing the gap behind it.
+     *
+     * Both halves are compared exactly, `undefined` included: absent `start`
+     * means "there was no walk", absent `lastVersion` means "this library had
+     * never been walked", and either one turning into a number is a fact that
+     * happened after this page was read.
+     */
+    fetchedFrom: v.object({
+      start: v.optional(v.number()),
+      lastVersion: v.optional(v.number()),
+    }),
     entries: v.array(
       v.object({
         ...zoteroCandidate.fields,
@@ -1141,7 +1169,10 @@ export const commitPage = internalMutation({
     ) {
       return await discard();
     }
-    if ((link.syncCursor?.start ?? 0) !== args.fetchedStart) {
+    if (
+      link.syncCursor?.start !== args.fetchedFrom.start ||
+      link.lastVersion !== args.fetchedFrom.lastVersion
+    ) {
       return await discard();
     }
 
@@ -1267,7 +1298,7 @@ export const commitPage = internalMutation({
       imported += 1;
     }
 
-    const start = args.fetchedStart + args.walked;
+    const start = (args.fetchedFrom.start ?? 0) + args.walked;
     const walkedImported = (link.syncCursor?.imported ?? 0) + imported;
     /**
      * A short page, and nothing else, ends a walk.
@@ -1362,17 +1393,21 @@ export const markSwept = internalMutation({
     connectedAt: v.number(),
     statusCode: v.union(v.number(), v.null()),
     /**
-     * Also abandon the walk in progress, because the library moved under it.
+     * Also send the walk in progress back to its first page.
      *
-     * Offset pagination is only stable while the set underneath holds still,
-     * and Zotero's protocol says so: a `Last-Modified-Version` above the one a
-     * walk pinned means an item was added, edited or deleted while the walk
-     * was part-way through, and every offset after the change points at
-     * something else. Dropping the cursor restarts the walk on the next run,
-     * which re-reads pages Margin has already seen — cheap, because they
-     * dedupe — rather than silently stepping over the items the shift moved.
+     * Offset pagination is only stable while the set underneath does not get
+     * shorter, and `syncLink` calls this when `Total-Results` says it did: rows
+     * have been pulled below the read head, where the walk would step over them
+     * and `lastVersion` would then close the gap behind it. Re-reading pages
+     * Margin has already seen is cheap, because they dedupe to nothing.
+     *
+     * The cursor is rewound rather than cleared, so the settings row keeps a
+     * progress line to show — "0 of 400" is a walk starting again, where an
+     * absent cursor is a walk that never happened. `targetVersion` stays where
+     * it was: it is the mark this walk will commit at the end, and lowering it
+     * loses nothing while raising it would claim ground the walk never covered.
      */
-    dropCursor: v.optional(v.boolean()),
+    restartWalk: v.optional(v.boolean()),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
@@ -1381,7 +1416,10 @@ export const markSwept = internalMutation({
     const at = Date.now();
     await ctx.db.patch(link._id, {
       lastSyncAt: at,
-      syncCursor: args.dropCursor === true ? undefined : link.syncCursor,
+      syncCursor:
+        args.restartWalk === true && link.syncCursor !== undefined
+          ? { ...link.syncCursor, start: 0, imported: 0 }
+          : link.syncCursor,
       lastSync: {
         at,
         connectedAt: args.connectedAt,
@@ -1563,23 +1601,53 @@ export const syncLink = internalAction({
 
     if (
       cursor !== undefined &&
-      headers.lastModifiedVersion !== null &&
-      headers.lastModifiedVersion > cursor.targetVersion
+      headers.totalResults !== null &&
+      headers.totalResults < cursor.total
     ) {
-      // The library moved while this walk was part-way through it, which is
-      // the one thing offset pagination cannot survive: an item added or
-      // deleted before the current offset shifts every page after it, so the
-      // next `start` points somewhere the walk has already been or somewhere
-      // it has skipped. Zotero's own sync protocol says to start again, and
-      // that is all this does — drop the cursor, leave `lastVersion` where it
-      // was, and let the next run walk from the top against the new version.
-      // Restarting costs re-reading pages that dedupe to nothing; continuing
-      // costs the items the shift stepped over, permanently.
+      /*
+       * The result set this walk is paging through got *shorter*, which is the
+       * one change offset pagination cannot survive.
+       *
+       * This used to ask a much bigger question — whether the library's
+       * `Last-Modified-Version` had risen above the walk's mark — and that
+       * question starved active libraries dead. One page a run against an
+       * hourly sweep means a thousand-item library is a forty-hour walk, and
+       * *any* edit in any of those forty hours bumps the version: a member who
+       * touches Zotero more than once an hour would never once get past their
+       * first twenty-five papers, and every restart looked like a clean no-op
+       * from the outside.
+       *
+       * The narrower question is also the correct one. The walk pages a set
+       * ordered by `dateAdded asc` — the `?since=` set, once there is a mark —
+       * and only one kind of change to it can lose an item:
+       *
+       *   - an item *joining* the set (added, or edited so that it now matches
+       *     `?since=`) at a position before the current offset pushes its
+       *     neighbours to *higher* offsets, so the walk re-reads a row it has
+       *     already filed. The dedupe absorbs that; the cost is a wasted read.
+       *   - an item *leaving* the set (deleted, or removed from the collection)
+       *     pulls its neighbours to *lower* offsets, under the read head. Those
+       *     rows are never fetched, and `lastVersion` closes over them at the
+       *     end of the walk, so `?since=` excludes them from every walk after.
+       *
+       * `Total-Results` shrinking is exactly the second case and nothing else,
+       * which is why an edit — the common thing, the thing that was starving
+       * the walk — no longer restarts anything. The walk always advances.
+       *
+       * The restart keeps the cursor rather than dropping it: `start` goes back
+       * to zero where the settings row can see it, so a member watching reads
+       * "0 of 400" and not a progress line that vanished. `targetVersion` is
+       * deliberately left at the *old*, lower mark — anything changed since is
+       * above it and will be caught by the next walk regardless.
+       */
+      console.warn(
+        `A Zotero walk restarted: ${cursor.total} results became ${headers.totalResults}.`,
+      );
       await ctx.runMutation(internal.zotero.markSwept, {
         linkId: args.linkId,
         connectedAt: payload.connectedAt,
         statusCode: null,
-        dropCursor: true,
+        restartWalk: true,
       });
       return nothing;
     }
@@ -1644,7 +1712,10 @@ export const syncLink = internalAction({
       libraryType: payload.libraryType,
       libraryId: payload.libraryId,
       collectionKey: payload.collectionKey,
-      fetchedStart: start,
+      fetchedFrom: {
+        start: cursor?.start,
+        lastVersion: payload.lastVersion,
+      },
       entries,
       walked: items.length,
       targetVersion,

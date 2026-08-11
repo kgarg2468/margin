@@ -281,24 +281,62 @@ describe("one run is bounded", () => {
     );
   });
 
-  it("starts the walk again when the library moved under it", async () => {
-    // Offset pagination is only stable while the set underneath holds still,
-    // and a `Last-Modified-Version` above the one the walk pinned is Zotero
-    // saying it did not: an item added or deleted before the current offset
-    // shifts every page after it, so the next `start` points somewhere the walk
-    // has already been or somewhere it has skipped. Restarting costs re-reading
-    // pages that dedupe to nothing; continuing costs the items the shift
-    // stepped over, permanently.
+  it("starts the walk again when its result set got shorter", async () => {
+    // The one change offset pagination cannot survive. An item leaving the set
+    // pulls its neighbours to *lower* offsets, under the read head: those rows
+    // are never fetched, and `lastVersion` closes over them at the end of the
+    // walk, so `?since=` excludes them from every walk after this one.
+    //
+    // The cursor is rewound rather than dropped, so a member watching the
+    // settings row reads "0 of 400" — a walk starting again — instead of a
+    // progress line that vanished. And the mark stays where it was, because
+    // this walk has not covered the library yet.
     const { ctx, linkId } = await linkedWorld({
       lastVersion: 8000,
       syncCursor: { targetVersion: 8431, start: 25, total: 400, imported: 25 },
     });
-    stubFetch([page([item(1)], 400, 8500)]);
+    stubFetch([page([item(1)], 380, 8500)]);
     await run(ctx, linkId);
 
-    expect(link(ctx)?.syncCursor, "the walk is abandoned, not resumed").toBeUndefined();
-    expect(link(ctx)?.lastVersion, "and the mark has not moved").toBe(8000);
+    expect(link(ctx)?.syncCursor).toEqual({
+      targetVersion: 8431,
+      start: 0,
+      total: 400,
+      imported: 0,
+    });
+    expect(link(ctx)?.lastVersion, "the mark has not moved").toBe(8000);
     expect(papers(ctx)).toHaveLength(0);
+  });
+
+  it("finishes a walk a member keeps editing", async () => {
+    // The starvation this pins against, which a version-based restart caused
+    // and this test would have caught. One page a run against an hourly sweep
+    // makes a thousand-item library a forty-hour walk, and any edit in any of
+    // those hours lifts `Last-Modified-Version` above the walk's mark — so a
+    // member who touches Zotero more than once an hour never once got past
+    // their first twenty-five papers, and every restart looked like a clean
+    // no-op from the outside.
+    //
+    // Here the member edits something between every run: the version climbs on
+    // every page and the set never gets shorter. The walk has to finish.
+    const { ctx, linkId } = await linkedWorld();
+    for (const [from, size, version] of [
+      [0, SYNC_PAGE_ITEMS, 8500],
+      [25, SYNC_PAGE_ITEMS, 8600],
+      [50, 10, 8700],
+    ] as const) {
+      stubFetch([
+        page(Array.from({ length: size }, (_, i) => item(from + i)), 60, version),
+        ...Array.from({ length: size }, () => noChildren),
+      ]);
+      await run(ctx, linkId);
+    }
+
+    expect(papers(ctx), "sixty papers, not twenty-five, forever").toHaveLength(60);
+    expect(link(ctx)?.syncCursor, "and the walk is finished").toBeUndefined();
+    // At the version the walk started against, not at any of the edits made
+    // during it — those are all above this mark and the next walk sees them.
+    expect(link(ctx)?.lastVersion).toBe(8500);
   });
 });
 
@@ -769,6 +807,34 @@ describe("an outcome that arrives after the member moved", () => {
 
     expect(ctx.stored).toHaveLength(1);
     expect(ctx.discarded).toHaveLength(1);
+    expect(papers(ctx)).toHaveLength(0);
+  });
+
+  it("refuses a page read before a walk that has since finished", async () => {
+    // Offset zero and no walk at all are not the same state, and arithmetic
+    // that defaults one to the other cannot tell them apart. This run reads
+    // page one of a fresh walk; in the gap, a second run walks the whole
+    // library and finishes it, clearing the cursor and moving the mark. The
+    // page in hand now describes a library that has been fully imported —
+    // committed, it installs `{ start: 25 }` on top of a *completed* walk, and
+    // the next run asks `?since=8431&start=25`: twenty-five items into a
+    // changed-items set that is almost never that long. Everything in it is
+    // stepped over, and `lastVersion` closes the gap behind it.
+    const { ctx, linkId } = await linkedWorld();
+    stubFetch([
+      page(Array.from({ length: SYNC_PAGE_ITEMS }, (_, i) => item(i)), 400),
+      ...Array.from({ length: SYNC_PAGE_ITEMS }, () => noChildren),
+    ]);
+    duringRun(ctx, () =>
+      ctx.db.patch(linkId, { lastVersion: 8431, syncCursor: undefined }),
+    );
+    await run(ctx, linkId);
+
+    expect(
+      link(ctx)?.syncCursor,
+      "no walk is re-opened on top of a finished one",
+    ).toBeUndefined();
+    expect(link(ctx)?.lastVersion).toBe(8431);
     expect(papers(ctx)).toHaveLength(0);
   });
 
