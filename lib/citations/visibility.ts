@@ -17,9 +17,15 @@ export type ShareCheckable<L extends string> = {
   deletedAt?: number;
 };
 
+/**
+ * `NoInfer` on the lab: the row fixes the id type and the question is checked
+ * against it. Inferring from both arguments would let a plain `string` widen
+ * `L` and quietly satisfy the compiler — the one comparison here is the
+ * comparison, so it has to be between two ids of the same table.
+ */
 export function isStillShared<L extends string>(
   row: ShareCheckable<L> | null | undefined,
-  labId: L,
+  labId: NoInfer<L>,
 ): boolean {
   return (
     row !== null &&

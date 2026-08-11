@@ -841,19 +841,14 @@ export function sanitizeFindingItems(
     Array.isArray((raw as { items?: unknown }).items)
       ? (raw as { items: unknown[] }).items
       : raw;
-  // One row object per label, built once. `resolveCitations` keeps a cited row
-  // once by identity — labels are one-to-one with rows — so a resolver that
-  // minted a fresh object per lookup would store the same note twice for an
-  // item that cites `[A1]` in its list and again in its sentence.
-  const rows = new Map(
-    [...byLabel].map(([label, candidate]) => [
-      label,
-      { id: candidate._id, paperId: candidate.paperId },
-    ]),
-  );
   const gated = gateItems<Id<"annotations">, Id<"papers">>(
     rawItems,
-    (label) => rows.get(label),
+    (label) => {
+      const candidate = byLabel.get(label);
+      return candidate === undefined
+        ? undefined
+        : { id: candidate._id, paperId: candidate.paperId };
+    },
     { maxItems: MAX_FINDING_ITEMS, maxChars: MAX_FINDING_ITEM_CHARS },
   );
   // The loud failure lives here rather than in `lib/`: the refusal is a

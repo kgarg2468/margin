@@ -715,6 +715,9 @@ export function sanitizeSections<A extends string = string>(
           return [label ?? "(unreadable)"];
         }),
         (label) => material.get(label),
+        // By the annotation, not by the ref object: two labels for one note
+        // are one citation, which is what this counted before it was shared.
+        (one) => one.id,
       );
       const annotationIds = resolved.map((one) => one.id);
       const authors: string[] = [];
@@ -1158,16 +1161,6 @@ export const store = internalMutation({
  */
 export const WITHDRAWN_ITEM_TEXT =
   "A line here rested on notes that are no longer shared.";
-
-/**
- * Is this citation still something the lab is allowed to be shown?
- *
- * The predicate now lives in `lib/citations/visibility.ts`, generic over the
- * id type, because eight modules ask the question and a second model surface
- * should not have to import the first one to ask it. Re-exported here so the
- * question still has the name it has always had at this address.
- */
-export { isStillShared };
 
 /**
  * Re-apply the margin's current state to a write-up that was frozen when it

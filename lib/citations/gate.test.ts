@@ -21,6 +21,23 @@ describe("resolveCitations", () => {
     expect(resolved).toHaveLength(1);
     expect(sawUnknown).toBe(false);
   });
+
+  it("keeps one row once when two labels name it, if told what one row is", () => {
+    // Identity is the default because labels are normally one-to-one with
+    // rows. A caller that unions two questions' material can hand the same
+    // note two labels, and storing it twice would double it in every count
+    // the reader is shown — so `keyOf` is what "the same row" means.
+    const twice = new Map([
+      ["A1", { id: "ann_1", paperId: "pap_1" }],
+      ["A2", { id: "ann_1", paperId: "pap_1" }],
+    ]);
+    const { resolved } = resolveCitations(
+      ["A1", "A2"],
+      (label) => twice.get(label),
+      (one) => one.id,
+    );
+    expect(resolved.map((one) => one.id)).toEqual(["ann_1"]);
+  });
 });
 
 describe("citedPaperIds", () => {
@@ -66,6 +83,20 @@ describe("gateItems", () => {
   it("drops the whole item when it cites a label nobody issued", () => {
     const gated = gateItems(
       [{ text: "As shown [A9].", citations: ["A9"] }],
+      resolve,
+      limits,
+    );
+    expect(gated?.items).toEqual([]);
+    expect(gated?.droppedForCitation).toBe(1);
+  });
+
+  it("drops an item whose labels are only partly real", () => {
+    // The rule §3.8 actually asks for, and the one the case above cannot
+    // pin: this item resolves A1, so a gate that only checked "cited
+    // something real" would store it — half-grounded, with no way for a
+    // scientist to tell which half. Fail closed on the whole item.
+    const gated = gateItems(
+      [{ text: "Grounded and not [A1].", citations: ["A1", "A9"] }],
       resolve,
       limits,
     );

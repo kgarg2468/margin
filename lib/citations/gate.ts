@@ -30,12 +30,20 @@ export type GatedItem<A extends string, P extends string> = {
  *
  * `sawUnknown` is not a warning, it is a verdict about the item: a label
  * nobody minted is evidence about how the sentence was produced.
+ *
+ * A row is kept once. `keyOf` says what "once" means and defaults to object
+ * identity, which is right when labels are one-to-one with rows; a caller
+ * whose material can name the same row under two labels — a batch that unions
+ * two questions' candidates, say — passes the id instead, because storing a
+ * note twice would double it in every count a reader is shown.
  */
 export function resolveCitations<R>(
   labels: readonly string[],
   resolve: (label: string) => R | undefined,
+  keyOf: (row: R) => unknown = (row) => row,
 ): { resolved: R[]; sawUnknown: boolean } {
   const resolved: R[] = [];
+  const seen = new Set<unknown>();
   let sawUnknown = false;
   for (const label of labels) {
     const row = resolve(label);
@@ -43,9 +51,10 @@ export function resolveCitations<R>(
       sawUnknown = true;
       continue;
     }
-    // Identity, because labels are one-to-one with rows: the same label
-    // resolves to the same object every time.
-    if (!resolved.includes(row)) resolved.push(row);
+    const key = keyOf(row);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    resolved.push(row);
   }
   return { resolved, sawUnknown };
 }
@@ -100,6 +109,9 @@ export function gateItems<A extends string, P extends string>(
     const { resolved, sawUnknown } = resolveCitations(
       [...scanLabels(record.citations), ...scanLabels(record.text)],
       resolve,
+      // By id, not by row: an item that names the same note under two labels
+      // cites it once, and the resolver is free to build its rows on demand.
+      (one) => one.id,
     );
 
     if (text.length === 0 || resolved.length === 0 || sawUnknown) {

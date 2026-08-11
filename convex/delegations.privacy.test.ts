@@ -740,6 +740,21 @@ describe("the citation gate", () => {
     );
   });
 
+  it("gates a bare list of items as well as the envelope one arrives in", () => {
+    // One question's answer comes back as `{items: […]}`; a batched answer is
+    // sliced into the items belonging to each question before it gets here.
+    // Both are the same claim about the same material, and only the envelope
+    // differs — a gate that read one shape would make the batching decision
+    // for the caller.
+    const { byLabel } = material(2);
+    const result = sanitizeFindingItems(
+      [{ text: "Straight off the batch [A1].", citations: ["A1"] }],
+      byLabel,
+    );
+    expect(rowAt(result.items).citedAnnotationIds).toEqual(["annotations_1"]);
+    expect(result.droppedForCitation).toBe(0);
+  });
+
   it("records a label the sentence leans on but the citation list forgot", () => {
     // The paraphrase leak, one layer up. An item that says "[A2] matches
     // [A1]" while declaring `citations: ["A1"]` is resting on A2 in the
