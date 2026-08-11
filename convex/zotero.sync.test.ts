@@ -301,11 +301,43 @@ describe("one run is bounded", () => {
     expect(link(ctx)?.syncCursor).toEqual({
       targetVersion: 8431,
       start: 0,
-      total: 400,
+      // Re-baselined to what this run saw, not left at the number that fired
+      // the trigger — see the test below, which is what that costs.
+      total: 380,
       imported: 0,
+      generation: 1,
     });
     expect(link(ctx)?.lastVersion, "the mark has not moved").toBe(8000);
     expect(papers(ctx)).toHaveLength(0);
+  });
+
+  it("walks after a restart instead of restarting for ever", async () => {
+    // The livelock the rewind opened, and the reason a cleared cursor did not
+    // have it: a walk with no cursor reads its baseline off the next page's
+    // header, and a rewound one carries whatever it had. The trigger is
+    // "smaller than the number in the cursor", so a cursor keeping the *old*
+    // number meets its own trigger on the next run, and on the one after that.
+    // A library that permanently loses one item would restart every hour for
+    // ever, importing nothing, until the member unlinked, re-keyed, re-scoped,
+    // or the library grew back past the size it used to be.
+    const { ctx, linkId } = await linkedWorld({
+      lastVersion: 8000,
+      syncCursor: { targetVersion: 8431, start: 25, total: 400, imported: 25 },
+    });
+    stubFetch([page([item(1)], 380, 8500)]);
+    await run(ctx, linkId);
+    expect(link(ctx)?.syncCursor?.start, "restarted once").toBe(0);
+
+    // An hour later, and the library is still the size it now is.
+    stubFetch([
+      page(Array.from({ length: SYNC_PAGE_ITEMS }, (_, i) => item(i)), 380, 8500),
+      ...Array.from({ length: SYNC_PAGE_ITEMS }, () => noChildren),
+    ]);
+    await run(ctx, linkId);
+
+    expect(papers(ctx), "the second run walks").toHaveLength(SYNC_PAGE_ITEMS);
+    expect(link(ctx)?.syncCursor?.start).toBe(SYNC_PAGE_ITEMS);
+    expect(link(ctx)?.syncCursor?.generation, "and stays restarted once").toBe(1);
   });
 
   it("finishes a walk a member keeps editing", async () => {
@@ -835,6 +867,51 @@ describe("an outcome that arrives after the member moved", () => {
       "no walk is re-opened on top of a finished one",
     ).toBeUndefined();
     expect(link(ctx)?.lastVersion).toBe(8431);
+    expect(papers(ctx)).toHaveLength(0);
+  });
+
+  it("refuses a page fetched before the walk was sent back to its start", async () => {
+    // The one interleaving `start` cannot see. A restarted walk sits at offset
+    // zero, and so does a walk that has only just begun; a restart does not
+    // touch `lastVersion` either. So a run holding a page from *before* a
+    // restart matches on both, commits, and pushes the read head to twenty-five
+    // across exactly the rows the restart existed to read again — the restart
+    // undone by the run that provoked it, and the rows lost for good once
+    // `lastVersion` closes over them.
+    const { ctx, linkId } = await linkedWorld({
+      lastVersion: 8000,
+      syncCursor: {
+        targetVersion: 8431,
+        start: 0,
+        total: 380,
+        imported: 0,
+        generation: 1,
+      },
+    });
+    stubFetch([
+      page(Array.from({ length: SYNC_PAGE_ITEMS }, (_, i) => item(i)), 380),
+      ...Array.from({ length: SYNC_PAGE_ITEMS }, () => noChildren),
+    ]);
+    // A second run finds the set shorter again and restarts while this one is
+    // still fetching its files.
+    duringRun(ctx, () =>
+      ctx.db.patch(linkId, {
+        syncCursor: {
+          targetVersion: 8431,
+          start: 0,
+          total: 360,
+          imported: 0,
+          generation: 2,
+        },
+      }),
+    );
+    await run(ctx, linkId);
+
+    expect(link(ctx)?.syncCursor?.generation).toBe(2);
+    expect(
+      link(ctx)?.syncCursor?.start,
+      "the head has not moved off the restart",
+    ).toBe(0);
     expect(papers(ctx)).toHaveLength(0);
   });
 

@@ -1457,6 +1457,15 @@ export default defineSchema({
      * papers this walk has actually added, which is not the same as `start`:
      * `start` counts items looked at, and most of them on a re-walk are
      * already here.
+     *
+     * `generation` counts the times this walk has been sent back to its first
+     * page, and exists because `start` alone cannot say so. A walk restarts at
+     * offset zero, which is also where a walk *begins* — so a run holding a
+     * page fetched before a restart matches on `start` and on `lastVersion`
+     * (which a restart does not touch) and would commit, pushing the read head
+     * to 25 across the very rows the restart existed to read again. Absent
+     * means zero, which is what every walk that has never been restarted is,
+     * including every one that predates this field.
      */
     syncCursor: v.optional(
       v.object({
@@ -1464,6 +1473,7 @@ export default defineSchema({
         start: v.number(),
         total: v.number(),
         imported: v.number(),
+        generation: v.optional(v.number()),
       }),
     ),
     /**

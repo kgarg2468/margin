@@ -360,6 +360,7 @@ export const syncPayload = internalQuery({
           start: v.number(),
           total: v.number(),
           imported: v.number(),
+          generation: v.optional(v.number()),
         }),
       ),
     }),
@@ -1120,14 +1121,24 @@ export const commitPage = internalMutation({
      * always shorter than that — and everything in it is stepped over, with
      * `lastVersion` closing the gap behind it.
      *
-     * Both halves are compared exactly, `undefined` included: absent `start`
+     * `generation` is the third, and it is the one `start` cannot stand in for
+     * even in principle. A restarted walk sits at offset zero, and so does a
+     * walk that has just begun — so a run holding a page fetched *before* a
+     * restart matches on `start`, matches on `lastVersion` (a restart does not
+     * touch it), and commits: the read head jumps to 25 across exactly the rows
+     * the restart existed to read again, and the restart is undone by the run
+     * that provoked it.
+     *
+     * All three are compared exactly, `undefined` included: absent `start`
      * means "there was no walk", absent `lastVersion` means "this library had
-     * never been walked", and either one turning into a number is a fact that
-     * happened after this page was read.
+     * never been walked", absent `generation` means "never restarted", and any
+     * of them turning into a number is a fact that happened after this page
+     * was read.
      */
     fetchedFrom: v.object({
       start: v.optional(v.number()),
       lastVersion: v.optional(v.number()),
+      generation: v.optional(v.number()),
     }),
     entries: v.array(
       v.object({
@@ -1171,7 +1182,8 @@ export const commitPage = internalMutation({
     }
     if (
       link.syncCursor?.start !== args.fetchedFrom.start ||
-      link.lastVersion !== args.fetchedFrom.lastVersion
+      link.lastVersion !== args.fetchedFrom.lastVersion ||
+      link.syncCursor?.generation !== args.fetchedFrom.generation
     ) {
       return await discard();
     }
@@ -1334,6 +1346,10 @@ export const commitPage = internalMutation({
             // rough one.
             total: Math.max(args.total, start),
             imported: walkedImported,
+            // Carried, not reset. The guard above has just established that
+            // this page was fetched from this generation; dropping it here
+            // would hand the next restart the same number twice.
+            generation: link.syncCursor?.generation,
           },
       lastSyncAt: at,
       lastSync: { at, connectedAt: args.connectedAt, imported, skipped },
@@ -1406,8 +1422,18 @@ export const markSwept = internalMutation({
      * absent cursor is a walk that never happened. `targetVersion` stays where
      * it was: it is the mark this walk will commit at the end, and lowering it
      * loses nothing while raising it would claim ground the walk never covered.
+     *
+     * `total` is the count this run just observed, and carrying it is what
+     * keeps the rewind from being a livelock. The trigger is "smaller than the
+     * number in the cursor", so a cursor that keeps the *old* number is a
+     * cursor that meets its own trigger on the next run, and the one after
+     * that: a library that permanently loses an item would restart hourly
+     * forever, importing nothing, until the member unlinked or the library grew
+     * back. Re-baselining is what the earlier cleared-cursor version got for
+     * free, because a walk with no cursor read its baseline off the next page's
+     * header.
      */
-    restartWalk: v.optional(v.boolean()),
+    restartWalk: v.optional(v.object({ total: v.number() })),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
@@ -1417,8 +1443,16 @@ export const markSwept = internalMutation({
     await ctx.db.patch(link._id, {
       lastSyncAt: at,
       syncCursor:
-        args.restartWalk === true && link.syncCursor !== undefined
-          ? { ...link.syncCursor, start: 0, imported: 0 }
+        args.restartWalk !== undefined && link.syncCursor !== undefined
+          ? {
+              ...link.syncCursor,
+              start: 0,
+              imported: 0,
+              total: args.restartWalk.total,
+              // Monotone, and the only thing that tells a restarted walk apart
+              // from a walk that has simply not started yet.
+              generation: (link.syncCursor.generation ?? 0) + 1,
+            }
           : link.syncCursor,
       lastSync: {
         at,
@@ -1630,15 +1664,29 @@ export const syncLink = internalAction({
        *     rows are never fetched, and `lastVersion` closes over them at the
        *     end of the walk, so `?since=` excludes them from every walk after.
        *
-       * `Total-Results` shrinking is exactly the second case and nothing else,
-       * which is why an edit — the common thing, the thing that was starving
-       * the walk — no longer restarts anything. The walk always advances.
+       * `Total-Results` shrinking implies the second case, and that is the
+       * whole of the claim — it is not an iff, and the comment that read like
+       * one was wrong. What this samples is the *net* size of the set, once per
+       * run: one row leaving and one row joining between two runs leaves the
+       * count where it was, and the row that was pulled under the read head is
+       * still lost, because its version is at or below `targetVersion` and walk
+       * completion closes `lastVersion` over it. Shrinkage implies loss; loss
+       * does not imply shrinkage.
+       *
+       * What the trigger does buy, and what it was changed to buy, is that the
+       * routine thing — an edit, an addition — no longer restarts anything, so
+       * the walk advances instead of starving. Closing the residual needs a
+       * walk over a stable snapshot rather than over a live offset window: a
+       * `?since=&format=versions` key list, fetched once, paged through by key.
+       * That is a different walk and it is written up as a follow-up.
        *
        * The restart keeps the cursor rather than dropping it: `start` goes back
        * to zero where the settings row can see it, so a member watching reads
-       * "0 of 400" and not a progress line that vanished. `targetVersion` is
+       * "0 of 380" and not a progress line that vanished. `targetVersion` is
        * deliberately left at the *old*, lower mark — anything changed since is
-       * above it and will be caught by the next walk regardless.
+       * above it and will be caught by the next walk regardless — while `total`
+       * is re-baselined to what this run just saw, without which the trigger
+       * would go on firing against its own stale number every hour forever.
        */
       console.warn(
         `A Zotero walk restarted: ${cursor.total} results became ${headers.totalResults}.`,
@@ -1647,7 +1695,7 @@ export const syncLink = internalAction({
         linkId: args.linkId,
         connectedAt: payload.connectedAt,
         statusCode: null,
-        restartWalk: true,
+        restartWalk: { total: headers.totalResults },
       });
       return nothing;
     }
@@ -1715,6 +1763,7 @@ export const syncLink = internalAction({
       fetchedFrom: {
         start: cursor?.start,
         lastVersion: payload.lastVersion,
+        generation: cursor?.generation,
       },
       entries,
       walked: items.length,
