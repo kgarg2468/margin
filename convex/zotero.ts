@@ -809,18 +809,25 @@ export const SYNC_PAGE_ITEMS = 25;
 /**
  * How much of the lab's shelf the title-identity fallback compares against.
  *
- * The same two hundred `listPapers` reads, and deliberately the same number:
- * this is the set of papers the library page can show, so a duplicate this
- * misses is one a member could not have seen on the shelf either. Read **once
- * per run** into a map rather than once per candidate — `createFromMetadata`
- * does the latter (`convex/papers.ts:369-376`) and at 25 candidates against a
- * full shelf that is five thousand document reads for one page of items.
+ * The same two hundred `listPapers` reads, and deliberately the same two
+ * hundred: both reads below are `.order("desc")` for that reason, because
+ * `by_lab` ascending would compare against the *oldest* two hundred papers —
+ * the exact set the member cannot see on the shelf — while the duplicates this
+ * fallback exists to catch are the recent ones, last week's `.bib` paste
+ * against this morning's sync. Matching the order is what makes the sentence
+ * below true rather than merely reassuring.
+ *
+ * Read **once per run** into a map rather than once per candidate —
+ * `createFromMetadata` does the latter (`convex/papers.ts:369-376`) and at 25
+ * candidates against a full shelf that is five thousand document reads for one
+ * page of items.
  *
  * The honest limitation, written down rather than hidden: past two hundred
  * papers this fallback starts missing duplicates that have no DOI and no
- * Zotero key in common. So does the library page's own filter, and the two
- * ceilings should be lifted together — `convex/schema.ts:1119-1122` names the
- * 201st paper as the signal for exactly that.
+ * Zotero key in common. So does the library page itself, which cannot list
+ * them (`convex/papers.ts:570-578`), and the two ceilings should be lifted
+ * together — `convex/schema.ts:1150-1165` names the 201st paper as the signal
+ * for exactly that.
  */
 const IDENTITY_SCAN_LIMIT = 200;
 
@@ -905,6 +912,7 @@ export const newAmong = internalQuery({
     const shelf = await ctx.db
       .query("papers")
       .withIndex("by_lab", (q) => q.eq("labId", args.labId))
+      .order("desc")
       .take(IDENTITY_SCAN_LIMIT);
     const identities = new Set(
       shelf.map((paper) => referenceIdentity(paper.title, paper.year)),
@@ -998,6 +1006,7 @@ export const commitPage = internalMutation({
     const shelf = await ctx.db
       .query("papers")
       .withIndex("by_lab", (q) => q.eq("labId", link.labId))
+      .order("desc")
       .take(IDENTITY_SCAN_LIMIT);
     const byIdentity = new Map(
       shelf.map((paper) => [referenceIdentity(paper.title, paper.year), paper]),
@@ -1339,7 +1348,26 @@ export const syncLink = internalAction({
 
     const headers = readSyncHeaders(response.headers);
     const body = await bodyOf(response);
-    const items = Array.isArray(body) ? body : [];
+    if (!Array.isArray(body)) {
+      // A `200` Margin could not read is a refusal, not an empty page, and the
+      // difference is the whole walk. Zotero answers a proxy error or a
+      // maintenance page with HTML often enough that `bodyOf` exists for it —
+      // and read as an empty page, that HTML is a *short* page, which closes
+      // the walk and moves `lastVersion` to the version it started at. The
+      // three thousand items it never looked at all have versions below that
+      // mark, so `?since=` excludes them from every future walk and they are
+      // gone until somebody edits each one in Zotero by hand. Ending the run
+      // here leaves the cursor exactly where it was, which is what an hour
+      // from now is for.
+      console.error("A Zotero page came back as something other than a list.");
+      await ctx.runMutation(internal.zotero.markSwept, {
+        linkId: args.linkId,
+        connectedAt: payload.connectedAt,
+        statusCode: null,
+      });
+      return nothing;
+    }
+    const items = body;
     const targetVersion =
       cursor?.targetVersion ?? headers.lastModifiedVersion ?? payload.lastVersion ?? 0;
     const total = cursor?.total ?? headers.totalResults ?? items.length;

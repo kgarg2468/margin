@@ -32,10 +32,10 @@ vi.mock("@convex-dev/auth/server", async (importOriginal) => ({
  * already revoked.
  *
  * The library size is the risk the whole feature stands on: `listPapers` reads
- * a lab's shelf under one `take(200)` (`convex/schema.ts:1119-1122`), and a
- * real Zotero library is ten to fifty times that. The cap and the collection
- * scope are what make a first version honest, and these are the tests that
- * hold them.
+ * a lab's shelf under one `take(200)` (`convex/papers.ts:570-578`, and
+ * `convex/schema.ts:1150-1165` on why), and a real Zotero library is ten to
+ * fifty times that. The cap and the collection scope are what make a first
+ * version honest, and these are the tests that hold them.
  */
 
 const KEY = "P9NiFoyLeZu2bZNvvuQPDWsd";
@@ -191,6 +191,32 @@ describe("one run is bounded", () => {
     expect(link(ctx)?.lastVersion).toBe(8431);
   });
 
+  it("does not read a page it could not parse as a page with nothing on it", async () => {
+    // The difference between a bad minute and a lost library. Zotero answers a
+    // maintenance page or a proxy error with HTML, and an empty list is a
+    // *short* page — which closes the walk and moves `lastVersion` to the mark
+    // it started at. The 3,975 items this run never looked at all sit below
+    // that version, so `?since=` would exclude them from every future walk and
+    // they would be gone until somebody edited each one in Zotero by hand.
+    const { ctx, linkId } = await linkedWorld({
+      syncCursor: { targetVersion: 8431, start: 25, total: 4_000, imported: 25 },
+    });
+    stubFetch([
+      {
+        status: 200,
+        bytes: "<html><body>Zotero is down for maintenance</body></html>",
+        headers: { "content-type": "text/html" },
+      },
+    ]);
+    await run(ctx, linkId);
+
+    expect(link(ctx)?.syncCursor?.start, "the walk is where it was").toBe(25);
+    expect(link(ctx)?.lastVersion).toBeUndefined();
+    // And it says nothing about the member's key, because this was not about
+    // their key.
+    expect(link(ctx)?.lastSync?.statusCode).toBeUndefined();
+  });
+
   it("commits the version the walk started at, not the library's latest", async () => {
     // A member editing a paper on page four of their own walk. Committing the
     // *current* version would put that edit behind the mark and lose it
@@ -273,7 +299,7 @@ describe("dedupe", () => {
     // included. Written raw, `by_lab_and_doi` stops being a dedupe key: the
     // same paper lands twice and neither row can see the other.
     const { ctx, seed, linkId } = await linkedWorld();
-    await ctx.db.insert("papers", {
+    const paperId = await ctx.db.insert("papers", {
       labId: seed.labId,
       title: "Added from a DOI months ago",
       doi: "10.1038/nature12373",
@@ -285,7 +311,11 @@ describe("dedupe", () => {
     ]);
     await run(ctx, linkId);
 
+    // Asserted on the *claim* rather than on a count: a row filed under the
+    // prefixed spelling would carry an item key of its own and satisfy a
+    // count, which is exactly how this test would go quietly vacuous.
     expect(papers(ctx)).toHaveLength(1);
+    expect((await ctx.db.get(paperId))?.zoteroItemKey).toBe("ITEM0001");
   });
 
   it("recognises a DOI-less paper by the same identity a .bib import uses", async () => {
@@ -332,6 +362,34 @@ describe("dedupe", () => {
     // One in the preflight query, one in the committing mutation. Not
     // twenty-five of each.
     expect(shelfReads.length).toBeLessThanOrEqual(2);
+  });
+
+  it("compares against the two hundred papers a member can actually see", async () => {
+    // `by_lab` ascending reads the *oldest* two hundred; the library page shows
+    // the newest (`convex/papers.ts:570-578`). An ascending fallback therefore
+    // compares a sync against precisely the papers nobody can see on the shelf,
+    // and last week's `.bib` paste — the newest row, and the likeliest
+    // duplicate there is — arrives a second time.
+    const { ctx, seed, linkId } = await linkedWorld();
+    for (let n = 0; n < 200; n++) {
+      await ctx.db.insert("papers", {
+        labId: seed.labId,
+        title: `Shelf paper ${n}`,
+        addedBy: seed.pi,
+        ingestStatus: "ready",
+      });
+    }
+    const pasted = await ctx.db.insert("papers", {
+      labId: seed.labId,
+      title: "Paper number 5",
+      year: 2024,
+      addedBy: seed.pi,
+      ingestStatus: "needs-pdf",
+    });
+    stubFetch([page([item(5)], 1)]);
+    await run(ctx, linkId);
+
+    expect((await ctx.db.get(pasted))?.zoteroItemKey).toBe("ITEM0005");
   });
 
   it("collapses a paper the member duplicated inside Zotero itself", async () => {

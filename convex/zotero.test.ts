@@ -155,6 +155,19 @@ describe("zoteroFetch", () => {
     expect((caught as ZoteroRefusal).status).toBe(403);
   });
 
+  it("treats a redirect as a refusal unless the caller asked for one", async () => {
+    // `redirectIsAnAnswer` is the file download's option and nobody else's. A
+    // `302` on any other request is a request the key must not follow and must
+    // not be handed a `Location` for either — the default has to fail closed,
+    // and a default is the kind of thing that quietly stops being one.
+    stubFetch([
+      { status: 302, headers: { location: "https://evil.example/collect" } },
+    ]);
+    await expect(
+      zoteroFetch("https://api.zotero.org/keys/current", KEY),
+    ).rejects.toBeInstanceOf(ZoteroRefusal);
+  });
+
   it("asks conditionally when it has a version to be since", async () => {
     const calls = stubFetch([{ status: 304 }]);
     const response = await zoteroFetch(
