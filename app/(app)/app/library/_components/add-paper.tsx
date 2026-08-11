@@ -244,6 +244,11 @@ function DoiTab({
  * layer until this browser makes one. Where that last step is running, this
  * says so and then says when it is done; where it can't, it points at the
  * place it gets fixed.
+ *
+ * The paper is named once on this screen and it is named on the shelf below,
+ * so this link names the act instead: the sentence above has just said which
+ * paper this is about, and repeating its title here only made two entries for
+ * one paper in the same field of view.
  */
 function DoiOutcome({
   result,
@@ -290,10 +295,10 @@ function DoiOutcome({
         className="tap-target self-start font-sans text-sm text-accent underline-offset-4 hover:underline"
       >
         {ready
-          ? `Read ${result.title}`
+          ? "Read it now"
           : result.hasPdf
-            ? `Open ${result.title}`
-            : `Attach the PDF to ${result.title}`}
+            ? "Open its record"
+            : "Attach the PDF"}
       </Link>
     </div>
   );
