@@ -138,8 +138,10 @@ export function DigestInbox({ labId }: { labId: Id<"labs"> }) {
   // every call decides nothing: it is idempotent, it never stacks a second
   // card, and it never moves a cursor. The ref keeps a re-render from asking
   // twice, and a failure clears it again: a lab's home page must not turn into
-  // an error because a digest could not be built, but nor should one dropped
-  // request cost the member their digest for the whole visit.
+  // an error because a digest could not be built. Clearing the ref is not a
+  // retry — nothing re-runs this effect on its own — it means the next run,
+  // a return to the page or a switch back to this lab, asks fresh instead of
+  // remembering the failure forever.
   //
   // `settledFor` is separate from the ref because it is about the page rather
   // than about the request: until the answer comes back, the section does not
@@ -173,12 +175,16 @@ export function DigestInbox({ labId }: { labId: Id<"labs"> }) {
 
   // The reserved slot: one line, the same ghost the roster and the calendar
   // use, sized to nothing in particular because a heading over an unknown is
-  // worse than a blank. Returning before the presence below cuts no exit
-  // animation short: for any one lab both inputs move only forwards, so
-  // nothing ever comes back here mid-visit. Switching labs does come back, and
-  // means to — the cards below belong to the lab the reader just left, and
-  // holding them on screen while the new lab's mail is still out would be
-  // showing them another lab's inbox.
+  // worse than a blank. Returning before the presence below can cut an exit
+  // short in exactly one race: mail already showing while catch-up is still
+  // out, and another device acknowledges the last card in that window. The
+  // slot drops back to a ghost until the answer lands — transient, and honest,
+  // since with the mail gone this lab genuinely does not know yet whether it
+  // is empty. Absent that race, both of the answers this state waits on move
+  // only forwards. Switching labs does come back, and means to — the cards
+  // below belong to the lab the reader just left, and holding them on screen
+  // while the new lab's mail is still out would be showing them another lab's
+  // inbox.
   if (state === "reserving") {
     return (
       <span

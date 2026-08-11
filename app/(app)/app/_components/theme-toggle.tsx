@@ -36,9 +36,18 @@ export function ThemeToggle() {
   const [preference, setPreference] = useState<ThemePreference>(DEFAULT_THEME);
 
   useEffect(() => {
-    setPreference(
-      readPreference(window.localStorage.getItem(THEME_STORAGE_KEY)),
-    );
+    // Guarded like every other storage touch in this feature: with site data
+    // blocked the `localStorage` accessor itself throws, and the control
+    // should fall back to the default it already shows, not take the shell
+    // down over a preference it cannot read.
+    try {
+      setPreference(
+        readPreference(window.localStorage.getItem(THEME_STORAGE_KEY)),
+      );
+    } catch {
+      // DEFAULT_THEME is already in state, and the boot script came to the
+      // same answer the same way.
+    }
   }, []);
 
   function apply(next: ThemePreference) {
@@ -75,17 +84,13 @@ export function ThemeToggle() {
               type="button"
               role="radio"
               aria-checked={selected}
-              // pointerdown, not click: the press grammar acknowledges within
-              // a frame, and a class swap has nothing to wait for. Enter and
-              // Space never fire a pointer event, so the keyboard is handled
-              // below rather than left to a click that would arrive twice.
-              onPointerDown={() => apply(option.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
-                  event.preventDefault();
-                  apply(option.value);
-                }
-              }}
+              // The press grammar's within-a-frame acknowledgement is
+              // `pressable`'s compositor work; activation is `click`, like
+              // every other control here (the visibility radiogroup this
+              // mirrors included). Pointerdown would answer secondary mouse
+              // buttons and miss click-only assistive tech, and a native
+              // button already turns Enter and Space into this click.
+              onClick={() => apply(option.value)}
               className={
                 "pressable px-2.5 py-1 font-sans text-[11px] uppercase tracking-[0.12em] " +
                 (selected
