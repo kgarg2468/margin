@@ -870,6 +870,75 @@ describe("an outcome that arrives after the member moved", () => {
     expect(papers(ctx)).toHaveLength(0);
   });
 
+  /**
+   * The member changes something while the *request* is in flight.
+   *
+   * `duringRun` hangs off the preflight query, which a run only reaches once it
+   * has a page to ask about — so it cannot stage the runs that end before that:
+   * a refusal, a `304`, a restart. Those end at `markSwept`, and the interval
+   * that matters for them is the one around the fetch itself.
+   */
+  function duringFetch(
+    ctx: FakeCtx,
+    answers: Stub[],
+    change: () => Promise<unknown>,
+  ) {
+    const calls = stubFetch(answers);
+    const answering = globalThis.fetch;
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit = {}) => {
+      await change();
+      return await answering(url, init);
+    });
+    return calls;
+  }
+
+  it("says nothing about a scope the member has left", async () => {
+    // `chooseScope` re-points a link without touching `connectedAt` — the key
+    // is the same key — so a run that read the *old* library passed the
+    // credential check and wrote its outcome onto a row that now describes a
+    // different one. There is no page to file on this path, which is how it
+    // read as harmless; but `lastSync` is the sentence the settings row shows
+    // a member, and a 403 from the group they just left, rendered against the
+    // collection they just chose, tells them to replace a key that is fine.
+    //
+    // Only the scope is patched here, so anything that appears in `lastSync`
+    // afterwards could only have come from this run.
+    const { ctx, linkId } = await linkedWorld({
+      lastSyncAt: 1_000,
+      lastSync: { at: 1_000, connectedAt: 1_000, imported: 4, skipped: 1 },
+    });
+    duringFetch(ctx, [{ status: 403, body: { message: "Invalid key" } }], () =>
+      ctx.db.patch(linkId, {
+        collectionKey: "N3WC0LL3",
+        collectionName: "Thursday",
+      }),
+    );
+    await run(ctx, linkId);
+
+    expect(
+      link(ctx)?.lastSync?.statusCode,
+      "no refusal against a library nobody queried",
+    ).toBeUndefined();
+    expect(link(ctx)?.lastSync?.imported, "the row is untouched").toBe(4);
+    expect(link(ctx)?.lastSyncAt, "and so is the last-checked time").toBe(1_000);
+  });
+
+  it("does not restart a walk belonging to a scope the member has left", async () => {
+    // The other half of the same guard. `chooseScope` clears the cursor itself,
+    // so this cannot rewind a live walk today — but that is a fact about a
+    // different function, and it is the kind of fact that stops being true.
+    const { ctx, linkId } = await linkedWorld({
+      syncCursor: { targetVersion: 8431, start: 25, total: 400, imported: 25 },
+    });
+    duringFetch(ctx, [page([item(1)], 380, 8500)], () =>
+      ctx.db.patch(linkId, { collectionKey: "N3WC0LL3" }),
+    );
+    await run(ctx, linkId);
+
+    expect(link(ctx)?.syncCursor?.start, "the walk is where it was").toBe(25);
+    expect(link(ctx)?.syncCursor?.generation).toBeUndefined();
+  });
+
   it("refuses a page fetched before the walk was sent back to its start", async () => {
     // The one interleaving `start` cannot see. A restarted walk sits at offset
     // zero, and so does a walk that has only just begun; a restart does not

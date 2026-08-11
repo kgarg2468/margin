@@ -1407,6 +1407,10 @@ export const markSwept = internalMutation({
   args: {
     linkId: v.id("zoteroLinks"),
     connectedAt: v.number(),
+    /** The scope the run read, so a re-pointed link refuses the old one's news. */
+    libraryType: v.union(v.literal("user"), v.literal("group")),
+    libraryId: v.string(),
+    collectionKey: v.optional(v.string()),
     statusCode: v.union(v.number(), v.null()),
     /**
      * Also send the walk in progress back to its first page.
@@ -1439,6 +1443,32 @@ export const markSwept = internalMutation({
   handler: async (ctx, args) => {
     const link = await ctx.db.get(args.linkId);
     if (link === null || link.connectedAt !== args.connectedAt) return null;
+    /*
+     * The same scope preflight `commitPage` does, for the same reason and one
+     * the cursor argument does not cover.
+     *
+     * `chooseScope` re-points a link without touching `connectedAt` — the key
+     * is the same key — so a run that read the *old* library passes the
+     * credential check and writes its outcome onto a row that now describes a
+     * different one. There is no page here to file, which is why this was read
+     * as harmless, but `lastSync` is not bookkeeping: it is the sentence the
+     * settings row shows a member. A 403 from the group they just left is
+     * rendered against the collection they just chose, and "last checked" is a
+     * timestamp for a library Margin has never asked about. Both are wrong in
+     * the direction that costs somebody an afternoon — the copy tells them to
+     * paste a new key, and the key is fine.
+     *
+     * Nothing is written rather than a partial write, because a run belonging
+     * to a scope that no longer exists has no news for anybody. The next
+     * sweep asks about the new scope within the hour and answers honestly.
+     */
+    if (
+      link.libraryType !== args.libraryType ||
+      link.libraryId !== args.libraryId ||
+      link.collectionKey !== args.collectionKey
+    ) {
+      return null;
+    }
     const at = Date.now();
     await ctx.db.patch(link._id, {
       lastSyncAt: at,
@@ -1591,6 +1621,22 @@ export const syncLink = internalAction({
     const library = libraryOf(payload);
     const cursor = payload.syncCursor;
     const start = cursor?.start ?? 0;
+    /**
+     * Who this run is, for every early ending below.
+     *
+     * A run ends without a page in four places and each of them writes an
+     * outcome the settings row shows a member, so each of them has to say which
+     * credential *and* which scope the outcome is about. Named once rather than
+     * spelled four times, because the way this goes wrong is one of the four
+     * quietly not carrying what the other three do.
+     */
+    const swept = {
+      linkId: args.linkId,
+      connectedAt: payload.connectedAt,
+      libraryType: payload.libraryType,
+      libraryId: payload.libraryId,
+      collectionKey: payload.collectionKey,
+    };
 
     let response: Response;
     try {
@@ -1613,8 +1659,7 @@ export const syncLink = internalAction({
     } catch (caught) {
       console.error(`A Zotero sync was refused: ${String(caught)}`);
       await ctx.runMutation(internal.zotero.markSwept, {
-        linkId: args.linkId,
-        connectedAt: payload.connectedAt,
+        ...swept,
         statusCode: permanentStatus(caught),
       });
       return nothing;
@@ -1624,8 +1669,7 @@ export const syncLink = internalAction({
       // The cheap hourly no-op: nothing in this library has changed since the
       // last completed walk, so one small request is the entire cost.
       await ctx.runMutation(internal.zotero.markSwept, {
-        linkId: args.linkId,
-        connectedAt: payload.connectedAt,
+        ...swept,
         statusCode: null,
       });
       return nothing;
@@ -1692,8 +1736,7 @@ export const syncLink = internalAction({
         `A Zotero walk restarted: ${cursor.total} results became ${headers.totalResults}.`,
       );
       await ctx.runMutation(internal.zotero.markSwept, {
-        linkId: args.linkId,
-        connectedAt: payload.connectedAt,
+        ...swept,
         statusCode: null,
         restartWalk: { total: headers.totalResults },
       });
@@ -1714,8 +1757,7 @@ export const syncLink = internalAction({
       // from now is for.
       console.error("A Zotero page came back as something other than a list.");
       await ctx.runMutation(internal.zotero.markSwept, {
-        linkId: args.linkId,
-        connectedAt: payload.connectedAt,
+        ...swept,
         statusCode: null,
       });
       return nothing;
