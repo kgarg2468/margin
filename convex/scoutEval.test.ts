@@ -3,6 +3,7 @@ import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import {
   FakeCtx,
+  fakeScoutModel,
   handlerOf,
   registerFakeScoutModel,
   seedAnnotation,
@@ -74,6 +75,52 @@ async function seedReply(
   await ctx.db.patch(id, { parentId: seed.questionId });
   return id;
 }
+
+/** A second settled, labelled question in the same lab, with its own source note. */
+async function seedExtraQuestion(
+  ctx: FakeCtx,
+  seed: Awaited<ReturnType<typeof seedLab>>,
+  settledAt: number,
+  body: string,
+): Promise<Id<"actions">> {
+  const source = await seedAnnotation(ctx, { ...seed, memberId: seed.pi }, {
+    body,
+  });
+  const actionId = await ctx.db.insert("actions", {
+    labId: seed.labId,
+    sessionId: seed.sessionId,
+    paperId: seed.paperId,
+    kind: "question",
+    body,
+    recordedBy: seed.pi,
+    citedAnnotationId: source,
+    settledAt,
+    settledBy: seed.pi,
+  });
+  const reply = await seedAnnotation(ctx, { ...seed, memberId: seed.member }, {
+    type: "critique",
+    body: "The plates were logged in the second notebook.",
+  });
+  await ctx.db.patch(reply, { parentId: source });
+  return actionId;
+}
+
+/**
+ * A settled question, labelled, whose text the search read cannot use.
+ *
+ * All stopwords, so `reduceToSearchQuery` reduces it to nothing and
+ * `gatherLabVisible` returns before it reads the index — a labelled question
+ * with zero candidates, which is the shape the eval's ranker accounting keeps
+ * getting wrong. It is reachable because labels and candidates come from
+ * different places: the labels are ledger-derived (a reply in the thread), and
+ * no reply has to share a keyword with the question it answers.
+ */
+const seedUnsearchableQuestion = (
+  ctx: FakeCtx,
+  seed: Awaited<ReturnType<typeof seedLab>>,
+  settledAt: number,
+): Promise<Id<"actions">> =>
+  seedExtraQuestion(ctx, seed, settledAt, "Is it? And so on.");
 
 /** An outcome the room recorded on the same paper, pointing at a note. */
 async function seedCoRecorded(
@@ -528,6 +575,129 @@ describe("the report", () => {
 
     expect(JSON.stringify(report)).not.toContain(secret);
     expect(report.questions[0]!.scout.hits).not.toContain(secret);
+  });
+});
+
+/* -------------------------------------------------------------------------
+ * Who ranked it
+ * ---------------------------------------------------------------------- */
+
+/**
+ * The report may not name a ranker that did not rank.
+ *
+ * Every one of these is a regression test for the same class of bug: a name
+ * written down where a fact belonged. A question can be scored and never reach
+ * a model — its labels come from the ledger and its candidates come from the
+ * search index, and those two disagree on a real corpus — so "what ranked this"
+ * has to be collected from the runs that happened, per row, and then said once
+ * at the top. Filling the gap with a plausible default is how a report ends up
+ * telling an operator with a live key that a stub ranked their launch gate.
+ */
+describe("the ranker the report names", () => {
+  function registeredEval(): FakeCtx {
+    const ctx = new FakeCtx()
+      .register(internal.scoutEval.questions, questions)
+      .register(internal.scoutEval.retrieve, retrieve);
+    registerFakeScoutModel(ctx);
+    return ctx;
+  }
+
+  it("names nothing, and says so in prose, when no question reached the model", async () => {
+    const ctx = registeredEval();
+    await seedLab(ctx);
+
+    const report = await runReport(ctx);
+
+    expect(report.ranker).toBe("none — no question reached the model");
+    // Not "ranked by none — no question reached the model, through the same
+    // prompt, seam, and citation gate the product uses", which is what a
+    // sentinel poured through the model branch reads like.
+    expect(report.asymmetry.join(" ")).toMatch(
+      /No question in this run reached the model/,
+    );
+    expect(report.asymmetry.join(" ")).not.toMatch(/ranked by none/);
+  });
+
+  it("leaves a scored question that gathered nothing out of the ranker set", async () => {
+    const ctx = registeredEval();
+    const seed = await seedLab(ctx);
+    await seedUnsearchableQuestion(ctx, seed, SETTLED_AT);
+
+    const report = await runReport(ctx);
+
+    // Scored — it has a label — and ranked by nobody.
+    expect(report.population.questionsScored).toBe(1);
+    expect(report.questions[0]!.scout.candidatesConsidered).toBe(0);
+    expect(report.questions[0]!.scout.system).toBe(
+      "scout (nothing gathered; no model called)",
+    );
+    expect(report.population.questionsWithNoRanker).toBe(1);
+    // The fixture was registered and never called. Naming it here is the
+    // failure this test exists for.
+    expect(report.ranker).not.toContain("stub.scout.v0");
+    expect(report.ranker).toBe("none — no question reached the model");
+  });
+
+  it("keeps the sentinel out of the aggregate when the first row is the empty one", async () => {
+    const ctx = registeredEval();
+    const seed = await seedSettledQuestion(ctx);
+    await seedReply(ctx, seed);
+    // Settled *later*, so it sorts to the front of the report — which is the
+    // whole bug: the aggregate used to take its heading from row 0, so one
+    // question that gathered nothing would caption the means every other
+    // question produced.
+    await seedUnsearchableQuestion(ctx, seed, SETTLED_AT + 1);
+
+    const report = await runReport(ctx);
+
+    expect(report.population.questionsScored).toBe(2);
+    expect(report.questions[0]!.scout.candidatesConsidered).toBe(0);
+    expect(report.aggregate.scout.system).toBe("scout (stub.scout.v0)");
+    expect(report.aggregate.scout.system).not.toContain("nothing gathered");
+    expect(report.ranker).toBe("stub.scout.v0");
+
+    const asymmetry = report.asymmetry.join(" ");
+    // The mixed run still gets the fixture caveat, and it also gets told that
+    // one of its two rows contributed a recall 0 no model was asked about.
+    expect(asymmetry).toMatch(/offline fixture/);
+    expect(report.population.questionsWithNoRanker).toBe(1);
+    expect(asymmetry).toMatch(/1 scored question gathered no candidates/);
+    expect(asymmetry).not.toContain("nothing gathered; no model called");
+  });
+
+  it("keeps the §10.2 warning on a run only half of which was the fixture", async () => {
+    const ctx = registeredEval();
+    const seed = await seedSettledQuestion(ctx);
+    await seedReply(ctx, seed);
+    await seedExtraQuestion(
+      ctx,
+      seed,
+      SETTLED_AT - 1,
+      "Which cohort's plates were logged in the second notebook?",
+    );
+    // One real model, one fixture, in the order the report scores them. A run
+    // like this is what a half-migrated deployment produces, and it is exactly
+    // the run whose warning an equality test on the joined name would drop.
+    let call = 0;
+    ctx.register(internal.delegations.callScoutModel, {
+      _handler: (_inner: unknown, args: { prompt: string }) => {
+        call += 1;
+        const answer = fakeScoutModel(args.prompt);
+        return call === 1 ? { ...answer, model: "gpt-5.6-sol" } : answer;
+      },
+    });
+
+    const report = await runReport(ctx);
+
+    expect(report.ranker).toBe("gpt-5.6-sol, stub.scout.v0");
+    const asymmetry = report.asymmetry.join(" ");
+    expect(asymmetry).toMatch(/Part of this run was ranked by the offline fixture/);
+    expect(asymmetry).toMatch(/and part by gpt-5\.6-sol/);
+    // The warning is the point. A mixed run is not the launch gate either.
+    expect(asymmetry).toMatch(/not the gate the design's §10\.2 is asking for/);
+    expect(report.aggregate.scout.system).toBe(
+      "scout (gpt-5.6-sol, stub.scout.v0)",
+    );
   });
 });
 

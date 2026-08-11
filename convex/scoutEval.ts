@@ -588,6 +588,10 @@ const reportShape = v.object({
     questionsUnreadable: v.number(),
     questionsBeyondLimit: v.number(),
     labelsDroppedNotLabVisible: v.number(),
+    // Optional on the wire because it is optional on `Population`, which is
+    // shared with fixtures written before this counter existed. `run` always
+    // sends it; absent and zero mean the same thing.
+    questionsWithNoRanker: v.optional(v.number()),
     truncated: v.array(v.string()),
   }),
   questions: v.array(
@@ -655,17 +659,43 @@ const GROUND_TRUTH_CAVEATS = [
  */
 const NO_RANKER = "none — no question reached the model";
 
-function asymmetryNotes(ranker: string): string[] {
+/**
+ * The run's disclosures, in the output rather than in a footnote.
+ *
+ * Takes the models that answered as a *set* rather than the joined string the
+ * report prints, because the two questions this prose has to answer are "was
+ * any of this the fixture" and "was any of it a model", and both are membership
+ * questions. Asking them of the joined string means exact equality, and exact
+ * equality drops the §10.2 warning from precisely the run that most needs it:
+ * the mixed one, where half the rows were ranked by a stub.
+ */
+function asymmetryNotes(
+  answered: readonly string[],
+  questionsWithNoRanker: number,
+): string[] {
+  const others = answered.filter((one) => one !== STUB_MODEL);
   return [
     `Candidate counts are not equal, by construction. The scout ranks the notes its gather returned (up to ${MAX_CANDIDATES}); the search drawer reads the index's top ${BASELINE_RESULTS * BASELINE_OVERFETCH} and returns the first ${BASELINE_RESULTS} that survive its live filter, ranking nothing further. Both sides are scored on ${EVAL_TOP_N} results, and each per-question row prints the pool its side actually chose from.`,
     `The two sides also send different queries: the scout reduces the question to keywords (stopwords and repeats removed) to fit the ${MAX_SEARCH_LENGTH}-character search cap, while the drawer sends the question as a member typed it, truncated at the same cap. That difference is part of what is being measured, not a defect in the comparison.`,
     "The baseline is the drawer's shared half, and that makes it the drawer's *upper* bound rather than a handicap. `search.everything` interleaves the caller's own private notes into the same six slots — a member's private notes evict lab-visible rows rather than extending the list — and every label here is lab-visible by construction. So a real member, sitting in front of the real drawer with private notes of their own that match, would see at most as many labelled notes as this baseline reports and usually fewer. An eval has no caller whose notebook it could legitimately read, and the scout has no private half either.",
     "Retrieval runs against the corpus as it stands today, not as it stood on the day each question was settled: notes written since are candidates now and were not then. Both sides read the same corpus, so the comparison holds — but absolute recall drifts downward as a lab keeps writing, and two runs made on different dates are not comparable to each other.",
-    ranker === NO_RANKER
+    answered.length === 0
       ? "No question in this run reached the model — every one of them was dropped, or gathered nothing to rank. The scout side is not a measurement of anything, and the numbers beside it are the arithmetic of an empty list."
-      : ranker === STUB_MODEL
-        ? `The scout side was ranked by the offline fixture (${STUB_MODEL}), which cites its candidates in gather order. This run measured retrieval and query reduction, not a model's judgement, and it is not the gate the design's §10.2 is asking for.`
-        : `The scout side was ranked by ${ranker}, through the same prompt, seam, and citation gate the product uses.`,
+      : !answered.includes(STUB_MODEL)
+        ? `The scout side was ranked by ${answered.join(", ")}, through the same prompt, seam, and citation gate the product uses.`
+        : others.length === 0
+          ? `The scout side was ranked by the offline fixture (${STUB_MODEL}), which cites its candidates in gather order. This run measured retrieval and query reduction, not a model's judgement, and it is not the gate the design's §10.2 is asking for.`
+          : `Part of this run was ranked by the offline fixture (${STUB_MODEL}), which cites its candidates in gather order, and part by ${others.join(", ")}. Mixed, the aggregate is not a measurement of a model's judgement either, and this run is not the gate the design's §10.2 is asking for.`,
+    ...(questionsWithNoRanker === 0
+      ? []
+      : [
+          // Scored, and scored correctly — but a question whose gather came
+          // back empty contributes recall 0 to the means without any model
+          // having seen it. Left undisclosed, the reader reads those zeros as
+          // a model's failure to rank rather than as retrieval's failure to
+          // return, and those are different repairs.
+          `${questionsWithNoRanker} scored question${questionsWithNoRanker === 1 ? "" : "s"} gathered no candidates at all, so no model was asked about ${questionsWithNoRanker === 1 ? "it" : "them"} and ${questionsWithNoRanker === 1 ? "its" : "their"} recall 0 is retrieval's, not a ranker's. ${questionsWithNoRanker === 1 ? "It is" : "They are"} in the means below and in the per-question rows above, where the candidate pool prints as 0.`,
+        ]),
   ];
 }
 
@@ -698,6 +728,7 @@ export const run = internalAction({
     const rankers = new Set<string>();
     let unreadable = 0;
     let droppedAtRetrieval = 0;
+    let withNoRanker = 0;
 
     for (const one of found.questions) {
       const retrieved = await ctx.runQuery(internal.scoutEval.retrieve, {
@@ -734,7 +765,8 @@ export const run = internalAction({
         retrieved.question,
         retrieved.candidates,
       );
-      if (model !== null) rankers.add(model);
+      if (model === null) withNoRanker += 1;
+      else rankers.add(model);
 
       scored.push(
         scoreQuestion({
@@ -760,7 +792,6 @@ export const run = internalAction({
       );
     }
 
-    const totals = aggregate(scored);
     /**
      * What ranked this report — collected rather than declared.
      *
@@ -771,9 +802,14 @@ export const run = internalAction({
      * answered — and a sorted join, because one name joined is that name, so
      * the common case needs no branch of its own and no fallback that would
      * only ever fire by naming something that had not run.
+     *
+     * Computed before the aggregate because the aggregate is labelled from it.
+     * Left to its own devices `aggregate` takes the first row's `system` as the
+     * heading for every row's numbers, and the first row is not a spokesman.
      */
     const answered = [...rankers].sort();
     const ranker = answered.length === 0 ? NO_RANKER : answered.join(", ");
+    const totals = aggregate(scored, `scout (${ranker})`);
     const report: ScoutEvalReport = {
       generatedAt: Date.now(),
       ranker,
@@ -782,13 +818,14 @@ export const run = internalAction({
         rules: GROUND_TRUTH_RULES,
         caveats: GROUND_TRUTH_CAVEATS,
       },
-      asymmetry: asymmetryNotes(ranker),
+      asymmetry: asymmetryNotes(answered, withNoRanker),
       population: {
         ...found.population,
         questionsScored: scored.length,
         questionsUnreadable: unreadable,
         labelsDroppedNotLabVisible:
           found.population.labelsDroppedNotLabVisible + droppedAtRetrieval,
+        questionsWithNoRanker: withNoRanker,
         truncated: [...new Set(truncated)],
       },
       questions: scored,

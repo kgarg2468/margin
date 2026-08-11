@@ -181,6 +181,19 @@ export type Population = {
   /** Labels discarded because the note is no longer lab-visible. */
   labelsDroppedNotLabVisible: number;
   /**
+   * Scored questions whose gather came back empty, so no model was ever asked.
+   *
+   * They are scored — they have labels, and recall 0 against those labels is a
+   * true statement about what the scout returned. But they are not a
+   * measurement of a model's judgement, and they drag the means down without
+   * appearing anywhere in the ranker set. Reported so a reader can tell a
+   * model that ranked badly from a retrieval that returned nothing to rank.
+   *
+   * Optional because `formatScoutEvalReport` is shared with fixtures written
+   * before the counter existed; absent and zero mean the same thing.
+   */
+  questionsWithNoRanker?: number;
+  /**
    * Bounded reads that came back full, in the reader's words.
    *
    * A `.take(n)` that returns exactly `n` has almost certainly left rows
@@ -325,11 +338,30 @@ function aggregateSide(
   };
 }
 
-export function aggregate(questions: readonly QuestionScore[]): Aggregate {
+export function aggregate(
+  questions: readonly QuestionScore[],
+  /**
+   * What to call the scout side over the whole run.
+   *
+   * Absent, the label is sampled from the first row — which is what this
+   * function used to do unconditionally, and which is only a label while every
+   * row carries the same one. A row's `system` names what ranked *that*
+   * question, so once the rows can disagree, a row-0 sample is a claim about
+   * eleven other rows made by looking at one of them: a run whose first
+   * question happened to gather nothing would print that fact as the heading
+   * over means the other eleven produced. The caller knows the run-level
+   * answer, and when it passes one this stops guessing.
+   *
+   * The baseline side needs no such argument. `search.everything` is a literal
+   * at its one call site and is the same string on every row by construction,
+   * so there is nothing there for a sample to be wrong about.
+   */
+  scoutSystem?: string,
+): Aggregate {
   return {
     questionsScored: questions.length,
     scout: aggregateSide(
-      questions[0]?.scout.system ?? "scout",
+      scoutSystem ?? questions[0]?.scout.system ?? "scout",
       questions.map((one) => one.scout),
     ),
     baseline: aggregateSide(
