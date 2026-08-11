@@ -20,6 +20,7 @@ import { useEffect, useState } from "react";
 import type { IngestStatus } from "./paper-meta";
 import { PdfDropzone } from "./pdf-dropzone";
 import { uploadPdf } from "./pdf-ingest";
+import { bytesProgress, isCancellation, percentSent } from "./upload-flow";
 import { useTextLayer } from "./use-text-layer";
 
 /**
@@ -61,6 +62,17 @@ export function PdfPanel({
   const [error, setError] = useState<string | null>(null);
   const [freeCopyUrl, setFreeCopyUrl] = useState("");
   const [opening, setOpening] = useState(false);
+  /**
+   * The live attach, so the wait has something to pull — and the bytes on the
+   * way up, for `aria-valuenow`. State, not refs, for both: the cancel
+   * control's presence is decided during render, and a ref written inside
+   * `attach` would leave the button on screen after the attach ended and off
+   * it while one ran.
+   */
+  const [attaching, setAttaching] = useState<AbortController | null>(null);
+  const [sending, setSending] = useState<{ loaded: number; total: number } | null>(
+    null,
+  );
 
   /**
    * Open the stored file on its own.
@@ -138,24 +150,55 @@ export function PdfPanel({
 
   async function attach(file: File) {
     setError(null);
+    const controller = new AbortController();
+    setAttaching(controller);
     // Held outside the `try` so the catch knows whether a file made it into
     // storage before things went wrong.
     let uploaded: Id<"_storage"> | null = null;
     try {
       setStatus("Reading the PDF…");
       const extraction = await extractPdfFile(file, {
+        signal: controller.signal,
         onProgress: (pagesDone, pages) =>
           setStatus(`Reading page ${pagesDone} of ${pages}…`),
       });
       setStatus("Storing it for the lab…");
+      setSending({ loaded: 0, total: file.size });
       const uploadUrl = await generateUploadUrl({ labId });
-      uploaded = await uploadPdf(uploadUrl, file);
+      uploaded = await uploadPdf(uploadUrl, file, {
+        signal: controller.signal,
+        onProgress: (loaded, total) => {
+          setSending({ loaded, total });
+          setStatus(bytesProgress(loaded, total));
+        },
+      });
+      if (controller.signal.aborted) {
+        throw controller.signal.reason;
+      }
+      // The control goes before the last leg rather than sitting there dead:
+      // `attachPdf` is one round trip and there is nothing left to abort.
+      setAttaching(null);
+      setSending(null);
+      setStatus("Filing it…");
       await attachPdf({ paperId, storageId: uploaded, pages: extraction.pages });
       // The paper owns the file now; it is not an orphan any more.
       uploaded = null;
       setStatus(null);
     } catch (caught) {
       setStatus(null);
+      // A withdrawal is not a verdict on the file. It leaves the paper exactly
+      // as it was, so nothing is marked failed — only the blob goes, if one
+      // got as far as storage before the abort landed.
+      if (isCancellation(caught)) {
+        if (uploaded !== null) {
+          try {
+            await discardUpload({ labId, storageId: uploaded });
+          } catch {
+            // The blob outlives us. Nothing the member can do about it.
+          }
+        }
+        return;
+      }
       // This catch covers the whole attach, not just the read: an upload or a
       // mutation can fail here too, and those arrive as `ConvexError`s whose
       // message is the one worth showing. So ask pdf.js's classifier first —
@@ -169,6 +212,9 @@ export function PdfPanel({
         );
       setError(message);
       await recover(uploaded, message);
+    } finally {
+      setAttaching(null);
+      setSending(null);
     }
   }
 
@@ -359,9 +405,39 @@ export function PdfPanel({
       )}
 
       {busyMessage !== null && (
-        <p className="font-sans text-sm text-ink-muted" aria-live="polite">
-          {busyMessage}
-        </p>
+        <div className="flex flex-wrap items-baseline gap-x-4 gap-y-2">
+          {/* Not a live region. It used to be, and a 340-page scan queued 340
+              announcements; the count is here to be looked at, and the
+              `progressbar` role is what lets it be asked for instead. */}
+          <p
+            role="progressbar"
+            aria-valuetext={busyMessage}
+            {...(sending === null
+              ? {}
+              : (() => {
+                  const percent = percentSent(sending.loaded, sending.total);
+                  return percent === null
+                    ? {}
+                    : {
+                        "aria-valuenow": percent,
+                        "aria-valuemin": 0,
+                        "aria-valuemax": 100,
+                      };
+                })())}
+            className="font-sans text-sm tabular-nums text-ink-muted"
+          >
+            {busyMessage}
+          </p>
+          {attaching !== null && (
+            <button
+              type="button"
+              onClick={() => attaching.abort()}
+              className={`${linkButtonClass} tap-target text-xs`}
+            >
+              Stop attaching it
+            </button>
+          )}
+        </div>
       )}
       {problem !== null && (
         <p role="alert" className={errorClass}>

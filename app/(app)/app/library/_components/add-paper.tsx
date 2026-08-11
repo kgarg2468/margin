@@ -9,6 +9,7 @@ import {
   errorClass,
   inputClass,
   labelClass,
+  linkButtonClass,
   panelClass,
   primaryButtonClass,
   secondaryButtonClass,
@@ -16,10 +17,18 @@ import {
 import { useAction, useMutation } from "convex/react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import type { ReactNode } from "react";
+import { useRef, useState } from "react";
 import { PdfDropzone } from "./pdf-dropzone";
 import { parseAuthors, titleFromFilename, uploadPdf } from "./pdf-ingest";
 import { ReferenceImport } from "./reference-import";
+import {
+  cancelOffer,
+  isCancellation,
+  percentSent,
+  stageAnnouncement,
+  stageProgress,
+} from "./upload-flow";
 import type { TextLayerPhase } from "./use-text-layer";
 import { useTextLayer } from "./use-text-layer";
 
@@ -327,11 +336,29 @@ function DoiOutcome({
 
 /* ------------------------------------------------------------- Upload --- */
 
+/**
+ * The file is carried through `sending` and `filing`, not dropped at the door.
+ *
+ * `ConfirmUpload` used to be rendered only in `read`, so submitting unmounted
+ * it and a failure remounted it — with its `useState` initialisers re-deriving
+ * title and authors from the PDF's own metadata. A title the member had
+ * corrected by hand was silently replaced by `Microsoft Word - draft3.doc` at
+ * the exact moment they were being told to try again. Keeping the same element
+ * in the same slot across all three stages is the fix: the component never
+ * unmounts, so there is no state to lose and nothing to hoist.
+ */
 type UploadPhase =
   | { kind: "empty" }
   | { kind: "reading"; pagesDone: number; pageCount: number }
   | { kind: "read"; file: File; extraction: PdfExtraction }
-  | { kind: "saving" };
+  | {
+      kind: "sending";
+      file: File;
+      extraction: PdfExtraction;
+      loaded: number;
+      total: number;
+    }
+  | { kind: "filing"; file: File; extraction: PdfExtraction };
 
 function UploadTab({ labId }: { labId: Id<"labs"> }) {
   const generateUploadUrl = useMutation(api.papers.generateUploadUrl);
@@ -341,24 +368,147 @@ function UploadTab({ labId }: { labId: Id<"labs"> }) {
 
   const [phase, setPhase] = useState<UploadPhase>({ kind: "empty" });
   const [error, setError] = useState<string | null>(null);
+  /** Not an error: what a withdrawal left behind, in the member's own words. */
+  const [note, setNote] = useState<string | null>(null);
+
+  /** Whatever is currently in flight, so the cancel control has something to pull. */
+  const inFlight = useRef<AbortController | null>(null);
+  /**
+   * Which submit is allowed to speak. An abandoned `filing` leaves a mutation
+   * running that will resolve into a component that has moved on; without this
+   * it would navigate away from a form the member had gone back to.
+   */
+  const attempt = useRef(0);
 
   async function read(file: File) {
     setError(null);
+    setNote(null);
+    const controller = new AbortController();
+    inFlight.current = controller;
     setPhase({ kind: "reading", pagesDone: 0, pageCount: 0 });
     try {
       const extraction = await extractPdfFile(file, {
+        signal: controller.signal,
         onProgress: (pagesDone, pageCount) =>
           setPhase({ kind: "reading", pagesDone, pageCount }),
       });
       setPhase({ kind: "read", file, extraction });
     } catch (caught) {
       setPhase({ kind: "empty" });
+      if (isCancellation(caught)) {
+        setNote("Stopped. Nothing was read and nothing was sent.");
+        return;
+      }
       setError(
         describePdfOpenError(caught) ??
           "Margin couldn't read that PDF. If it opens elsewhere, it may be encrypted — try re-saving it and dropping it in again.",
       );
+    } finally {
+      release(controller);
     }
   }
+
+  /**
+   * Clear the slot, but only if it is still this run's.
+   *
+   * An abandoned `filing` leaves `createFromUpload` in flight; it resolves
+   * minutes later into a component the member has since given another file to.
+   * A `finally` that cleared unconditionally would take the *new* run's
+   * controller with it, and the cancel button on screen would quietly stop
+   * cancelling anything — the one failure this whole task exists to prevent.
+   */
+  function release(controller: AbortController) {
+    if (inFlight.current === controller) {
+      inFlight.current = null;
+    }
+  }
+
+  async function submit(
+    file: File,
+    extraction: PdfExtraction,
+    title: string,
+    authors: string[],
+  ) {
+    setError(null);
+    setNote(null);
+    const mine = ++attempt.current;
+    const controller = new AbortController();
+    inFlight.current = controller;
+    setPhase({ kind: "sending", file, extraction, loaded: 0, total: file.size });
+
+    // The upload and the paper are two round trips. If the second one fails,
+    // the file is already sitting in storage with nothing pointing at it — and
+    // nothing will ever find it again.
+    let uploaded: Id<"_storage"> | null = null;
+    try {
+      const uploadUrl = await generateUploadUrl({ labId });
+      uploaded = await uploadPdf(uploadUrl, file, {
+        signal: controller.signal,
+        onProgress: (loaded, total) =>
+          setPhase({ kind: "sending", file, extraction, loaded, total }),
+      });
+      // The abort raced the response and lost. The bytes are in storage all
+      // the same, so they get discarded rather than orphaned.
+      if (controller.signal.aborted) {
+        throw controller.signal.reason;
+      }
+      setPhase({ kind: "filing", file, extraction });
+      const paperId = await createFromUpload({
+        labId,
+        storageId: uploaded,
+        title,
+        authors: authors.length > 0 ? authors : undefined,
+        pages: extraction.pages,
+      });
+      if (attempt.current !== mine) {
+        return;
+      }
+      router.push(`/app/library/${paperId}`);
+    } catch (caught) {
+      if (attempt.current !== mine) {
+        return;
+      }
+      setPhase({ kind: "read", file, extraction });
+      if (isCancellation(caught)) {
+        setNote("Cancelled. Nothing was added, and the file is still here.");
+      } else {
+        setError(readableError(caught, "We couldn't add that paper. Try again."));
+      }
+      if (uploaded !== null) {
+        try {
+          await discardUpload({ labId, storageId: uploaded });
+        } catch {
+          // Best effort. The member has already been told what happened; a
+          // failed clean-up is not a second thing to say.
+        }
+      }
+    } finally {
+      release(controller);
+    }
+  }
+
+  const offer = cancelOffer(phase);
+
+  function withdraw() {
+    if (offer === null) {
+      return;
+    }
+    if (offer.kind === "abort") {
+      inFlight.current?.abort();
+      return;
+    }
+    // Nothing to abort: `createFromUpload` is one round trip and cannot be
+    // recalled. What can be handed back is the form and the truth.
+    attempt.current += 1;
+    if (phase.kind === "filing") {
+      setPhase({ kind: "read", file: phase.file, extraction: phase.extraction });
+    }
+    setNote(
+      "Stopped waiting. If it did land, the paper is on the shelf already — look before adding it again.",
+    );
+  }
+
+  const progress = stageProgress(phase);
 
   return (
     <div
@@ -383,60 +533,45 @@ function UploadTab({ labId }: { labId: Id<"labs"> }) {
       )}
 
       {phase.kind === "reading" && (
-        <p className="font-sans text-sm text-ink-muted" aria-live="polite">
-          {phase.pageCount === 0
-            ? "Opening the PDF…"
-            : `Reading page ${phase.pagesDone} of ${phase.pageCount}…`}
-        </p>
+        <div className="flex flex-wrap items-baseline gap-x-4 gap-y-2">
+          <Progress phase={phase} />
+          <CancelControl offer={offer} onWithdraw={withdraw} />
+        </div>
       )}
 
-      {phase.kind === "read" && (
+      {/* One slot, three stages. The element position must not change between
+          them: React keeps this component's state only while it keeps the same
+          place in the tree, and its state is the member's typing. */}
+      {(phase.kind === "read" ||
+        phase.kind === "sending" ||
+        phase.kind === "filing") && (
         <ConfirmUpload
           file={phase.file}
           extraction={phase.extraction}
-          onStartOver={() => setPhase({ kind: "empty" })}
-          onSubmit={async (title, authors) => {
+          busy={phase.kind !== "read"}
+          progress={progress === null ? null : <Progress phase={phase} />}
+          cancel={<CancelControl offer={offer} onWithdraw={withdraw} />}
+          onStartOver={() => {
+            // A failure that is still on screen under a fresh dropzone is a
+            // failure about a file that is no longer there.
             setError(null);
-            setPhase({ kind: "saving" });
-            // The upload and the paper are two round trips. If the second one
-            // fails, the file is already sitting in storage with nothing
-            // pointing at it — and nothing will ever find it again.
-            let uploaded: Id<"_storage"> | null = null;
-            try {
-              const uploadUrl = await generateUploadUrl({ labId });
-              uploaded = await uploadPdf(uploadUrl, phase.file);
-              const paperId = await createFromUpload({
-                labId,
-                storageId: uploaded,
-                title,
-                authors: authors.length > 0 ? authors : undefined,
-                pages: phase.extraction.pages,
-              });
-              router.push(`/app/library/${paperId}`);
-            } catch (caught) {
-              setPhase({ kind: "read", file: phase.file, extraction: phase.extraction });
-              setError(
-                readableError(caught, "We couldn't add that paper. Try again."),
-              );
-              if (uploaded !== null) {
-                try {
-                  await discardUpload({ labId, storageId: uploaded });
-                } catch {
-                  // Best effort. The member has already been told what went
-                  // wrong; a failed clean-up is not a second thing to say.
-                }
-              }
-            }
+            setNote(null);
+            setPhase({ kind: "empty" });
           }}
+          onSubmit={(title, authors) =>
+            submit(phase.file, phase.extraction, title, authors)
+          }
         />
       )}
 
-      {phase.kind === "saving" && (
-        <p className="font-sans text-sm text-ink-muted" aria-live="polite">
-          Filing it…
-        </p>
-      )}
+      {/* The only thing that speaks. See `stageAnnouncement`. */}
+      <p className="sr-only" aria-live="polite">
+        {stageAnnouncement(phase)}
+      </p>
 
+      {note !== null && (
+        <p className="font-sans text-sm text-ink-muted">{note}</p>
+      )}
       {error !== null && (
         <p role="alert" className={errorClass}>
           {error}
@@ -446,14 +581,79 @@ function UploadTab({ labId }: { labId: Id<"labs"> }) {
   );
 }
 
+/**
+ * The count, for eyes and for anyone who asks for it — and for nobody who
+ * didn't. A `progressbar` is polled rather than announced, which is the whole
+ * difference between a readout and 340 interruptions.
+ */
+function Progress({ phase }: { phase: UploadPhase }) {
+  const text = stageProgress(phase);
+  if (text === null) {
+    return null;
+  }
+  const percent =
+    phase.kind === "sending" ? percentSent(phase.loaded, phase.total) : null;
+  return (
+    <p
+      role="progressbar"
+      aria-valuetext={text}
+      {...(percent === null
+        ? {}
+        : { "aria-valuenow": percent, "aria-valuemin": 0, "aria-valuemax": 100 })}
+      className="font-sans text-sm tabular-nums text-ink-muted"
+    >
+      {text}
+    </p>
+  );
+}
+
+function CancelControl({
+  offer,
+  onWithdraw,
+}: {
+  offer: { kind: "abort" | "abandon"; label: string } | null;
+  onWithdraw: () => void;
+}) {
+  if (offer === null) {
+    return null;
+  }
+  return (
+    <button
+      type="button"
+      onClick={onWithdraw}
+      className={`${linkButtonClass} tap-target text-xs`}
+    >
+      {offer.label}
+    </button>
+  );
+}
+
+/**
+ * The fields, and they stay put.
+ *
+ * This form used to be rendered only while the phase was `read`, so submitting
+ * unmounted it and a failed save remounted it — re-deriving title and authors
+ * from the PDF's metadata and throwing away whatever the member had typed, at
+ * the one moment they were being asked to try again. It now stays mounted
+ * through the upload and the save, disabled rather than gone: the corrections
+ * are still on screen while the bytes move, and still there if they don't land.
+ * That is also where the cancel control has to live, because this is the only
+ * thing on screen during the wait.
+ */
 function ConfirmUpload({
   file,
   extraction,
+  busy,
+  progress,
+  cancel,
   onStartOver,
   onSubmit,
 }: {
   file: File;
   extraction: PdfExtraction;
+  busy: boolean;
+  progress: ReactNode;
+  cancel: ReactNode;
   onStartOver: () => void;
   onSubmit: (title: string, authors: string[]) => Promise<void>;
 }) {
@@ -494,6 +694,7 @@ function ConfirmUpload({
         <input
           id="paper-title"
           required
+          disabled={busy}
           maxLength={500}
           value={title}
           onChange={(event) => setTitle(event.target.value)}
@@ -507,6 +708,7 @@ function ConfirmUpload({
         </label>
         <input
           id="paper-authors"
+          disabled={busy}
           value={authors}
           onChange={(event) => setAuthors(event.target.value)}
           placeholder="Rosalind Franklin; Raymond Gosling"
@@ -514,17 +716,22 @@ function ConfirmUpload({
         />
       </div>
 
-      <div className="flex items-center gap-4">
-        <button type="submit" className={primaryButtonClass}>
-          Add to library
+      <div className="flex flex-wrap items-center gap-4">
+        <button type="submit" disabled={busy} className={primaryButtonClass}>
+          {busy ? "Adding…" : "Add to library"}
         </button>
-        <button
-          type="button"
-          onClick={onStartOver}
-          className={secondaryButtonClass}
-        >
-          Choose another file
-        </button>
+        {busy ? (
+          cancel
+        ) : (
+          <button
+            type="button"
+            onClick={onStartOver}
+            className={secondaryButtonClass}
+          >
+            Choose another file
+          </button>
+        )}
+        {progress}
       </div>
     </form>
   );

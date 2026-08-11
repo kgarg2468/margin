@@ -38,6 +38,14 @@ export type PdfExtraction = {
 export type ExtractOptions = {
   /** Called after each page. Papers are short but scans are slow; the UI shows a count. */
   onProgress?: (pagesDone: number, pageCount: number) => void;
+  /**
+   * Withdraw the read. Checked between pages, which is the finest grain
+   * available — one page's `getTextContent` is a single worker round trip and
+   * is not interruptible — and honoured by the `finally` below, which destroys
+   * the loading task whichever way this ends. Optional and additive: the two
+   * callers that never cancel are unchanged by it.
+   */
+  signal?: AbortSignal;
 };
 
 /**
@@ -157,6 +165,10 @@ export async function extractPdf(
   data: ArrayBuffer,
   options: ExtractOptions = {},
 ): Promise<PdfExtraction> {
+  // Before the import, not after: `loadPdfjs` pulls ~1 MB over the network on
+  // first use, and a cancel that lands during it should not go on to open the
+  // document it was called off from.
+  options.signal?.throwIfAborted();
   const pdfjs = await loadPdfjs();
 
   // pdf.js transfers ownership of the buffer it is given to its worker, so it
@@ -169,6 +181,7 @@ export async function extractPdf(
     const pageCount = doc.numPages;
     const pages: string[] = [];
     for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) {
+      options.signal?.throwIfAborted();
       pages.push(await extractPageText(doc, pageNumber));
       options.onProgress?.(pageNumber, pageCount);
     }
