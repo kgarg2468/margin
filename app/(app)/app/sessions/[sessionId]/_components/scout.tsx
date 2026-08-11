@@ -6,8 +6,8 @@ import { stripLabels } from "@/lib/citations/labels";
 import {
   citationSummary,
   coverageLine,
+  drawnStatusLine,
   droppedLine,
-  scoutStatusLine,
   type KnownNote,
 } from "@/lib/scout/surface";
 import { chipClass } from "@/lib/ui";
@@ -30,7 +30,9 @@ import Link from "next/link";
  *
  * The brief renders on its own subscription and this hangs underneath on two
  * more. A question with no run draws nothing at all; a run in flight draws one
- * quiet line that resolves itself when the row moves. There is no path by
+ * quiet line that resolves itself when the row moves — including a *rerun*,
+ * whose line is drawn above the report the previous run left standing, so that
+ * pressing the button visibly does something. There is no path by
  * which a delegation can delay a brief, and there is not meant to be one
  * (design §6.1) — the scout is scheduled strictly after the brief is written,
  * in its own transaction.
@@ -69,90 +71,102 @@ export function ScoutFinding({
   if (runs === undefined || runs.length === 0) {
     return null;
   }
-  const status = scoutStatusLine(runs[0]);
+  // `undefined` is a subscription that has not landed and `null` is a question
+  // with no report; both mean "nothing to draw underneath", and neither waits.
+  const report = finding ?? null;
+  // Both facts, one rule, and it lives in `lib/` — see `drawnStatusLine` for
+  // why a rerun still in flight is drawn over a standing report while a rerun
+  // that came back empty or failed leaves that report alone and says nothing.
+  const status = drawnStatusLine(runs[0], report !== null);
 
-  if (finding === undefined || finding === null) {
-    return status === null ? null : (
-      <p
-        role="status"
-        className="mt-2 font-sans text-xs italic text-ink-faint"
-      >
+  // Declared once and placed twice: alone under the question when there is no
+  // report, and above one when there is.
+  const line =
+    status === null ? null : (
+      <p role="status" className="mt-2 font-sans text-xs italic text-ink-faint">
         {status}
       </p>
     );
+
+  if (report === null) {
+    return line;
   }
 
-  const dropped = droppedLine(finding);
+  const dropped = droppedLine(report);
 
   return (
-    <div
-      style={{ borderLeftColor: "var(--secondary)" }}
-      className="mt-3 flex flex-col gap-2 border-l-2 pl-3.5"
-    >
-      <p className="flex flex-wrap items-baseline gap-x-3">
-        <span
-          style={{ color: "var(--secondary)" }}
-          className="font-sans text-[10px] uppercase tracking-[0.14em]"
-        >
-          Scout
-        </span>
-        <span className="font-sans text-[11px] text-ink-faint tabular-nums">
-          {coverageLine(finding.coverage)}
-        </span>
-      </p>
-
-      <ul className="flex flex-col gap-2.5">
-        {finding.items.map((item, index) => {
-          const { resolved, elsewhere } = citationSummary(
-            item.citedAnnotationIds,
-            known,
-          );
-          return (
-            <li key={`${finding._id}-${index}`} className="flex flex-col gap-1">
-              {/* A redacted item carries the sentence the backend wrote for it
-                  and nothing else — no citations drawn as links, no counts, no
-                  shape of what was behind it. The ids stay on the wire so a
-                  client can reach the same verdict; they are not drawn. */}
-              <p
-                className={
-                  item.redacted
-                    ? "max-w-prose font-serif text-[15px] italic leading-relaxed text-ink-faint"
-                    : "max-w-prose font-serif text-[15px] leading-relaxed text-ink"
-                }
-              >
-                {item.redacted ? item.text : stripLabels(item.text)}
-              </p>
-              {!item.redacted && (
-                <p className="flex flex-wrap items-baseline gap-x-3 gap-y-1 font-sans text-[11px] text-ink-faint">
-                  {resolved.map((note) => (
-                    <Link
-                      key={note.id}
-                      href={`/app/library/${paperId}/read?note=${note.id}`}
-                      className="text-accent underline-offset-4 hover:underline tabular-nums"
-                    >
-                      {note.authorName}, p. {note.pageIndex + 1}
-                    </Link>
-                  ))}
-                  {elsewhere > 0 && (
-                    // Counted, not named. The page has no row for these, and a
-                    // link it cannot aim is a promise it cannot keep.
-                    <span className="tabular-nums">
-                      and {elsewhere} more elsewhere in the lab
-                    </span>
-                  )}
-                </p>
-              )}
-            </li>
-          );
-        })}
-      </ul>
-
-      {dropped !== null && (
-        <p className="font-sans text-[11px] text-ink-faint tabular-nums">
-          {dropped}
+    <>
+      {line}
+      <div
+        style={{ borderLeftColor: "var(--secondary)" }}
+        className="mt-3 flex flex-col gap-2 border-l-2 pl-3.5"
+      >
+        <p className="flex flex-wrap items-baseline gap-x-3">
+          <span
+            style={{ color: "var(--secondary)" }}
+            className="font-sans text-[10px] uppercase tracking-[0.14em]"
+          >
+            Scout
+          </span>
+          <span className="font-sans text-[11px] text-ink-faint tabular-nums">
+            {coverageLine(report.coverage)}
+          </span>
         </p>
-      )}
-    </div>
+
+        <ul className="flex flex-col gap-2.5">
+          {report.items.map((item, index) => {
+            const { resolved, elsewhere } = citationSummary(
+              item.citedAnnotationIds,
+              known,
+            );
+            return (
+              <li key={`${report._id}-${index}`} className="flex flex-col gap-1">
+                {/* A redacted item carries the sentence the backend wrote for
+                    it and nothing else — no citations drawn as links, no
+                    counts, no shape of what was behind it. The ids stay on the
+                    wire so a client can reach the same verdict; they are not
+                    drawn. */}
+                <p
+                  className={
+                    item.redacted
+                      ? "max-w-prose font-serif text-[15px] italic leading-relaxed text-ink-faint"
+                      : "max-w-prose font-serif text-[15px] leading-relaxed text-ink"
+                  }
+                >
+                  {item.redacted ? item.text : stripLabels(item.text)}
+                </p>
+                {!item.redacted && (
+                  <p className="flex flex-wrap items-baseline gap-x-3 gap-y-1 font-sans text-[11px] text-ink-faint">
+                    {resolved.map((note) => (
+                      <Link
+                        key={note.id}
+                        href={`/app/library/${paperId}/read?note=${note.id}`}
+                        className="text-accent underline-offset-4 hover:underline tabular-nums"
+                      >
+                        {note.authorName}, p. {note.pageIndex + 1}
+                      </Link>
+                    ))}
+                    {elsewhere > 0 && (
+                      // Counted, not named. The page has no row for these, and
+                      // a link it cannot aim is a promise it cannot keep.
+                      <span className="tabular-nums">
+                        and {elsewhere} more elsewhere in the lab
+                      </span>
+                    )}
+                  </p>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+
+        {dropped !== null && (
+          <p className="font-sans text-[11px] text-ink-faint tabular-nums">
+            {dropped}
+          </p>
+        )}
+      </div>
+    </>
   );
 }
 

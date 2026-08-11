@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   citationSummary,
   coverageLine,
+  drawnStatusLine,
   droppedLine,
   scoutStatusLine,
 } from "./surface";
@@ -53,6 +54,69 @@ describe("scoutStatusLine", () => {
     // page already shows that, and a second notice about a machine stopping
     // would be the product talking about itself.
     expect(scoutStatusLine({ status: "cancelled" })).toBeNull();
+  });
+});
+
+/**
+ * The same vocabulary, composed against what is already on the page. A rerun
+ * is the whole subject here: a question that has been scouted twice has a
+ * standing report *and* a new run walking its lifecycle, and which of those
+ * two a reader is told about is a judgement, not an accident.
+ */
+describe("drawnStatusLine", () => {
+  it("draws nothing for a question nobody scouted", () => {
+    expect(drawnStatusLine(undefined, false)).toBeNull();
+    expect(drawnStatusLine(undefined, true)).toBeNull();
+  });
+
+  it("says a new run is under way, over the top of the last one's report", () => {
+    expect(drawnStatusLine({ status: "queued" }, true)).toBe(
+      "Scout is looking back…",
+    );
+    expect(drawnStatusLine({ status: "running" }, true)).toBe(
+      "Scout is looking back…",
+    );
+  });
+
+  it("says the same thing when there is no report underneath it yet", () => {
+    expect(drawnStatusLine({ status: "running" }, false)).toBe(
+      "Scout is looking back…",
+    );
+  });
+
+  it("holds its tongue when a rerun came back empty and a report is standing", () => {
+    expect(drawnStatusLine({ status: "empty" }, true)).toBeNull();
+  });
+
+  it("holds its tongue when a rerun failed and a report is standing", () => {
+    expect(
+      drawnStatusLine(
+        { status: "failed", failureReason: "The scout couldn't reach its model." },
+        true,
+      ),
+    ).toBeNull();
+  });
+
+  it("says an empty run out loud when there is no report to stand on", () => {
+    expect(drawnStatusLine({ status: "empty" }, false)).toBe(
+      "The scout read the lab's margin and found nothing that bears on this.",
+    );
+  });
+
+  it("says a failure out loud when there is no report to stand on", () => {
+    expect(drawnStatusLine({ status: "failed" }, false)).toBe(
+      "The scout's run didn't finish. Nothing was stored.",
+    );
+  });
+
+  it("says nothing once a run returned, report or no report", () => {
+    expect(drawnStatusLine({ status: "returned" }, true)).toBeNull();
+    expect(drawnStatusLine({ status: "returned" }, false)).toBeNull();
+  });
+
+  it("says nothing about a run that was called off, either way", () => {
+    expect(drawnStatusLine({ status: "cancelled" }, true)).toBeNull();
+    expect(drawnStatusLine({ status: "cancelled" }, false)).toBeNull();
   });
 });
 

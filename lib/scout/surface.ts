@@ -55,6 +55,48 @@ export function scoutStatusLine(
   }
 }
 
+/**
+ * The line actually drawn under a question, given what is already beneath it.
+ *
+ * `scoutStatusLine` is the vocabulary — what sentence a run's status has.
+ * This is the rule, and it exists because a **rerun** makes the two come
+ * apart: a question scouted twice has a standing report *and* a newer run
+ * walking its own lifecycle, and a surface that consulted only one of them
+ * would be wrong in one direction or the other.
+ *
+ * Two cases, decided differently on purpose.
+ *
+ * **A newer run in flight is drawn, over the top of the last one's report.**
+ * Design §7 promises a run still in flight shows a quiet line that resolves
+ * reactively, and that promise does not lapse because an earlier report
+ * happens to be standing. A reader who pressed the button needs to see that
+ * something is happening; without this they would watch an unchanged report
+ * and conclude the press did nothing.
+ *
+ * **A rerun that came back empty or failed says nothing, and the standing
+ * report stays exactly as it is.** This is a decision, not an oversight. The
+ * old finding is still the newest report the scout returned, and it is not
+ * stale in any way that matters: `findings.toView` re-resolves every citation
+ * and re-applies redaction on *every* read, so what is on screen is checked
+ * against the margin as it stands right now, not as it stood when the run
+ * finished. "The scout read the lab's margin and found nothing that bears on
+ * this" printed directly above a cited report of what it found would be the
+ * product contradicting itself in two adjacent sentences, and the failure
+ * sentences describe a run that stored nothing — which is precisely why the
+ * thing underneath is still worth reading. Those sentences are for the case
+ * where there is no report to stand on, and that is the case they render in.
+ */
+export function drawnStatusLine(
+  run: { status: ScoutStatus; failureReason?: string } | undefined,
+  /** Whether a finding is already drawn beneath this line. */
+  hasFinding: boolean,
+): string | null {
+  if (run === undefined) return null;
+  const inFlight = run.status === "queued" || run.status === "running";
+  if (hasFinding && !inFlight) return null;
+  return scoutStatusLine(run);
+}
+
 const plural = (n: number, one: string, many: string): string =>
   `${n} ${n === 1 ? one : many}`;
 
