@@ -13,8 +13,10 @@ import { recordEvent } from "./lib/ledger";
 import { slackIsConfigured } from "./lib/slack";
 import { briefSectionKey } from "./schema";
 import { canApprove } from "./sessions";
-import { isStillShared, WITHDRAWN_ITEM_TEXT } from "./synthesis";
+import { WITHDRAWN_ITEM_TEXT } from "./synthesis";
 import { assembleBrief, type BriefAnnotation } from "../lib/brief/assemble";
+import { redactWhenAnyWithdrawn } from "../lib/citations/redaction";
+import { isStillShared } from "../lib/citations/visibility";
 
 /**
  * The presenter's pre-session brief.
@@ -42,9 +44,9 @@ import { assembleBrief, type BriefAnnotation } from "../lib/brief/assemble";
  * A stored citation is a claim about a row, and the margin moves underneath it:
  * notes get withdrawn and members flip one back to private. So `getForSession`
  * re-resolves every cited id on read and redacts a line whose notes have all
- * gone, using the same `isStillShared` predicate `convex/synthesis.ts` applies
- * — imported rather than restated, because a privacy rule with two definitions
- * has one that is out of date.
+ * gone, using the same `isStillShared` predicate every other surface applies
+ * (`lib/citations/visibility.ts`) — imported rather than restated, because a
+ * privacy rule with two definitions has one that is out of date.
  *
  * ## Two things this file will not do
  *
@@ -445,11 +447,12 @@ export function redactWithdrawn(
 ): StoredSection[] {
   return sections.map((section) => ({
     ...section,
-    items: section.items.map((item) =>
-      item.annotationIds.every((id) => stillShared.has(id))
-        ? item
-        : { ...item, text: WITHDRAWN_ITEM_TEXT },
-    ),
+    items: redactWhenAnyWithdrawn(
+      section.items,
+      stillShared,
+      (item) => item.annotationIds,
+      (item) => ({ ...item, text: WITHDRAWN_ITEM_TEXT }),
+    ).items,
   }));
 }
 

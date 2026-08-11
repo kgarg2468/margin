@@ -15,7 +15,8 @@ import { redactWithdrawn } from "./briefs";
 import { getMembership, requirePi, requireUserId } from "./lib/authz";
 import { recordEvent } from "./lib/ledger";
 import { normalizeWebhookUrl, slackIsConfigured } from "./lib/slack";
-import { isStillShared, WITHDRAWN_ITEM_TEXT } from "./synthesis";
+import { WITHDRAWN_ITEM_TEXT } from "./synthesis";
+import { isStillShared } from "../lib/citations/visibility";
 import {
   collisionLine,
   detectCollisions,

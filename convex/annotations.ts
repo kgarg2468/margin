@@ -19,7 +19,7 @@ import {
   reactionKind,
 } from "./schema";
 import { canApprove } from "./sessions";
-import { isStillShared } from "./synthesis";
+import { isStillShared } from "../lib/citations/visibility";
 import {
   checkTransition,
   grantsPresenterStanding,

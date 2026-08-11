@@ -14,7 +14,7 @@ import {
   STUB_MODEL,
 } from "./delegations";
 import { MAX_SEARCH_LENGTH } from "./search";
-import { isStillShared } from "./synthesis";
+import { isStillShared } from "../lib/citations/visibility";
 import {
   EVAL_TOP_N,
   aggregate,

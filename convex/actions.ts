@@ -7,7 +7,7 @@ import { getMembership, requireUserId } from "./lib/authz";
 import { recordEvent } from "./lib/ledger";
 import { actionKind } from "./schema";
 import { canApprove } from "./sessions";
-import { isStillShared } from "./synthesis";
+import { isStillShared } from "../lib/citations/visibility";
 import {
   canRecord,
   carryForward,
