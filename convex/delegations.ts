@@ -86,13 +86,18 @@ import {
  * (`convex/delegations.privacy.test.ts`) hands the prompt builder a hostile
  * result set to make sure it still says no.
  *
- * The brief's collision lines get one of the two, and the asymmetry is a fact
- * about them rather than an omission. Both gates test *rows*, and a line is
+ * The brief's collision lines get one of the two *today*, and the gap is named
+ * rather than argued away. Both shipped gates test **rows**, and a line is
  * prose: `gatherBriefCollisions` resolves its citations and drops the line if
- * any of them has moved, but nothing downstream can re-derive whether a
- * sentence quotes a note it did not name. So the rule holds where the rows
- * are, once, and the notes behind a surviving line are then read fresh and
- * pass through both gates like any other candidate.
+ * any of them has moved, so the rule holds where the rows are, and the notes
+ * behind a surviving line are then read fresh and pass through both gates like
+ * any other candidate. What is missing is a prompt-scope check — refuse a line
+ * unless every id it names resolves to a label the question may cite — and it
+ * is missing because it is only safe *paired* with a reserved slice of
+ * `MAX_CANDIDATES` for collision notes. Unpaired, it would silently delete
+ * every line on a lab whose search already fills the candidate budget, which
+ * is the majority case and the wrong failure. One follow-up, both halves or
+ * neither.
  *
  * ## Nothing here writes human speech
  *
@@ -197,11 +202,13 @@ export const MAX_COLLISION_LINES = 6;
 /**
  * And how much of one line, in characters.
  *
- * A collision line is composed prose — two members' names and two members'
- * words — so it is bounded by two annotation bodies rather than by anything
- * the assembler promises. Four hundred is a couple of sentences, which is what
- * the line is for; past that the prompt is spending its budget re-quoting
- * notes it is already showing under labels of their own.
+ * Not a budget the line is expected to reach. `collisionLine` composes two
+ * names, a fixed phrase, the paper's title, a page, and a quote already elided
+ * to `MAX_QUOTE_CHARS` — around three hundred characters by construction, and
+ * never an annotation's body. Four hundred leaves that its room and stops
+ * there for the same reason `MAX_COLLISION_LINES` exists: a stored row is
+ * untrusted whatever wrote it, and "the assembler would never" is not a bound
+ * this module is entitled to assume about a string it puts in a prompt.
  */
 export const MAX_COLLISION_LINE_CHARS = 400;
 
@@ -824,6 +831,19 @@ export async function gatherLabVisible(
  * replaced with a sentence saying it was here. The notes behind the surviving
  * lines are read fresh and added as candidates, because a line the model
  * cannot cite is a line it can only paraphrase.
+ *
+ * The subject is excluded from the *candidates* and not from the *lines*, and
+ * the asymmetry is the whole reason to read the brief at all. "A note never
+ * cites itself" is a rule about rows, and it does not transfer: the gold pair
+ * type — `possible answer`, a definition against an open question
+ * (`lib/digest/engine.ts`) — routinely has this run's carried-forward question
+ * as one of its two ends, and dropping those lines would delete exactly the
+ * collisions worth reading. Nor does the line quote the subject: `collisionLine`
+ * composes two members' names, a fixed phrase, the paper's title, a page, and
+ * an elided quote *from the paper* — never an annotation's body. So a line
+ * against the subject survives carrying the other end's label, which is right,
+ * and the loop below still refuses to hand the model the question as evidence
+ * about itself.
  */
 async function gatherBriefCollisions(
   ctx: QueryCtx,
@@ -847,11 +867,7 @@ async function gatherBriefCollisions(
     items.flatMap((item) => item.annotationIds),
   );
   const kept = items
-    .filter(
-      (item) =>
-        allCitationsShared(item.annotationIds, live) &&
-        !item.annotationIds.some((id) => id === exclude),
-    )
+    .filter((item) => allCitationsShared(item.annotationIds, live))
     .slice(0, MAX_COLLISION_LINES);
 
   const candidates: Candidate[] = [];
@@ -1089,7 +1105,7 @@ export function buildBatchPrompt(
     "- Answer every question in the material, under the same `ref` it was given.",
     "- Every item you report must cite at least one label, written as [A1], and only labels listed for that question.",
     "- Report only what the cited annotations support. Do not infer, conclude, or recommend.",
-    "- A question's `collisions` are lines its brief already drew between two members' notes. They are material, cited by the labels listed on each line.",
+    "- A question's `collisions` are lines drawn between two members' notes; cite one only by the labels listed on that line.",
     "- Do not address the reader, do not suggest next steps, and do not say what the lab should do.",
     "- Never state where the lab stands on a claim; that is recorded elsewhere and rendered from the record.",
     `- At most ${MAX_FINDING_ITEMS} items per question, each at most ${MAX_FINDING_ITEM_CHARS} characters.`,

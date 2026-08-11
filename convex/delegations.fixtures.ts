@@ -522,11 +522,12 @@ export async function seedAnnotation(
     deletedAt: number;
     type: string;
     labId: Id<"labs">;
+    paperId: Id<"papers">;
   }> = {},
 ): Promise<Id<"annotations">> {
   return await ctx.db.insert("annotations", {
     labId: overrides.labId ?? seed.labId,
-    paperId: seed.paperId,
+    paperId: overrides.paperId ?? seed.paperId,
     memberId: seed.memberId,
     anchor: {
       quote: "incubation at 4°C",

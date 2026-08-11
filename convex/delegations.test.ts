@@ -11,6 +11,8 @@ import {
   MAX_BATCH_CANDIDATES,
   MAX_BATCH_QUESTIONS,
   MAX_CANDIDATES,
+  MAX_COLLISION_LINES,
+  MAX_COLLISION_LINE_CHARS,
   MAX_SEARCH_LENGTH,
   actionSubjectIsOpen,
   annotationSubjectIsOpen,
@@ -109,6 +111,31 @@ async function queue(
 
 const run = (ctx: FakeCtx, delegationId: Id<"delegations">) =>
   handlerOf(runForBrief)(ctx, { delegationIds: [delegationId] } as never);
+
+/** A brief row carrying the collisions section, for a run to read back. */
+async function brief(
+  ctx: FakeCtx,
+  seed: Seed,
+  section: { items: { text: string; annotationIds: Id<"annotations">[] }[] },
+): Promise<Id<"briefs">> {
+  return await ctx.db.insert("briefs", {
+    sessionId: seed.sessionId,
+    labId: seed.labId,
+    paperId: seed.paperId,
+    generation: 1,
+    generatedAt: 1,
+    generatedBy: seed.pi,
+    trigger: "scheduled",
+    sections: [
+      {
+        key: "collisions",
+        heading: "Where the lab collided",
+        droppedCount: 0,
+        items: section.items,
+      },
+    ],
+  });
+}
 
 /* -------------------------------------------------------------------------
  * Query reduction
@@ -967,6 +994,45 @@ describe("the batch's candidate cap", () => {
 
     await run(ctx, await queue(ctx, seed, { briefId }));
     expect(rowAt(ctx.db.all("findings")).coverage.queriesRun).toBe(2);
+  });
+
+  it("carries no more of the brief's lines than the brief's own section holds", async () => {
+    // `MAX_COLLISION_LINES` is a bound on what a *stored* row may spend a
+    // prompt on. The assembler caps its own section at six, and this does not
+    // take its word for it — a row is untrusted whatever wrote it.
+    const { ctx, seed, calls } = await seeded();
+    const note = await corpus(ctx, seed);
+    await run(
+      ctx,
+      await queue(ctx, seed, {
+        briefId: await brief(ctx, seed, {
+          items: Array.from({ length: MAX_COLLISION_LINES + 3 }, (_, index) => ({
+            text: `Two members, one passage (${index}).`,
+            annotationIds: [note],
+          })),
+        }),
+      }),
+    );
+
+    expect(
+      rowAt(materialOf(rowAt(calls).prompt).questions).collisions,
+    ).toHaveLength(MAX_COLLISION_LINES);
+  });
+
+  it("cuts a line that arrived longer than a line has any business being", async () => {
+    const { ctx, seed, calls } = await seeded();
+    const note = await corpus(ctx, seed);
+    await run(
+      ctx,
+      await queue(ctx, seed, {
+        briefId: await brief(ctx, seed, {
+          items: [{ text: "x".repeat(2_000), annotationIds: [note] }],
+        }),
+      }),
+    );
+
+    const line = rowAt(rowAt(materialOf(rowAt(calls).prompt).questions).collisions);
+    expect(line.text).toHaveLength(MAX_COLLISION_LINE_CHARS);
   });
 
   it("counts one query for a run with no brief behind it", async () => {

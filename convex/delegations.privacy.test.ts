@@ -244,14 +244,46 @@ describe("the retrieval gate", () => {
  * ---------------------------------------------------------------------- */
 
 describe("the brief's collision lines", () => {
+  /** The payload the prompt carries, read back the way a model would. */
+  function materialOf(prompt: string): {
+    questions: {
+      labels: string[];
+      collisions: { text: string; labels: string[] }[];
+    }[];
+    annotations: { label: string; body: string }[];
+  } {
+    const marker = "MATERIAL (JSON):\n";
+    return JSON.parse(prompt.slice(prompt.indexOf(marker) + marker.length)) as {
+      questions: {
+        labels: string[];
+        collisions: { text: string; labels: string[] }[];
+      }[];
+      annotations: { label: string; body: string }[];
+    };
+  }
+
   /** A brief whose collision line was built from two notes, one of which has since gone private. */
   async function briefed(over: { secondVisibility: "private" | "lab" }) {
     const built = await world();
     const { ctx, seed, shared } = built;
+    // A paper of its own, so a candidate that arrived through the brief is
+    // distinguishable in `coverage` from one the search found: the collision
+    // is a signal about the *lab*, and the passages it joins need not be in
+    // the document this run's question sits on.
+    const otherPaperId = await ctx.db.insert("papers", {
+      labId: seed.labId,
+      title: "The preprint the method came from",
+      addedBy: seed.pi,
+      ingestStatus: "ready",
+    });
     const partner = await seedAnnotation(
       ctx,
       { ...seed, memberId: seed.member },
-      { body: `${SECRET} in a collision`, visibility: over.secondVisibility },
+      {
+        body: `${SECRET} in a collision`,
+        visibility: over.secondVisibility,
+        paperId: otherPaperId,
+      },
     );
     const briefId = await ctx.db.insert("briefs", {
       sessionId: seed.sessionId,
@@ -287,16 +319,32 @@ describe("the brief's collision lines", () => {
     ctx: FakeCtx,
     seed: Awaited<ReturnType<typeof seedLab>>,
     briefId: Id<"briefs">,
+    annotationId: Id<"annotations"> = seed.questionId,
   ) {
     return ctx.db.insert("delegations", {
       labId: seed.labId,
       agentKind: "scout.corpus",
       trigger: "brief",
       briefId,
-      annotationId: seed.questionId,
+      annotationId,
       requestedBy: seed.pi,
       requestedAt: Date.now(),
       status: "queued",
+    });
+  }
+
+  /** The line the brief drew, rewritten to name whichever notes a test wants. */
+  async function lineAgainst(
+    ctx: FakeCtx,
+    briefId: Id<"briefs">,
+    annotationIds: Id<"annotations">[],
+  ) {
+    const brief = await ctx.db.get(briefId);
+    const section = rowAt(brief?.sections ?? []);
+    await ctx.db.patch(briefId, {
+      sections: [
+        { ...section, items: [{ ...rowAt(section.items), annotationIds }] },
+      ],
     });
   }
 
@@ -334,6 +382,65 @@ describe("the brief's collision lines", () => {
       .all("findings")
       .flatMap((finding) => finding.items.flatMap((item) => item.citedAnnotationIds));
     expect(cited).toContain(partner);
+  });
+
+  it("keeps a line drawn against the run's own question", async () => {
+    // The gold pair type — `possible answer`, a definition against an open
+    // question — routinely has the carried-forward question this run *is*
+    // as one of its two ends. Dropping those lines would delete precisely the
+    // collisions §6.3 wants read. "A note never cites itself" is a rule about
+    // rows and does not transfer: `collisionLine` composes names, a phrase,
+    // the paper's title, a page and a quote from the *paper*, so the line
+    // carries no word of the subject's own body.
+    const { ctx, seed, briefId, partner } = await briefed({ secondVisibility: "lab" });
+    wire(ctx);
+    await lineAgainst(ctx, briefId, [seed.questionId, partner]);
+    const delegationId = await queueFrom(ctx, seed, briefId);
+    const calls = registerFakeScoutModel(ctx);
+
+    await handlerOf(runForBrief)(ctx, { delegationIds: [delegationId] } as never);
+
+    const asked = rowAt(materialOf(rowAt(calls).prompt).questions);
+    const line = rowAt(asked.collisions);
+    expect(line.text).toContain("against Ben Okafor");
+    // The other end, and only the other end: the question is still not
+    // offered to the model as evidence about itself.
+    expect(line.labels).toHaveLength(1);
+    const cited = ctx.db
+      .all("findings")
+      .flatMap((finding) => finding.items.flatMap((item) => item.citedAnnotationIds));
+    expect(cited).toContain(partner);
+    expect(cited).not.toContain(seed.questionId);
+  });
+
+  it("brings in a note the search itself never returned", async () => {
+    const { ctx, seed, briefId, partner } = await briefed({ secondVisibility: "lab" });
+    wire(ctx);
+    // A subject made entirely of stopwords reduces to no query at all, which
+    // is `gatherLabVisible`'s own documented early return. The search
+    // therefore contributes nothing and every candidate this run holds came
+    // off the brief — without which the collision is a line the model can
+    // read and never cite.
+    const mute = await seedAnnotation(
+      ctx,
+      { ...seed, memberId: seed.pi },
+      { type: "open-question", body: "Why is it that they are what they are?" },
+    );
+    const delegationId = await queueFrom(ctx, seed, briefId, mute);
+    const calls = registerFakeScoutModel(ctx);
+
+    await handlerOf(runForBrief)(ctx, { delegationIds: [delegationId] } as never);
+
+    expect(ctx.db.reads.some((read) => read.index === "search_body")).toBe(false);
+    expect(materialOf(rowAt(calls).prompt).annotations).toHaveLength(2);
+    const finding = rowAt(ctx.db.all("findings"));
+    expect(
+      finding.items.flatMap((item) => item.citedAnnotationIds),
+    ).toContain(partner);
+    // A paper the search never touched, counted honestly, and one query for
+    // the brief where the search ran none.
+    expect(finding.coverage.papersTouched).toBe(2);
+    expect(finding.coverage.queriesRun).toBe(1);
   });
 
   it("does not read a brief belonging to another lab", async () => {
