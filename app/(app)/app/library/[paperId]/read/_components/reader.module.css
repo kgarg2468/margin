@@ -42,12 +42,22 @@
  *
  * `data-sheet` is the reader's opt-out: figures read faithfully only in their
  * printed colours, and someone checking a heat map can ask for the white page
- * back. Scoped under the dark media query so the light scheme never filters.
+ * back.
+ *
+ * Two rules because "dark" is decided the way the `dark:` variant decides it,
+ * not by the OS alone: the system preference wins unless an ancestor class
+ * overrides it. The media query alone shipped a print-white sheet to anyone
+ * forcing dark on a light-appearance machine — the one surface the toggle
+ * didn't reach.
  */
 @media (prefers-color-scheme: dark) {
-  :global([data-sheet="dark"]) .canvas {
+  :global([data-sheet="dark"]:where(:not(.light, .light *))) .canvas {
     filter: invert(0.9) hue-rotate(180deg) sepia(0.4);
   }
+}
+
+:global([data-sheet="dark"]:where(.dark, .dark *)) .canvas {
+  filter: invert(0.9) hue-rotate(180deg) sepia(0.4);
 }
 
 /*

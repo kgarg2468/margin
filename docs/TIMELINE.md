@@ -29,7 +29,7 @@ Sequential; each PR polishes a screen *and* closes that screen's README-fidelity
 - [x] **A2 — Sessions.** (#73) Start-session disabled outside window with inline hint (kills the "isn't until in about 25 hours" server-error phrasing); End/Cancel confirm + undo toast (first real consumer of the toast layer); board quotes trimmed to sentence boundaries with `[nn]` debris stripped; legible type-distribution bar; **stable per-note synthesis citation numbering** (today every one renders "Note 1"); session↔reader loop via "← Back to session".
   ⚠ #55 (outcomes) touched the session board — verify quote-trimming targets still match before planning.
 - [x] **A3 — Library / ingest.** (#75) Post-ingest triple-title collapsed; `Done adding` and `Record` read as controls; upload byte progress with a cancel that works — verified cross-origin against the dev deployment; DOI/reference import with stops that hold at every seam (panel holds carry their exit's name); disabled dropzone refuses drops at the browser level.
-- [ ] **A4 — Shell & theme.** Theme toggle (auto/light/dark, default dark) replacing the wall-clock switch; digest placement fixed (nothing pops in mid-page); README screenshot regeneration to match shipped reality.
+- [x] **A4 — Shell & theme.** Theme toggle (auto/light/dark, default dark) replacing the wall-clock switch — a blocking boot script decides the class before first paint, the rail's footer carries the three-word radiogroup, and the forced-dark reader dims its PDF sheet whatever the OS asked for; digest placement fixed (the inbox holds its slot until both late paths answer, and a session's empty prep ghost folds shut instead of dropping out mid-page); all four README product figures reshot from the shipped dark default.
 
 ## 2. Track B — Remaining table stakes (strategy Phases 0–1 leftovers)
 
@@ -39,7 +39,7 @@ Independent of each other; parallelizable. All small-to-medium.
 - [x] **B2 — Email delivery finished** (#65) (retry with idempotency key, paced fan-out, guard tests enforcing the constitution; operator steps in the PR body).
 - [x] **B3 — Slack delivery** (#69) for briefs, digests, synthesis write-ups (webhook-level, not an app; the write-up is the distribution artifact — treat formatting as first-class).
 - [x] **B4 — Session-agenda templates.** (#70)
-- [ ] **B5 — Native Zotero sync** (import shipped via BibTeX/RIS in #47; this is the live-sync upgrade — lower priority than B1–B3).
+- [x] **B5 — Native Zotero sync.** (#77) Link with an API key, pick a scope, and the shelf follows: hourly one-page walk with a durable resumable cursor (`lastVersion` moves only on completion), Sync now, DOI-deduped items with PDFs. `syncPayload` is the one guard-tested key carrier; `commitPage` is fenced by a `(start, lastVersion, generation)` compare-and-set; a walk restarts only when its result set shrinks, re-baselined so it then advances. (Import shipped via BibTeX/RIS in #47.)
 
 ## 3. Track C — The scout (agent delegation) + eval
 

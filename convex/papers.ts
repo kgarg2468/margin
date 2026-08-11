@@ -142,7 +142,7 @@ async function requirePaperAccess(
   return { paper, membership };
 }
 
-function cleanTitle(input: string): string {
+export function cleanTitle(input: string): string {
   const title = input.trim().replace(/\s+/g, " ");
   if (title.length === 0) {
     throw new ConvexError("A paper needs a title.");
@@ -150,7 +150,7 @@ function cleanTitle(input: string): string {
   return title.slice(0, MAX_TITLE_LENGTH);
 }
 
-function cleanAuthors(input: string[] | undefined): string[] | undefined {
+export function cleanAuthors(input: string[] | undefined): string[] | undefined {
   if (input === undefined) {
     return undefined;
   }
@@ -947,8 +947,13 @@ async function fetchOpenAccessPdf(url: string): Promise<Blob | null> {
  * the DOI walk in where the URL came from and in how far it is trusted to
  * redirect — it does not differ in what counts as a PDF, and two copies of
  * this would be two places for the size cap to drift.
+ *
+ * Three paths now: the DOI walk, the pasted link, and a Zotero attachment.
+ * All three want the same answer to "is this a PDF we agreed to hold", and
+ * the Zotero one needs the `%PDF-` fallback most of all — Zotero's storage
+ * host answers `application/octet-stream` more often than not.
  */
-async function pdfFromResponse(response: Response): Promise<Blob | null> {
+export async function pdfFromResponse(response: Response): Promise<Blob | null> {
   if (!response.ok) {
     return null;
   }

@@ -4,13 +4,14 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { GOLD_PAIRS } from "@/lib/digest/engine";
 import { relativeWhen } from "@/lib/sessions-ui";
-import { errorClass, eyebrowClass } from "@/lib/ui";
+import { errorClass, eyebrowClass, skeletonClass } from "@/lib/ui";
 import type { FunctionReturnType } from "convex/server";
 import { useMutation } from "convex/react";
 import { useQuery } from "convex-helpers/react/cache/hooks";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
+import { inboxState } from "./digest-state";
 import { readableError } from "./errors";
 
 type Digest = FunctionReturnType<typeof api.digests.listMine>[number];
@@ -47,10 +48,6 @@ const BOUNDARY_LABEL: Record<Digest["boundary"], string> = {
 
 /**
  * The prep digest for one session — the personal half of a session page.
- *
- * Renders nothing at all when the boundary hasn't fired: a session scheduled
- * for next week has no prep yet, and an empty "Your prep" heading over a blank
- * box is worse than the absence of one.
  */
 export function SessionDigest({
   labId,
@@ -60,14 +57,50 @@ export function SessionDigest({
   sessionId: Id<"sessions">;
 }) {
   const digests = useQuery(api.digests.listMine, { labId });
+  const reduce = useReducedMotion();
   const mine = (digests ?? []).filter(
     (digest) => digest.sessionId === sessionId,
   );
 
+  // Nothing on this page builds a prep digest, so the subscription is the only
+  // late path — and for a session with none, which is most of them, the whole
+  // effect of the answer arriving is to take this slot away. It used to take it
+  // between two frames, and it sits between the presenter's brief and the
+  // manage panel: the controls under the cursor moved before the reader did.
+  // So the ghost folds shut, and the presence stays mounted through the empty
+  // state or there would be nothing left to run the exit. It folds to nothing
+  // rather than to a shell because a session scheduled for next week has no
+  // prep yet, and an empty "Your prep" heading over a blank box is worse than
+  // the absence of one. What the fold does not own is the page's gap between
+  // siblings, which still closes in one frame once the span unmounts — the
+  // same tail the inbox's section leaves.
   if (mine.length === 0) {
-    return null;
+    return (
+      <AnimatePresence initial={false}>
+        {digests === undefined && (
+          <motion.span
+            key="prep-ghost"
+            aria-label="Loading"
+            role="status"
+            exit={
+              reduce === true
+                ? { opacity: 0, transition: { duration: 0 } }
+                : { opacity: 0, height: 0, transition: { duration: 0.28 } }
+            }
+            style={{ overflow: "hidden" }}
+            className={`${skeletonClass} h-6 w-56`}
+          />
+        )}
+      </AnimatePresence>
+    );
   }
 
+  // Prep to show is the one arrival that does not fold: the presence goes with
+  // the same render that brings the section, so the ghost is gone rather than
+  // shrinking underneath the very thing it was standing in for. Kept inside the
+  // presence it would exit while the section entered, and the reader would get
+  // the cards, then a settle, then the gap's snap — three movements to say one
+  // digest turned up.
   return (
     <section className="flex flex-col gap-4">
       <h2 className={eyebrowClass}>Your prep</h2>
@@ -105,16 +138,71 @@ export function DigestInbox({ labId }: { labId: Id<"labs"> }) {
   // every call decides nothing: it is idempotent, it never stacks a second
   // card, and it never moves a cursor. The ref keeps a re-render from asking
   // twice, and a failure clears it again: a lab's home page must not turn into
-  // an error because a digest could not be built, but nor should one dropped
-  // request cost the member their digest for the whole visit.
+  // an error because a digest could not be built. Clearing the ref is not a
+  // retry — nothing re-runs this effect on its own — it means the next run,
+  // a return to the page or a switch back to this lab, asks fresh instead of
+  // remembering the failure forever.
+  //
+  // `settledFor` is separate from the ref because it is about the page rather
+  // than about the request: until the answer comes back, the section does not
+  // yet know whether it exists, and it holds a slot rather than guessing empty.
+  // It records *which* lab it settled for rather than a bare yes, because this
+  // page stays mounted when the sidebar switches labs. A bare flag would still
+  // read true from the lab just left — and the outgoing lab's request, landing
+  // a moment later, would set it true all over again. Either one collapses the
+  // slot while the new lab's catch-up is still out, which is the exact pop this
+  // component exists to prevent. Compared against the current `labId`, both of
+  // those stale writes are simply false.
+  //
+  // And a stale completion must not *write* at all, being false is not enough:
+  // if the lab just left settles after the current one, its unguarded write
+  // would replace the current lab's answer — an answer nothing will ever give
+  // again, because that request already ran. `live` names the lab the page is
+  // on when a completion lands; a request that outlived its lab settles
+  // nothing.
   const asked = useRef<string | null>(null);
+  const live = useRef(labId);
+  const [settledFor, setSettledFor] = useState<Id<"labs"> | null>(null);
   useEffect(() => {
+    live.current = labId;
     if (asked.current === labId) return;
     asked.current = labId;
-    void catchUp({ labId }).catch(() => {
-      if (asked.current === labId) asked.current = null;
-    });
+    void catchUp({ labId })
+      .catch(() => {
+        if (asked.current === labId) asked.current = null;
+      })
+      .finally(() => {
+        if (live.current === labId) setSettledFor(labId);
+      });
   }, [labId, catchUp]);
+
+  const state = inboxState({
+    loaded: digests !== undefined,
+    catchUpSettled: settledFor === labId,
+    unreadCount: unread.length,
+  });
+
+  // The reserved slot: one line, the same ghost the roster and the calendar
+  // use, sized to nothing in particular because a heading over an unknown is
+  // worse than a blank. Returning before the presence below can cut an exit
+  // short in exactly one race: mail already showing while catch-up is still
+  // out, and another device acknowledges the last card in that window. The
+  // slot drops back to a ghost until the answer lands — transient, and honest,
+  // since with the mail gone this lab genuinely does not know yet whether it
+  // is empty. Absent that race, both of the answers this state waits on move
+  // only forwards. Switching labs does come back, and means to — the cards
+  // below belong to the lab the reader just left, and holding them on screen
+  // while the new lab's mail is still out would be showing them another lab's
+  // inbox.
+  if (state === "reserving") {
+    return (
+      <span
+        aria-label="Loading"
+        role="status"
+        className={`${skeletonClass} h-6 w-56`}
+      />
+    );
+  }
 
   // "Caught up" is a put-away, and it should read as one: the acknowledged
   // card folds closed and the page settles, instead of everything below it

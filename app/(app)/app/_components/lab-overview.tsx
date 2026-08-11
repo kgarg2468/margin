@@ -23,6 +23,7 @@ import { InviteNotice } from "./lab-provider";
 import type { LabSummary } from "./lab-provider";
 import { JoinLabCard } from "./onboarding";
 import { SlackDelivery } from "./slack-delivery";
+import { ZoteroSync } from "./zotero-sync";
 
 /**
  * Emailing an invitation needs a Resend key on the Convex deployment, which
@@ -56,13 +57,20 @@ export function LabOverview({ lab }: { lab: LabSummary }) {
         </p>
       </header>
 
-      <NextSession lab={lab} />
+      {/* Mail first, and above everything it could otherwise have appeared in
+          the middle of. What changed since the reader last looked is the whole
+          reason the page is different from the last time they saw it; the
+          calendar and the roster are the same as they were. */}
       <DigestInbox labId={lab._id} />
+
+      <NextSession lab={lab} />
 
       <Members lab={lab} />
       {lab.role === "pi" && <Invites lab={lab} />}
       {/* Every member, not only the PI — the section explains why. */}
       <SlackDelivery lab={lab} />
+      {/* Per member, like Slack — but a key is one person's, not the lab's. */}
+      <ZoteroSync lab={lab} />
 
       <section className="flex flex-col gap-4 border-t border-rule pt-8">
         <details className="group flex flex-col gap-4">

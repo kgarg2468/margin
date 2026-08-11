@@ -35,6 +35,7 @@ import type * as slack from "../slack.js";
 import type * as synthesis from "../synthesis.js";
 import type * as temporal from "../temporal.js";
 import type * as users from "../users.js";
+import type * as zotero from "../zotero.js";
 
 import type {
   ApiFromModules,
@@ -70,6 +71,7 @@ declare const fullApi: ApiFromModules<{
   synthesis: typeof synthesis;
   temporal: typeof temporal;
   users: typeof users;
+  zotero: typeof zotero;
 }>;
 
 /**

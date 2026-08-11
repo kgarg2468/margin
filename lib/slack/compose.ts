@@ -27,7 +27,7 @@
  * artifact — handed to a third party, unrecallable — and the same rules bind
  * it, so nothing here emits an `image` block, an `image_url`, an `icon_url` or
  * an `accessory`, and the only links are the ones built from `siteUrl()`.
- * `convex/slack.guard.test.ts` states that mechanically.
+ * `convex/credentials.guard.test.ts` states that mechanically.
  *
  * ## Why everything is escaped
  *

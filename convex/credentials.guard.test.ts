@@ -16,31 +16,38 @@ import {
 } from "../lib/slack/compose";
 
 /**
- * THE THIRD THING THAT LEAVES THE BUILDING.
+ * THE THIRD THING THAT LEAVES THE BUILDING, AND EVERY CREDENTIAL THAT HOLDS
+ * A DOOR OPEN.
  *
  * `convex/privacy.guard.test.ts` asserts the half of Margin's promise that
  * lives in the schema. `convex/email.guard.test.ts` asserts the half that
  * leaves in an envelope. This asserts the half that leaves through a webhook,
- * and it carries one promise the other two do not have to make.
+ * and — since B5 — the half a bearer key lets in.
  *
- * A Slack incoming-webhook URL is a **credential**. Anyone holding it can post
- * into the lab's channel as the lab, forever, with no further authentication —
- * there is no key rotation, no scope, and no way for Margin to tell a real post
- * from somebody else's. It is also, unlike an API key on a deployment, a
- * per-lab value that a *product surface* is responsible for. Which means the
- * one way it gets out is the ordinary one: somebody adds it to a query's
- * returns because the settings page would be easier to write with it there, and
- * it is then in a browser's query cache, in a React devtools pane, and in the
- * memory of every machine the PI has ever opened the lab on.
+ * Two credentials, one rule. A Slack incoming-webhook URL lets anyone holding
+ * it post into a lab's channel as the lab, forever, with no further
+ * authentication. A Zotero API key is worse in the direction that matters: it
+ * reads one person's entire personal library, which is a reading history, and
+ * `convex/privacy.guard.test.ts` exists because Margin does not hold those.
+ * Both are per-*product-surface* values rather than deployment variables,
+ * which means both get out the same ordinary way — somebody adds one to a
+ * query's returns because the settings page would be easier to write with it
+ * there, and it is then in a browser's query cache, in a React devtools pane,
+ * and in the memory of every machine that page was ever opened on.
+ *
+ * One file rather than two, because a rule that holds in two places holds in
+ * one of them by the end of the year. So the pattern below is named for
+ * credentials rather than for webhooks, and every assertion that enumerates
+ * what it covers names both.
  *
  * So the promises, restated as assertions:
  *
- *   - No public function returns it, anywhere in the codebase. Checked by
- *     reading every public function's own returns validator out of Convex's
- *     introspection, not by grepping.
- *   - No table but `labs` holds it, and the append-only ledger never copies it.
- *   - One module posts to Slack, so there is one place these rules have to
- *     hold rather than four.
+ *   - No public function returns either credential, anywhere in the codebase.
+ *     Checked by reading every public function's own returns validator out of
+ *     Convex's introspection, not by grepping.
+ *   - The webhook lives on `labs` and the API key on `zoteroLinks`, and
+ *     nowhere else; the append-only ledger copies neither.
+ *   - One module holds each transport, so these rules have one place to hold.
  *   - A composed message reaches for nothing remote, links only where it says
  *     it does, and sells nothing — the email constitution, in a channel.
  *   - A lab member's own words cannot become Slack markup on the way out.
@@ -116,12 +123,12 @@ function admitsText(fieldType: Json): boolean {
   return false;
 }
 
-/** Every place in `node` a webhook URL could be hiding under a plausible name. */
-function webhookShaped(node: Json): string[] {
+/** Every place in `node` a credential could be hiding under a plausible name. */
+function credentialShaped(node: Json): string[] {
   return declaredFields(node)
     .filter(
       (field) =>
-        WEBHOOK_ISH.test(field.path.split(".").at(-1) ?? field.path) &&
+        CREDENTIAL_ISH.test(field.path.split(".").at(-1) ?? field.path) &&
         (field.fieldType === null || admitsText(field.fieldType)),
     )
     .map((field) => field.path);
@@ -154,6 +161,28 @@ function wireForm(validator: unknown): ValidatorJSON {
     );
   }
   return json as ValidatorJSON;
+}
+
+/**
+ * The indexes a table declares, by name.
+ *
+ * Convex exposes these under a method whose name is a literal space followed
+ * by `indexes` — awkward on purpose, because it is experimental API. So this
+ * is one narrow accessor with a runtime assertion rather than a cast at every
+ * call site, the same trade `handlerOf` makes in `delegations.fixtures.ts`: if
+ * a future release renames it, the suite fails here, with a sentence, instead
+ * of quietly asserting about an empty list.
+ */
+function indexNames(table: unknown): string[] {
+  const read = (table as Record<string, unknown>)[" indexes"];
+  if (typeof read !== "function") {
+    throw new Error(
+      "A Convex TableDefinition no longer exposes its indexes; this guard cannot see whether dedupe has an index and must not be assumed to pass.",
+    );
+  }
+  return (read.call(table) as { indexDescriptor: string }[]).map(
+    (index) => index.indexDescriptor,
+  );
 }
 
 /**
@@ -193,29 +222,41 @@ function eventVariant(typeName: string): Record<string, Json> {
 }
 
 /**
- * What a field name has to look like to be a webhook getting out.
+ * What a field name has to look like to be a credential getting out.
  *
  * Matched on the field name rather than on its value, because a validator has
  * no values — and named broadly, because the leak this exists to catch is
- * somebody adding `slackUrl`, `webhook` or `deliveryUrl` to a returns shape
- * while thinking about a settings form rather than about a credential. The
- * first version of this pattern promised `deliveryUrl` in that sentence and
- * did not match it; `hookUrl`, `channelUrl`, `postUrl` and `slackDestination`
- * walked past it too. Being wrong about which names are suspicious is the one
- * way this whole file fails silently, so the pattern is now deliberately
- * over-eager and `admitsText` does the narrowing — on the field's type, which
- * cannot be talked into anything.
+ * somebody adding `slackUrl`, `deliveryUrl` or `zoteroApiKey` to a returns
+ * shape while thinking about a settings form rather than about a credential.
+ * The first version of this pattern promised `deliveryUrl` in that sentence
+ * and did not match it; `hookUrl`, `channelUrl`, `postUrl` and
+ * `slackDestination` walked past it too, and then a whole second credential
+ * did. Being wrong about which names are suspicious is the one way this file
+ * fails silently, so the pattern is deliberately over-eager and `admitsText`
+ * does the narrowing — on the field's type, which cannot be talked into
+ * anything.
+ *
+ * Two words are deliberately *not* here. Bare `key` would match
+ * `papers.zoteroItemKey`, `zoteroLinks.collectionKey` and the `key` on a
+ * brief section — opaque public identifiers, every one, and flagging them
+ * would either get this pattern relaxed by the next person or force renames
+ * that made the schema worse. Bare `zotero` would match the same item key for
+ * the same non-reason. `apikey` matches `apiKey` and matches neither.
  */
-const WEBHOOK_ISH =
-  /webhook|hook|slack|deliver|destination|endpoint|channel|post/i;
+const CREDENTIAL_ISH =
+  /webhook|hook|slack|deliver|destination|endpoint|channel|post|apikey|zoterokey|token|secret|credential/i;
 
 /**
  * The pattern, held to the names it claims to cover.
  *
  * A regex is the kind of thing that quietly stops matching what its comment
  * says it matches — which is precisely how the first version of it shipped.
- * This list is the review's own, and `channel`/`post` are here because two of
- * the names on it still walked past the widened pattern until they were added.
+ * This list is the review's own; `channel`/`post` are here because two of the
+ * names on it still walked past the widened pattern until they were added,
+ * and the key-and-token spellings are here because a Zotero key is a
+ * credential this file did not cover at all until it was told to —
+ * `zoteroKey` among them, the audit's third spelling, which walked past
+ * the first widening too.
  */
 const PLAUSIBLE_NAMES = [
   "webhookUrl",
@@ -227,6 +268,11 @@ const PLAUSIBLE_NAMES = [
   "postUrl",
   "slackDestination",
   "incomingWebhook",
+  "apiKey",
+  "zoteroApiKey",
+  "zoteroKey",
+  "accessToken",
+  "clientSecret",
 ] as const;
 
 const normalizeName = (name: string): string =>
@@ -311,7 +357,7 @@ const registered: Registered[] = loaded.flatMap(({ name, exports }) =>
 
 const publicFunctions = registered.filter((fn) => fn.isPublic);
 
-describe("the webhook URL never reaches a client", () => {
+describe("no credential ever reaches a client", () => {
   it("found the functions it means to be checking", () => {
     // A walk that matched nothing would make every assertion below vacuous.
     expect(loaded.length).toBeGreaterThan(15);
@@ -366,40 +412,58 @@ describe("the webhook URL never reaches a client", () => {
     ).toEqual([]);
   });
 
-  it("recognises every name a webhook would plausibly be given", () => {
+  it("recognises every name a credential would plausibly be given", () => {
     // The scan below is only as good as this pattern. Checked directly, so the
     // day it stops matching one of these it fails here — loudly, with the name
     // in the message — rather than by returning an empty offender list.
-    const missed = PLAUSIBLE_NAMES.filter((name) => !WEBHOOK_ISH.test(name));
+    const missed = PLAUSIBLE_NAMES.filter((name) => !CREDENTIAL_ISH.test(name));
     expect(missed).toEqual([]);
     // And it is not simply matching everything, which would pass the line
-    // above while flagging half the schema.
-    expect(["title", "createdAt", "body", "quote"].filter((n) => WEBHOOK_ISH.test(n))).toEqual([]);
+    // above while flagging half the schema. The last three are the names this
+    // widening came closest to eating: opaque identifiers, not secrets.
+    expect(
+      ["title", "createdAt", "body", "quote", "zoteroItemKey", "collectionKey", "libraryId"]
+        .filter((n) => CREDENTIAL_ISH.test(n)),
+    ).toEqual([]);
   });
 
-  it("declares no webhook-shaped field in any public returns validator", () => {
+  it("declares no credential-shaped field in any public returns validator", () => {
     const offenders = publicFunctions.flatMap((fn) =>
-      webhookShaped(fn.returns).map((path) => `${fn.name} → ${path}`),
+      credentialShaped(fn.returns).map((path) => `${fn.name} → ${path}`),
     );
 
     expect(
       offenders,
-      "A Slack webhook URL is a credential. It has no business in a query result, a browser cache, or a devtools pane — not even the PI's, who already has it in Slack.",
+      "A Slack webhook URL and a Zotero API key are credentials. Neither has any business in a query result, a browser cache, or a devtools pane — not even the PI's.",
     ).toEqual([]);
   });
 
-  it("does put it in the internal queries that need it, so the check is real", () => {
-    // The inverse assertion. If the walk could not see a webhook field at all,
-    // the one above would pass for the wrong reason forever.
-    const internalWithWebhook = registered
-      .filter((fn) => !fn.isPublic && webhookShaped(fn.returns).length > 0)
+  it("does put them in the internal queries that need them, so the check is real", () => {
+    // The inverse assertion. If the walk could not see a credential field at
+    // all, the one above would pass for the wrong reason forever. Named rather
+    // than counted, so a payload that stopped carrying its credential — and
+    // therefore stopped proving anything — fails here with its own name.
+    const internalWithCredential = registered
+      .filter((fn) => !fn.isPublic && credentialShaped(fn.returns).length > 0)
       .map((fn) => fn.name)
       .sort();
 
-    expect(internalWithWebhook).toEqual([
+    expect(internalWithCredential).toContain("slack.boundaryPayload");
+    expect(internalWithCredential).toContain("slack.briefPayload");
+    expect(internalWithCredential).toContain("slack.synthesisPayload");
+  });
+
+  it("names zotero.syncPayload as the only Zotero carrier", () => {
+    const internalWithCredential = registered
+      .filter((fn) => !fn.isPublic && credentialShaped(fn.returns).length > 0)
+      .map((fn) => fn.name)
+      .sort();
+
+    expect(internalWithCredential).toEqual([
       "slack.boundaryPayload",
       "slack.briefPayload",
       "slack.synthesisPayload",
+      "zotero.syncPayload",
     ]);
   });
 
@@ -416,12 +480,12 @@ describe("the webhook URL never reaches a client", () => {
     ]);
     // The failure signal is a status code and a timestamp. Not Slack's response
     // body, which is a string this query has no reason to be able to carry.
-    expect(webhookShaped(status?.returns ?? null)).toEqual([]);
+    expect(credentialShaped(status?.returns ?? null)).toEqual([]);
   });
 });
 
 /* -------------------------------------------------------------------------
- * 2. And no table but `labs` holds it
+ * 2. And only the tables that must hold one, hold one
  * ---------------------------------------------------------------------- */
 
 describe("where the credential is stored", () => {
@@ -429,16 +493,37 @@ describe("where the credential is stored", () => {
     ([name, table]) => [name, wireForm(table.validator)] as const,
   );
 
-  it("lives on labs, and only on labs", () => {
-    const holders = tables.flatMap(([table, validator]) =>
-      webhookShaped(validator).length > 0 ? [table] : [],
-    );
-    // Anchored in both directions: it is here, and it is nowhere else. A
-    // second copy on `sessions` or `memberships` would be a second lifetime to
-    // reason about and a second read path to forget to gate.
-    expect(holders).toEqual(["labs"]);
+  it("lives on the tables that hold a credential, and no others", () => {
+    // Sorted so the assertion is about *where credentials live*, not about
+    // declaration order — reordering `schema.ts` for readability must not
+    // read as a credential regression.
+    const holders = tables
+      .flatMap(([table, validator]) =>
+        credentialShaped(validator).length > 0 ? [table] : [],
+      )
+      .sort();
+    // Anchored in both directions: they are here, and nothing else is. A
+    // fourth holder would be a fourth lifetime to reason about and a fourth
+    // read path to forget to gate. `labs` carries the lab's Slack webhook;
+    // `zoteroLinks` carries one member's own read key, which is why it is not
+    // on `labs` beside the other one — a shared key would let any member read
+    // the PI's entire personal library.
+    //
+    // `authAccounts.secret` is the third, and it is on this list rather than
+    // exempted from the walk because it is genuinely a credential and the
+    // whole point of anchoring in both directions is that nothing gets to be
+    // invisible here. It is not Margin's: `authTables` is spread in from
+    // `@convex-dev/auth` (`convex/schema.ts:1`), the column holds a password
+    // hash rather than a bearer token, and no Margin function reads it. It
+    // appeared the day this pattern learned the word `secret`, which is the
+    // widening working — the assertion above already proves no public returns
+    // validator carries it either.
+    expect(holders).toEqual(["authAccounts", "labs", "zoteroLinks"]);
     expect(fieldPaths(wireForm(schema.tables.labs.validator))).toContain(
       "slackWebhookUrl",
+    );
+    expect(fieldPaths(wireForm(schema.tables.zoteroLinks.validator))).toContain(
+      "apiKey",
     );
   });
 
@@ -447,7 +532,7 @@ describe("where the credential is stored", () => {
     // one would outlive every disconnection — including the one a lab performs
     // *because* the credential leaked.
     const events = wireForm(schema.tables.events.validator);
-    expect(webhookShaped(events)).toEqual([]);
+    expect(credentialShaped(events)).toEqual([]);
 
     // Named directly for the variant that records a dead channel, because it
     // is the one written from a delivery path — the only place in the codebase
@@ -487,11 +572,101 @@ describe("where the credential is stored", () => {
   });
 });
 
+describe("the Zotero link, specifically", () => {
+  const zotero = wireForm(schema.tables.zoteroLinks.validator);
+
+  it("holds the key and a non-secret identity for it", () => {
+    const fields = fieldPaths(zotero);
+    expect(fields).toContain("apiKey");
+    // The `slackConnectedAt` role. A sync outcome scheduled from an action can
+    // land after the member replaced their key, and without this the settings
+    // row would report a dead key against a live one.
+    expect(fields).toContain("connectedAt");
+    // No `enabled` boolean. Absence of the row is the only "off" there is,
+    // for the reason `labs.slackWebhookUrl` gives at length.
+    expect(fields).not.toContain("enabled");
+  });
+
+  it("is one member's own link, not the lab's", () => {
+    // The one genuine departure from the Slack precedent, asserted rather
+    // than commented: a Zotero personal library is one person's, and a
+    // lab-wide key would let any member read the PI's reading history —
+    // exactly what `convex/privacy.guard.test.ts` exists to prevent by other
+    // means. The destination is still the lab; the credential is not.
+    const fields = fieldPaths(zotero);
+    expect(fields).toContain("userId");
+    expect(fields).toContain("labId");
+  });
+
+  it("carries no Zotero credential into the ledger", () => {
+    const events = wireForm(schema.tables.events.validator);
+    expect(credentialShaped(events)).toEqual([]);
+
+    // The connect/disconnect fact, named directly. `connected` says which way
+    // the switch moved, which is the whole fact; an `events` row is never
+    // deleted, so a key in one would outlive every disconnection — including
+    // the one a member performs *because* the key leaked.
+    //
+    // `paperId` and `sessionId` are `eventBase`'s, optional on every row in
+    // the table because `by_paper_and_at` and `by_session_and_at` index them
+    // (`convex/schema.ts:286-300`) — the same two the `slack.delivery_failed`
+    // assertion above carries for the same reason. Neither is written here.
+    const changed = eventVariant("zotero.link_changed");
+    expect(Object.keys(changed).sort()).toEqual([
+      "actorId",
+      "at",
+      "connected",
+      "labId",
+      "paperId",
+      "sessionId",
+      "type",
+    ]);
+
+    // And the sync fact carries counts, never content. Not a title, not an
+    // item key, not a library name — a summary of how many rows arrived.
+    const synced = eventVariant("zotero.synced");
+    expect(Object.keys(synced).sort()).toEqual([
+      "actorId",
+      "at",
+      "imported",
+      "labId",
+      "paperId",
+      "sessionId",
+      "skipped",
+      "type",
+    ]);
+    const stringy = Object.entries(synced)
+      .filter(([, fieldType]) => admitsText(fieldType))
+      .map(([name]) => name);
+    // `type` is a literal, not a string; nothing else in the row is text at
+    // all, so there is no field a library's name could be put in without
+    // changing this schema and failing here.
+    expect(stringy).toEqual([]);
+  });
+
+  it("gives the item key an index, so dedupe is never a scan", () => {
+    // The whole reason this field exists. Without an index, "have I already
+    // imported this Zotero item?" is a full read of the lab's papers per
+    // candidate — which is `createFromMetadata`'s shape (`convex/papers.ts:
+    // 369-376`) and the second-riskiest thing in the B5 audit.
+    const indexes = indexNames(schema.tables.papers);
+    expect(indexes).toContain("by_lab_and_zotero_item");
+    expect(indexes).toContain("by_lab_and_doi");
+  });
+
+  it("gives the cron sweep an index too", () => {
+    // A sweep without an index is a full-table scan on a schedule.
+    const indexes = indexNames(schema.tables.zoteroLinks);
+    expect(indexes).toContain("by_user_and_lab");
+    expect(indexes).toContain("by_due");
+  });
+});
+
 /* -------------------------------------------------------------------------
- * 3. One module posts to Slack
+ * 3. One module holds each transport
  * ---------------------------------------------------------------------- */
 
-describe("the modules that post to Slack", () => {
+describe("the modules that hold a credential", () => {
   const sources = moduleNames.map((name) => ({
     name,
     // Comments are stripped so the prose explaining a rule cannot break it.
@@ -542,6 +717,59 @@ describe("the modules that post to Slack", () => {
     expect(logged.length).toBeGreaterThan(0);
     for (const call of logged) {
       expect(call).not.toMatch(/webhookUrl/i);
+    }
+  });
+
+  it("names Zotero's host in exactly one place, and means it", () => {
+    // `lib/zotero/api.ts` decides what a Zotero address is. No module under
+    // `convex/` has any business building one, and a second one that did
+    // would be a second place for the "never in a query parameter" rule to
+    // not hold.
+    const naming = sources
+      .flatMap(({ name, code }) => (code.includes("api.zotero.org") ? [name] : []))
+      .sort();
+    expect(naming).toEqual([]);
+  });
+
+  it("routes every Zotero request through the one transport", () => {
+    // A `fetch` carrying a member's API key belongs in exactly one function.
+    // A second one would be a second place for the redirect rule, the retry
+    // rule and the "never put the key in an error" rule to not hold.
+    const carrying = sources
+      .flatMap(({ name, code }) =>
+        code.includes("Zotero-API-Key") ? [name] : [],
+      )
+      .sort();
+    expect(carrying).toEqual(["zotero.ts"]);
+  });
+
+  it("never lets a credentialed request follow a redirect", () => {
+    // The finding this rule exists for: `fetch` strips `Authorization` across
+    // a cross-origin redirect and strips nothing else, so a followed 302 from
+    // `/items/<key>/file` hands a member's key to Amazon.
+    //
+    // Two halves. Every `fetch` in the module steers manually — including the
+    // uncredentialed second hop, which is chosen by somebody else's `Location`
+    // and has no more business following a chain than the first one does. And
+    // the key is named exactly once, inside the transport, so there is one
+    // request in the codebase that can carry it and it is the one that sets
+    // the header.
+    const zotero = sources.find((source) => source.name === "zotero.ts")?.code ?? "";
+    const fetches = [...zotero.matchAll(/\bfetch\(/g)].length;
+    const manual = [...zotero.matchAll(/redirect:\s*"manual"/g)].length;
+    expect(fetches).toBeGreaterThan(1);
+    expect(manual).toBe(fetches);
+    expect([...zotero.matchAll(/"Zotero-API-Key"/g)]).toHaveLength(1);
+  });
+
+  it("keeps the Zotero key out of anything that gets logged", () => {
+    const zotero = sources.find((source) => source.name === "zotero.ts");
+    const logged = [
+      ...(zotero?.code.matchAll(/console\.(?:error|warn|log)\(([\s\S]*?)\);/g) ?? []),
+    ].map((match) => match[1] ?? "");
+    expect(logged.length).toBeGreaterThan(0);
+    for (const call of logged) {
+      expect(call).not.toMatch(/apiKey/i);
     }
   });
 });

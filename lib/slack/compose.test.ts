@@ -17,7 +17,7 @@ import {
  *
  * The composers are pure, which makes the thing that is usually untestable
  * testable: the wording, the shape and the bounds of a message nobody on the
- * team ever looks at again once it is written. `convex/slack.guard.test.ts`
+ * team ever looks at again once it is written. `convex/credentials.guard.test.ts`
  * covers the promises — no remote assets, no tracking, nothing that sells
  * anything — and this covers whether the post is any good.
  */

@@ -1,6 +1,7 @@
 "use client";
 
 import { readableError } from "@/app/(app)/app/_components/errors";
+import { ZoteroSyncButton } from "@/app/(app)/app/_components/zotero-sync";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import type { PdfExtraction } from "@/lib/pdf/extract";
@@ -13,8 +14,10 @@ import {
   panelClass,
   primaryButtonClass,
   secondaryButtonClass,
+  skeletonClass,
 } from "@/lib/ui";
 import { useAction, useMutation } from "convex/react";
+import { useQuery } from "convex-helpers/react/cache/hooks";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { ReactNode } from "react";
@@ -36,14 +39,16 @@ import type { TextLayerPhase } from "./use-text-layer";
 import { useTextLayer } from "./use-text-layer";
 
 /**
- * Three ways to add a paper, and they are genuinely different acts.
+ * Four ways to add a paper, and they are genuinely different acts.
  *
  * A DOI is a lookup: you know the paper exists, you want its record, and
  * whether a readable copy comes with it is out of your hands. A PDF is a
  * deposit: the file is in front of you, and the only open question is what to
- * call it. A reference export is a batch whose records need reviewing. Tabs
- * rather than one clever box that guesses, because guessing wrong on the way
- * in is expensive later.
+ * call it. A reference export is a batch whose records need reviewing. Zotero
+ * is the odd one out — not an act at all but a standing link that keeps
+ * arriving on its own, which is why its tab is a doorway rather than a form.
+ * Tabs rather than one clever box that guesses, because guessing wrong on the
+ * way in is expensive later.
  */
 export function AddPaper({
   labId,
@@ -78,7 +83,9 @@ export function AddPaper({
    */
   onBusyChange?: (busy: boolean) => void;
 }) {
-  const [tab, setTab] = useState<"doi" | "upload" | "references">("doi");
+  const [tab, setTab] = useState<"doi" | "upload" | "references" | "zotero">(
+    "doi",
+  );
   /**
    * What the mounted tab is doing, and how to stop it. Only one tab is ever
    * mounted, so only one thing is ever in flight.
@@ -157,6 +164,13 @@ export function AddPaper({
           held={busy}
           onSelect={() => setTab("references")}
         />
+        <TabButton
+          id="zotero"
+          label="From Zotero"
+          active={tab === "zotero"}
+          held={busy}
+          onSelect={() => setTab("zotero")}
+        />
       </div>
 
       {/* The reason the tabs are refusing, said once and out loud rather than
@@ -175,6 +189,8 @@ export function AddPaper({
         <DoiTab labId={labId} onAdded={onAdded} onBusy={report} />
       ) : tab === "upload" ? (
         <UploadTab labId={labId} onBusy={report} />
+      ) : tab === "zotero" ? (
+        <ZoteroTab labId={labId} />
       ) : (
         <ReferenceImport labId={labId} onAdded={onAdded} onBusy={report} />
       )}
@@ -481,6 +497,48 @@ function DoiOutcome({
             ? "Open its record"
             : "Attach the PDF"}
       </Link>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------- Zotero --- */
+
+/**
+ * The doorway, not the door.
+ *
+ * Somebody who thinks "I'll add this from Zotero" looks here, not in lab
+ * settings — so this tab exists. What it does *not* do is offer a second place
+ * to paste a key: one connection, one place it is configured, and this panel
+ * either pulls the handle or points at where the handle is. Two setup surfaces
+ * for one credential is how a member ends up with two keys and no idea which
+ * one is live.
+ */
+function ZoteroTab({ labId }: { labId: Id<"labs"> }) {
+  const status = useQuery(api.zotero.status, { labId });
+
+  return (
+    <div
+      role="tabpanel"
+      id="add-paper-panel-zotero"
+      aria-labelledby="add-paper-tab-zotero"
+      tabIndex={0}
+      className="flex flex-col gap-3"
+    >
+      {status === undefined ? (
+        <div className={`${skeletonClass} h-9 w-40`} />
+      ) : status.connected ? (
+        <>
+          <p className="max-w-prose font-serif text-base leading-relaxed text-ink-muted">
+            {`Pulling from ${status.collectionName ?? status.libraryName ?? "your Zotero library"}. Margin checks hourly on its own.`}
+          </p>
+          <ZoteroSyncButton labId={labId} />
+        </>
+      ) : (
+        <p className="max-w-prose font-serif text-base leading-relaxed text-ink-muted">
+          Link your Zotero in lab settings and papers you file there will turn
+          up here on their own.
+        </p>
+      )}
     </div>
   );
 }

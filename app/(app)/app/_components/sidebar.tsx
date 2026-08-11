@@ -11,6 +11,7 @@ import type { LabSummary } from "./lab-provider";
 import { useLabs } from "./lab-provider";
 import { NotificationRail } from "./notifications";
 import { Select } from "./select";
+import { ThemeToggle } from "./theme-toggle";
 
 /** The product, in two rooms: what the lab is reading, and when it meets. */
 const sections = [
@@ -104,39 +105,46 @@ export function Sidebar() {
 
       {currentLab !== null && <Collections labId={currentLab._id} />}
 
-      <div className="mt-auto flex flex-col gap-2 border-t border-rule pt-5">
-        {viewer !== undefined && viewer !== null && (
-          <span className="truncate font-sans text-sm text-ink-muted">
-            {viewer.name ?? viewer.email}
-          </span>
-        )}
-        {/*
-          A document navigation, not `router.push` — the one place in the app
-          where throwing the JS context away is the point.
+      {/* The footer is where the reader's own settings live rather than the
+          lab's: how the page looks to them, who they are on it, and the way
+          out. None of the three is about the paper. */}
+      <div className="mt-auto flex flex-col gap-4 border-t border-rule pt-5">
+        <ThemeToggle />
 
-          `clearAuth()` only tells the server to stop trusting us; it does not
-          clear the client's stored query results. Everything still subscribed
-          re-runs without an identity, `requireUserId` throws, and those
-          failures sit in the client-global result store keyed by query token.
-          The query cache holds those tokens subscribed for five minutes after
-          the last unmount, so `QueryRemoved` never fires and the failures
-          outlive the session — and the cached `useQuery` rethrows a stored
-          Error during render. Signing back in would then read a dead session's
-          errors. A full load destroys the client singleton, the result store
-          and every pending eviction timer, so the next session starts every
-          query at `undefined`. One page load at a session boundary costs
-          nothing: there is nothing worth keeping warm across it.
-        */}
-        <button
-          type="button"
-          className={`${linkButtonClass} self-start`}
-          onClick={async () => {
-            await signOut();
-            window.location.assign("/signin");
-          }}
-        >
-          Sign out
-        </button>
+        <div className="flex flex-col gap-2">
+          {viewer !== undefined && viewer !== null && (
+            <span className="truncate font-sans text-sm text-ink-muted">
+              {viewer.name ?? viewer.email}
+            </span>
+          )}
+          {/*
+            A document navigation, not `router.push` — the one place in the app
+            where throwing the JS context away is the point.
+
+            `clearAuth()` only tells the server to stop trusting us; it does not
+            clear the client's stored query results. Everything still subscribed
+            re-runs without an identity, `requireUserId` throws, and those
+            failures sit in the client-global result store keyed by query token.
+            The query cache holds those tokens subscribed for five minutes after
+            the last unmount, so `QueryRemoved` never fires and the failures
+            outlive the session — and the cached `useQuery` rethrows a stored
+            Error during render. Signing back in would then read a dead session's
+            errors. A full load destroys the client singleton, the result store
+            and every pending eviction timer, so the next session starts every
+            query at `undefined`. One page load at a session boundary costs
+            nothing: there is nothing worth keeping warm across it.
+          */}
+          <button
+            type="button"
+            className={`${linkButtonClass} self-start`}
+            onClick={async () => {
+              await signOut();
+              window.location.assign("/signin");
+            }}
+          >
+            Sign out
+          </button>
+        </div>
       </div>
     </aside>
   );
