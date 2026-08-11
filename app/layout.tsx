@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Inter, Source_Serif_4 } from "next/font/google";
+import { THEME_BOOT_SCRIPT } from "@/lib/theme";
 import "./globals.css";
 
 const sourceSerif = Source_Serif_4({
@@ -62,11 +63,23 @@ export default function RootLayout({
   return (
     // The font variables live on <html> so `--font-serif` (declared on :root
     // in globals.css) can resolve them; on <body> they would be out of scope.
+    // The theme class lands on the same element for the same kind of reason:
+    // Lightning CSS emits the `light-dark()` toggles for `:root`, `.light` and
+    // `.dark` and for nothing else, so <html> is the only element where a
+    // class can move a token.
     <html
       lang="en"
       className={`${sourceSerif.variable} ${inter.variable}`}
       suppressHydrationWarning
     >
+      <head>
+        {/*
+         * Before anything paints, and before React exists. `suppressHydration-
+         * Warning` above is what lets the server's classless <html> and the
+         * client's themed one agree — the class is not React's to know about.
+         */}
+        <script dangerouslySetInnerHTML={{ __html: THEME_BOOT_SCRIPT }} />
+      </head>
       <body className="antialiased">{children}</body>
     </html>
   );
