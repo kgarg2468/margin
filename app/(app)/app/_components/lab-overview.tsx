@@ -56,8 +56,13 @@ export function LabOverview({ lab }: { lab: LabSummary }) {
         </p>
       </header>
 
-      <NextSession lab={lab} />
+      {/* Mail first, and above everything it could otherwise have appeared in
+          the middle of. What changed since the reader last looked is the whole
+          reason the page is different from the last time they saw it; the
+          calendar and the roster are the same as they were. */}
       <DigestInbox labId={lab._id} />
+
+      <NextSession lab={lab} />
 
       <Members lab={lab} />
       {lab.role === "pi" && <Invites lab={lab} />}

@@ -4,13 +4,14 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { GOLD_PAIRS } from "@/lib/digest/engine";
 import { relativeWhen } from "@/lib/sessions-ui";
-import { errorClass, eyebrowClass } from "@/lib/ui";
+import { errorClass, eyebrowClass, skeletonClass } from "@/lib/ui";
 import type { FunctionReturnType } from "convex/server";
 import { useMutation } from "convex/react";
 import { useQuery } from "convex-helpers/react/cache/hooks";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
+import { inboxState } from "./digest-state";
 import { readableError } from "./errors";
 
 type Digest = FunctionReturnType<typeof api.digests.listMine>[number];
@@ -47,10 +48,6 @@ const BOUNDARY_LABEL: Record<Digest["boundary"], string> = {
 
 /**
  * The prep digest for one session — the personal half of a session page.
- *
- * Renders nothing at all when the boundary hasn't fired: a session scheduled
- * for next week has no prep yet, and an empty "Your prep" heading over a blank
- * box is worse than the absence of one.
  */
 export function SessionDigest({
   labId,
@@ -64,6 +61,24 @@ export function SessionDigest({
     (digest) => digest.sessionId === sessionId,
   );
 
+  // The same slot-holding as the inbox, minus the mutation: nothing on this
+  // page builds a prep digest, so the subscription is the only late path. It
+  // sits between the presenter's brief and the manage panel, which is as
+  // mid-page as it gets — a card appearing here after the page settled would
+  // push the meeting's controls out from under a cursor already on them.
+  if (digests === undefined) {
+    return (
+      <span
+        aria-label="Loading"
+        role="status"
+        className={`${skeletonClass} h-6 w-56`}
+      />
+    );
+  }
+
+  // Renders nothing at all once the answer is in and it is "none": a session
+  // scheduled for next week has no prep yet, and an empty "Your prep" heading
+  // over a blank box is worse than the absence of one.
   if (mine.length === 0) {
     return null;
   }
@@ -107,14 +122,45 @@ export function DigestInbox({ labId }: { labId: Id<"labs"> }) {
   // twice, and a failure clears it again: a lab's home page must not turn into
   // an error because a digest could not be built, but nor should one dropped
   // request cost the member their digest for the whole visit.
+  //
+  // `settled` is separate from the ref because it is about the page rather
+  // than about the request: until this comes back, the section does not yet
+  // know whether it exists, and it holds a slot rather than guessing empty.
   const asked = useRef<string | null>(null);
+  const [catchUpSettled, setCatchUpSettled] = useState(false);
   useEffect(() => {
     if (asked.current === labId) return;
     asked.current = labId;
-    void catchUp({ labId }).catch(() => {
-      if (asked.current === labId) asked.current = null;
-    });
+    setCatchUpSettled(false);
+    void catchUp({ labId })
+      .catch(() => {
+        if (asked.current === labId) asked.current = null;
+      })
+      .finally(() => {
+        setCatchUpSettled(true);
+      });
   }, [labId, catchUp]);
+
+  const state = inboxState({
+    loaded: digests !== undefined,
+    catchUpSettled,
+    unreadCount: unread.length,
+  });
+
+  // The reserved slot: one line, the same ghost the roster and the calendar
+  // use, sized to nothing in particular because a heading over an unknown is
+  // worse than a blank. Returning before the presence below is safe precisely
+  // because both of its inputs latch — nothing ever comes back here, so no
+  // exit animation is being cut short.
+  if (state === "reserving") {
+    return (
+      <span
+        aria-label="Loading"
+        role="status"
+        className={`${skeletonClass} h-6 w-56`}
+      />
+    );
+  }
 
   // "Caught up" is a put-away, and it should read as one: the acknowledged
   // card folds closed and the page settles, instead of everything below it
