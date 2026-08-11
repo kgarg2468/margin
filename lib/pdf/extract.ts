@@ -178,6 +178,11 @@ export async function extractPdf(
   const doc = await loadingTask.promise;
 
   try {
+    // Inside the `try`, so the loading task is still destroyed on the way out:
+    // opening a document is a long await of its own, and a cancel that landed
+    // during it should not go on to read the thing it was called off from.
+    options.signal?.throwIfAborted();
+
     const pageCount = doc.numPages;
     const pages: string[] = [];
     for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) {
@@ -185,6 +190,11 @@ export async function extractPdf(
       pages.push(await extractPageText(doc, pageNumber));
       options.onProgress?.(pageNumber, pageCount);
     }
+    // And once more on the way out. Sampling only at the top of the loop means
+    // a cancel pressed during the last page's `getTextContent` — or during the
+    // only page's, in a one-page PDF — is never looked at again, and the caller
+    // goes on to accept a file the member had just called off.
+    options.signal?.throwIfAborted();
 
     let title: string | undefined;
     let authors: string[] | undefined;

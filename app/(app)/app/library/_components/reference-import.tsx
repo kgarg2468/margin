@@ -22,7 +22,7 @@ import {
   textareaClass,
 } from "@/lib/ui";
 import { useAction, useMutation } from "convex/react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type Preview = {
   format: ReferenceFormat;
@@ -33,9 +33,17 @@ type Preview = {
 export function ReferenceImport({
   labId,
   onAdded,
+  onBusy,
 }: {
   labId: Id<"labs">;
   onAdded?: () => void;
+  /**
+   * A running import holds the panel open. It is the longest wait of the three
+   * — one round trip per selected reference — and the one whose abandonment
+   * costs most, because the outcomes list is the only record of which entries
+   * landed and which did not.
+   */
+  onBusy?: (busy: boolean) => void;
 }) {
   const createFromDoi = useAction(api.papers.createFromDoi);
   const createFromMetadata = useMutation(api.papers.createFromMetadata);
@@ -52,6 +60,10 @@ export function ReferenceImport({
   const [importing, setImporting] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    onBusy?.(importing);
+  }, [importing, onBusy]);
 
   function prepare(text: string, name: string | null) {
     setError(null);

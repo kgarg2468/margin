@@ -96,6 +96,17 @@ function Library({
   });
   const [text, setText] = useState("");
   const [adding, setAdding] = useState(false);
+  /**
+   * Whether the add panel has work in flight, reported up by the panel itself.
+   *
+   * Both of the library's own ways of closing it are a discard, and neither can
+   * see inside it — so both ask first. The panel's own guard is not enough on
+   * its own: the field check below returns early for a caret in an input, but
+   * `ConfirmUpload` disables its fields the moment a save starts, and a
+   * disabled input drops focus to `<body>` — where this handler is exactly what
+   * an Escape reaches.
+   */
+  const [addBusy, setAddBusy] = useState(false);
   /** Which row carries the mark, as an index into what is currently drawn. */
   const [marked, setMarked] = useState<number | null>(null);
   /** The paper whose "filed as" panel is open, if any. */
@@ -190,7 +201,12 @@ function Library({
           // that case itself (`onDismiss`). On an empty shelf both are a no-op
           // by design: the panel is rendered by `isEmpty` there, and there is
           // nothing to put away.
-          setAdding(false);
+          //
+          // And never while the panel is working. Closing it does not stop what
+          // it is doing; it only takes away the controls that could.
+          if (!addBusy) {
+            setAdding(false);
+          }
           return;
         case "ArrowDown":
           if (shown.length > 0) {
@@ -218,7 +234,7 @@ function Library({
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [markedPaper, open, shown.length]);
+  }, [addBusy, markedPaper, open, shown.length]);
 
   /**
    * Move the browser's own focus with the mark, so the arrow keys move a
@@ -278,11 +294,17 @@ function Library({
             labId={lab._id}
             onAdded={() => setAdding(true)}
             onDismiss={() => setAdding(false)}
+            onBusyChange={setAddBusy}
           />
           {!isEmpty && (
             <button
               type="button"
               onClick={() => setAdding(false)}
+              // Held while the panel is working, for the same reason its own
+              // Escape is: this closes the form without stopping anything, and
+              // the run then reaches back into a page that has moved on.
+              disabled={addBusy}
+              title={addBusy ? "Stop what's running first." : undefined}
               // The way out of a panel should not be quieter than the way in:
               // this is the same control as `Add a paper` above, run backwards.
               className={`${secondaryButtonClass} tap-target self-start`}

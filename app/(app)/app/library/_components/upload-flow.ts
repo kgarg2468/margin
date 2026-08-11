@@ -101,6 +101,52 @@ export function cancelOffer(
   }
 }
 
+/**
+ * Whether the panel belongs to the work rather than to the member.
+ *
+ * Escape used to put the panel away without stopping a single thing it was
+ * doing, and the orphaned run went on reaching back into a page that had moved
+ * on — most visibly by navigating to the new paper's record half a minute after
+ * the member had closed the form. The answer is not a dialog asking whether
+ * they meant it. It is that while something is in flight the dismissal is inert
+ * and the wait's own named exit is the only door out.
+ *
+ * Defined as "there is a way out on screen" rather than listing the stages
+ * again, which is what makes the guard safe by construction: a stage can only
+ * ever hold the panel shut while `cancelOffer` is offering something to press.
+ * A stage that held it shut with no exit would be a trap, and this cannot
+ * express one.
+ */
+export function holdsPanel(stage: UploadStage): boolean {
+  return cancelOffer(stage) !== null;
+}
+
+/**
+ * What the bar is measuring.
+ *
+ * `progressbar` takes no name from its own content, so the bar needs telling
+ * apart from every other bar by hand — and one fixed name could not do it
+ * honestly. "Upload progress" was a lie on two stages out of three: pdf.js
+ * reading a local file has not uploaded anything, and filing is a mutation
+ * rather than bytes.
+ */
+export function stageLabel(stage: UploadStage): string {
+  switch (stage.kind) {
+    case "empty":
+    case "read":
+      return "";
+    case "reading":
+      return "Reading the PDF";
+    case "sending":
+      return "Uploading the PDF";
+    case "filing":
+      return "Adding the paper";
+    default:
+      // See `cancelOffer`: a new stage owes this switch an answer too.
+      return stage satisfies never;
+  }
+}
+
 /** The running count, for eyes. Not announced — see `stageAnnouncement`. */
 export function stageProgress(stage: UploadStage): string | null {
   switch (stage.kind) {

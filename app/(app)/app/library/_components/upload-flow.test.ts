@@ -1,13 +1,24 @@
 import { describe, expect, it } from "vitest";
+import type { UploadStage } from "./upload-flow";
 import {
   bytesProgress,
   cancelOffer,
   formatBytes,
+  holdsPanel,
   isCancellation,
   percentSent,
   stageAnnouncement,
+  stageLabel,
   stageProgress,
 } from "./upload-flow";
+
+const EVERY_STAGE: UploadStage[] = [
+  { kind: "empty" },
+  { kind: "reading", pagesDone: 0, pageCount: 0 },
+  { kind: "read" },
+  { kind: "sending", loaded: 0, total: 0 },
+  { kind: "filing" },
+];
 
 const MB = 1024 * 1024;
 
@@ -105,6 +116,50 @@ describe("cancelOffer", () => {
       { kind: "filing" },
     ] as const) {
       expect(cancelOffer(stage)).not.toBeNull();
+    }
+  });
+});
+
+describe("holdsPanel", () => {
+  it("holds the panel shut through every wait", () => {
+    expect(holdsPanel({ kind: "reading", pagesDone: 0, pageCount: 0 })).toBe(true);
+    expect(holdsPanel({ kind: "sending", loaded: 0, total: 0 })).toBe(true);
+    expect(holdsPanel({ kind: "filing" })).toBe(true);
+  });
+  it("lets it go where nothing is in flight", () => {
+    expect(holdsPanel({ kind: "empty" })).toBe(false);
+    expect(holdsPanel({ kind: "read" })).toBe(false);
+  });
+  it("never holds it shut without a way out on screen", () => {
+    // The property that makes the guard safe rather than a trap: Escape is
+    // only ever inert where the member has something else to press.
+    for (const stage of EVERY_STAGE) {
+      expect(holdsPanel(stage)).toBe(cancelOffer(stage) !== null);
+    }
+  });
+});
+
+describe("stageLabel", () => {
+  it("names what is actually moving, stage by stage", () => {
+    // One fixed "Upload progress" was false on two of these three: nothing has
+    // been uploaded while pdf.js reads, and filing is a mutation, not bytes.
+    expect(stageLabel({ kind: "reading", pagesDone: 4, pageCount: 12 })).toBe(
+      "Reading the PDF",
+    );
+    expect(stageLabel({ kind: "sending", loaded: 1, total: 2 })).toBe(
+      "Uploading the PDF",
+    );
+    expect(stageLabel({ kind: "filing" })).toBe("Adding the paper");
+  });
+  it("names nothing where there is no bar to name", () => {
+    expect(stageLabel({ kind: "empty" })).toBe("");
+    expect(stageLabel({ kind: "read" })).toBe("");
+  });
+  it("labels every stage that draws a bar", () => {
+    for (const stage of EVERY_STAGE) {
+      if (stageProgress(stage) !== null) {
+        expect(stageLabel(stage)).not.toBe("");
+      }
     }
   });
 });

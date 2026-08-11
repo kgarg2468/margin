@@ -18,15 +18,17 @@ import { useAction, useMutation } from "convex/react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { ReactNode } from "react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { PdfDropzone } from "./pdf-dropzone";
 import { parseAuthors, titleFromFilename, uploadPdf } from "./pdf-ingest";
 import { ReferenceImport } from "./reference-import";
 import {
   cancelOffer,
+  holdsPanel,
   isCancellation,
   percentSent,
   stageAnnouncement,
+  stageLabel,
   stageProgress,
 } from "./upload-flow";
 import type { TextLayerPhase } from "./use-text-layer";
@@ -46,6 +48,7 @@ export function AddPaper({
   labId,
   onAdded,
   onDismiss,
+  onBusyChange,
 }: {
   labId: Id<"labs">;
   /**
@@ -67,15 +70,44 @@ export function AddPaper({
    * something, so a field has no claim on it.
    */
   onDismiss?: () => void;
+  /**
+   * Whether this panel currently has work in flight, told to whoever draws the
+   * other ways out of it. The library owns `Done adding` and a window-level
+   * Escape, and neither can see in here.
+   */
+  onBusyChange?: (busy: boolean) => void;
 }) {
   const [tab, setTab] = useState<"doi" | "upload" | "references">("doi");
+  /**
+   * Set by whichever tab is mounted; only one ever is.
+   *
+   * Every route out of this panel unmounts the tab that is working, and none of
+   * them stopped the work: the run carried on and reached back into a page that
+   * had moved on. An upload navigated to the finished paper half a minute after
+   * the member had put the form away; a DOI lookup called `onAdded`, which
+   * re-opened the panel blank and threw its own result away. So while something
+   * is in flight, every exit that would discard it is inert, and the wait's own
+   * named control — `Cancel the upload`, `Stop waiting` — is the only door.
+   *
+   * Inert rather than a dialog asking whether they meant it: the member is one
+   * press away from the honest answer already, and the exits that stay live are
+   * the ones that say what they will cost.
+   */
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    onBusyChange?.(busy);
+    // A panel that unmounts mid-flight would otherwise leave the library
+    // believing it was still busy, and `Done adding` disabled forever.
+    return () => onBusyChange?.(false);
+  }, [busy, onBusyChange]);
 
   return (
     <section
       className={`${panelClass} flex flex-col gap-6`}
       // Bubbled from wherever focus is — a tab, a text field, the dropzone.
       onKeyDown={(event) => {
-        if (event.key === "Escape") {
+        if (event.key === "Escape" && !busy) {
           onDismiss?.();
         }
       }}
@@ -85,32 +117,38 @@ export function AddPaper({
         aria-label="How to add a paper"
         className="flex gap-6 border-b border-rule"
       >
+        {/* Switching tabs unmounts the one that is working, which is the same
+            discard Escape used to be. Held rather than warned about, for the
+            same reason and with the same door left open. */}
         <TabButton
           id="doi"
           label="By DOI"
           active={tab === "doi"}
+          held={busy}
           onSelect={() => setTab("doi")}
         />
         <TabButton
           id="upload"
           label="Upload PDF"
           active={tab === "upload"}
+          held={busy}
           onSelect={() => setTab("upload")}
         />
         <TabButton
           id="references"
           label="Import references"
           active={tab === "references"}
+          held={busy}
           onSelect={() => setTab("references")}
         />
       </div>
 
       {tab === "doi" ? (
-        <DoiTab labId={labId} onAdded={onAdded} />
+        <DoiTab labId={labId} onAdded={onAdded} onBusy={setBusy} />
       ) : tab === "upload" ? (
-        <UploadTab labId={labId} />
+        <UploadTab labId={labId} onBusy={setBusy} />
       ) : (
-        <ReferenceImport labId={labId} onAdded={onAdded} />
+        <ReferenceImport labId={labId} onAdded={onAdded} onBusy={setBusy} />
       )}
     </section>
   );
@@ -120,13 +158,19 @@ function TabButton({
   id,
   label,
   active,
+  held,
   onSelect,
 }: {
   id: string;
   label: string;
   active: boolean;
+  /** Work is in flight somewhere in the panel, so leaving would discard it. */
+  held: boolean;
   onSelect: () => void;
 }) {
+  // The tab that is already open is not a way out of anything, so it never
+  // goes dim — only the two that would take the work with them.
+  const disabled = held && !active;
   return (
     <button
       type="button"
@@ -134,9 +178,12 @@ function TabButton({
       id={`add-paper-tab-${id}`}
       aria-selected={active}
       aria-controls={`add-paper-panel-${id}`}
+      disabled={disabled}
+      title={disabled ? "Stop what's running first." : undefined}
       onClick={onSelect}
       className={
         "-mb-px border-b-2 pb-2 font-sans text-sm pressable " +
+        "disabled:cursor-not-allowed disabled:opacity-50 " +
         (active
           ? "border-accent text-ink-strong"
           : "border-transparent text-ink-faint hover:text-ink-muted")
@@ -159,9 +206,11 @@ type DoiResult = {
 function DoiTab({
   labId,
   onAdded,
+  onBusy,
 }: {
   labId: Id<"labs">;
   onAdded?: () => void;
+  onBusy: (busy: boolean) => void;
 }) {
   const createFromDoi = useAction(api.papers.createFromDoi);
   const textLayer = useTextLayer();
@@ -169,6 +218,13 @@ function DoiTab({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<DoiResult | null>(null);
+
+  // A lookup in flight holds the panel: closing it used to let `createFromDoi`
+  // resolve into `onAdded`, which re-opened the panel blank and took the
+  // outcome sentence — the whole point of the lookup — down with it.
+  useEffect(() => {
+    onBusy(pending);
+  }, [pending, onBusy]);
 
   return (
     <div
@@ -322,7 +378,7 @@ function DoiOutcome({
       </p>
       <Link
         href={ready ? `${record}/read` : record}
-        className="tap-target self-start font-sans text-sm text-accent underline-offset-4 hover:underline"
+        className={`${linkButtonClass} tap-target self-start`}
       >
         {ready
           ? "Read it now"
@@ -360,7 +416,13 @@ type UploadPhase =
     }
   | { kind: "filing"; file: File; extraction: PdfExtraction };
 
-function UploadTab({ labId }: { labId: Id<"labs"> }) {
+function UploadTab({
+  labId,
+  onBusy,
+}: {
+  labId: Id<"labs">;
+  onBusy: (busy: boolean) => void;
+}) {
   const generateUploadUrl = useMutation(api.papers.generateUploadUrl);
   const createFromUpload = useMutation(api.papers.createFromUpload);
   const discardUpload = useMutation(api.papers.discardUpload);
@@ -379,6 +441,11 @@ function UploadTab({ labId }: { labId: Id<"labs"> }) {
    * it would navigate away from a form the member had gone back to.
    */
   const attempt = useRef(0);
+
+  // The stage decides this, not a second flag beside it — see `holdsPanel`.
+  useEffect(() => {
+    onBusy(holdsPanel(phase));
+  }, [phase, onBusy]);
 
   async function read(file: File) {
     setError(null);
@@ -575,8 +642,14 @@ function UploadTab({ labId }: { labId: Id<"labs"> }) {
         {stageAnnouncement(phase)}
       </p>
 
+      {/* Announced, because the completion of a cancellation is otherwise
+          silent: the stage's live region goes empty at the same moment, and
+          the button that was pressed unmounts under the finger. This sentence
+          is the only evidence anything happened. */}
       {note !== null && (
-        <p className="font-sans text-sm text-ink-muted">{note}</p>
+        <p role="status" className="font-sans text-sm text-ink-muted">
+          {note}
+        </p>
       )}
       {error !== null && (
         <p role="alert" className={errorClass}>
@@ -602,9 +675,9 @@ function Progress({ phase }: { phase: UploadPhase }) {
   return (
     <p
       role="progressbar"
-      // `progressbar` takes no name from its own content, so without this the
-      // bar announces as an unlabelled one.
-      aria-label="Upload progress"
+      // `progressbar` takes no name from its own content, and one fixed name
+      // could not tell the truth about all three stages — see `stageLabel`.
+      aria-label={stageLabel(phase)}
       aria-valuetext={text}
       {...(percent === null
         ? {}

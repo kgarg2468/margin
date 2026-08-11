@@ -16,7 +16,7 @@ import {
 import { useAuthToken } from "@convex-dev/auth/react";
 import { useAction, useMutation } from "convex/react";
 import type { FormEvent } from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { IngestStatus } from "./paper-meta";
 import { PdfDropzone } from "./pdf-dropzone";
 import { uploadPdf } from "./pdf-ingest";
@@ -81,6 +81,24 @@ export function PdfPanel({
     loaded: number;
     total: number;
   } | null>(null);
+  /**
+   * The run whose `attachPdf` is in the air.
+   *
+   * That leg used to render no control at all — the abort button was taken away
+   * before the mutation started, on the correct grounds that there is nothing
+   * left to abort. Correct and still a trap: a mutation that hangs left both
+   * dropzones disabled with no way back short of reloading the page. What can
+   * be offered is not a cancel but an honest abandon, the same distinction
+   * `cancelOffer` draws on the other surface.
+   */
+  const [filing, setFiling] = useState<AbortController | null>(null);
+  /** Not an error: what a withdrawal left behind, in the member's own words. */
+  const [note, setNote] = useState<string | null>(null);
+  /**
+   * Which attach is allowed to speak. `Stop waiting` bumps it, and a mutation
+   * that resolves long afterwards checks it before touching anything.
+   */
+  const attempt = useRef(0);
 
   /**
    * Open the stored file on its own.
@@ -156,8 +174,28 @@ export function PdfPanel({
     }
   }
 
+  /**
+   * Nothing to abort, so what is given back is the panel and the truth.
+   *
+   * `attachPdf` is one round trip and cannot be recalled. Bumping the run's
+   * turn is how a resolve that arrives afterwards finds out it no longer speaks
+   * for this panel — the same guard `add-paper` uses, and for the same reason:
+   * without it a mutation landing minutes later would overwrite whatever the
+   * member had done since.
+   */
+  function stopWaiting() {
+    attempt.current += 1;
+    setFiling(null);
+    setStatus(null);
+    setNote(
+      "Stopped waiting. If it did land, the file will appear here on its own.",
+    );
+  }
+
   async function attach(file: File) {
     setError(null);
+    setNote(null);
+    const mine = ++attempt.current;
     const controller = new AbortController();
     setAttaching(controller);
     // A new run owns the screen from here, so clearing a failed predecessor's
@@ -187,21 +225,30 @@ export function PdfPanel({
       if (controller.signal.aborted) {
         throw controller.signal.reason;
       }
-      // The control goes before the last leg rather than sitting there dead:
-      // `attachPdf` is one round trip and there is nothing left to abort.
+      // The abort control goes — there is genuinely nothing left to abort —
+      // and the abandon takes its place rather than leaving the wait bare.
       setAttaching(null);
       setSending(null);
       setStatus("Filing it…");
+      setFiling(controller);
       await attachPdf({ paperId, storageId: uploaded, pages: extraction.pages });
       // The paper owns the file now; it is not an orphan any more.
       uploaded = null;
+      // The member stopped waiting while this was in the air. The panel is
+      // theirs again, and its own query will show the file the moment it
+      // lands, so this run has nothing left to say.
+      if (attempt.current !== mine) {
+        return;
+      }
       setStatus(null);
     } catch (caught) {
-      setStatus(null);
-      // A withdrawal is not a verdict on the file. It leaves the paper exactly
-      // as it was, so nothing is marked failed — only the blob goes, if one
-      // got as far as storage before the abort landed.
-      if (isCancellation(caught)) {
+      const stale = attempt.current !== mine;
+      // A withdrawal is not a verdict on the file, and neither is a run the
+      // member has walked away from. Both leave the paper exactly as it was, so
+      // nothing is marked failed — only the blob goes, if one got as far as
+      // storage. It goes before any staleness guard, because an abandoned run
+      // still owns bytes nothing points at.
+      if (isCancellation(caught) || stale) {
         if (uploaded !== null) {
           try {
             await discardUpload({ labId, storageId: uploaded });
@@ -209,8 +256,15 @@ export function PdfPanel({
             // The blob outlives us. Nothing the member can do about it.
           }
         }
+        // A run that was abandoned has already been answered by the control
+        // that abandoned it; only a real cancellation is news here.
+        if (!stale) {
+          setStatus(null);
+          setNote("Cancelled. Nothing was attached, and the file is still here.");
+        }
         return;
       }
+      setStatus(null);
       // This catch covers the whole attach, not just the read: an upload or a
       // mutation can fail here too, and those arrive as `ConvexError`s whose
       // message is the one worth showing. So ask pdf.js's classifier first —
@@ -237,6 +291,7 @@ export function PdfPanel({
       // the exact failure this task was written to remove.
       setAttaching((current) => (current === controller ? null : current));
       setSending((current) => (current?.controller === controller ? null : current));
+      setFiling((current) => (current === controller ? null : current));
     }
   }
 
@@ -249,6 +304,9 @@ export function PdfPanel({
   async function fetchFromLink(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
+    // The other route to the same job: a note about an attach that was called
+    // off says nothing useful once a different attempt is under way.
+    setNote(null);
     setStatus("Fetching it…");
     try {
       await fetchPdfFromUrl({ paperId, url: freeCopyUrl });
@@ -306,6 +364,11 @@ export function PdfPanel({
   const phase = textLayer.phaseFor(paperId);
   const busyMessage =
     status ?? (phase.kind === "working" ? phase.message : null);
+  // Which of the two the bar is measuring. It was labelled "Attaching the PDF"
+  // either way, which was false for the commoner of them: re-reading the text
+  // layer of a file that is already here attaches nothing.
+  const busyLabel =
+    status !== null ? "Attaching the PDF" : "Reading the text layer";
   const problem = error ?? (phase.kind === "failed" ? phase.message : null);
 
   return (
@@ -433,9 +496,9 @@ export function PdfPanel({
               `progressbar` role is what lets it be asked for instead. */}
           <p
             role="progressbar"
-            // `progressbar` takes no name from its own content, so without this
-            // the bar announces as an unlabelled one.
-            aria-label="Attaching the PDF"
+            // `progressbar` takes no name from its own content, so the bar has
+            // to be named by hand — and named for what is actually running.
+            aria-label={busyLabel}
             aria-valuetext={busyMessage}
             {...(sending === null
               ? {}
@@ -453,7 +516,9 @@ export function PdfPanel({
           >
             {busyMessage}
           </p>
-          {attaching !== null && (
+          {/* No wait without a way out of it — and the two ways out are not
+              the same promise, so they do not borrow each other's word. */}
+          {attaching !== null ? (
             <button
               type="button"
               onClick={() => attaching.abort()}
@@ -461,8 +526,24 @@ export function PdfPanel({
             >
               Stop attaching it
             </button>
-          )}
+          ) : filing !== null ? (
+            <button
+              type="button"
+              onClick={stopWaiting}
+              className={`${linkButtonClass} tap-target text-xs`}
+            >
+              Stop waiting
+            </button>
+          ) : null}
         </div>
+      )}
+      {note !== null && (
+        // Announced: the button that was pressed unmounts under the finger and
+        // the progress line goes with it, so without this a cancellation
+        // finishes in silence.
+        <p role="status" className="font-sans text-sm text-ink-muted">
+          {note}
+        </p>
       )}
       {problem !== null && (
         <p role="alert" className={errorClass}>
