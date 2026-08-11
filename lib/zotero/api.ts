@@ -50,10 +50,35 @@ export function normalizeApiKey(raw: string): string | null {
  */
 export type ZoteroLibrary = { type: "user" | "group"; id: string };
 
+/**
+ * One path segment, encoded so that it stays one path segment.
+ *
+ * Every id below is somebody else's string. A library id and a collection key
+ * are typed or picked by a member; an item key and an attachment key are read
+ * out of remote JSON. Interpolated raw, a `?` in any of them ends the path and
+ * starts a query string — which is precisely how a set of builders that cannot
+ * be *handed* a credential ends up *emitting* one, from a collection named
+ * `A?key=SECRET`. A `#` truncates the rest of the URL into a fragment, and a
+ * `/` re-targets the request at a path nobody asked for.
+ *
+ * `encodeURIComponent` is the whole fix: it escapes `?`, `#`, `/`, `%` and
+ * whitespace, so a hostile segment lands inside the segment it was written
+ * into and Zotero answers 404 to it instead of Margin answering something
+ * worse. It does not escape `.`, and it cannot — the URL parser resolves a
+ * lone `.` or `..` segment before any encoding is visible to it (the WHATWG
+ * spec reads `%2E` as a dot for exactly that check). That residue is bounded:
+ * traversal *out* of the library prefix needs a `/`, and those are encoded, so
+ * the worst a dot segment does is drop the collection scope from a URL that
+ * still addresses the same library.
+ */
+function encodeSegment(segment: string): string {
+  return encodeURIComponent(segment);
+}
+
 export function libraryPrefix(library: ZoteroLibrary): string {
   return library.type === "user"
-    ? `/users/${library.id}`
-    : `/groups/${library.id}`;
+    ? `/users/${encodeSegment(library.id)}`
+    : `/groups/${encodeSegment(library.id)}`;
 }
 
 /**
@@ -89,7 +114,7 @@ export function keysCurrentUrl(): string {
 
 /** The group libraries a userID can reach. */
 export function groupsUrl(userId: string): string {
-  const url = apiUrl(`/users/${userId}/groups`);
+  const url = apiUrl(`/users/${encodeSegment(userId)}/groups`);
   url.searchParams.set("format", "json");
   url.searchParams.set("limit", "100");
   return url.toString();
@@ -127,7 +152,7 @@ export function itemsUrl(options: {
   const path =
     options.collectionKey === undefined
       ? `${prefix}/items/top`
-      : `${prefix}/collections/${options.collectionKey}/items/top`;
+      : `${prefix}/collections/${encodeSegment(options.collectionKey)}/items/top`;
   const url = apiUrl(path);
   url.searchParams.set("format", "json");
   url.searchParams.set("itemType", SCHOLARLY_ITEM_TYPES.join(" || "));
@@ -143,7 +168,9 @@ export function itemsUrl(options: {
 
 /** One item's attachments and notes. */
 export function childrenUrl(library: ZoteroLibrary, itemKey: string): string {
-  const url = apiUrl(`${libraryPrefix(library)}/items/${itemKey}/children`);
+  const url = apiUrl(
+    `${libraryPrefix(library)}/items/${encodeSegment(itemKey)}/children`,
+  );
   url.searchParams.set("format", "json");
   url.searchParams.set("limit", "50");
   return url.toString();
@@ -162,7 +189,7 @@ export function fileUrl(
   attachmentKey: string,
 ): string {
   return apiUrl(
-    `${libraryPrefix(library)}/items/${attachmentKey}/file`,
+    `${libraryPrefix(library)}/items/${encodeSegment(attachmentKey)}/file`,
   ).toString();
 }
 
@@ -178,15 +205,43 @@ export function fileUrl(
  * or any group. Margin asks for a read-only key and refuses a writing one, so
  * that the worst case of a breach here is disclosure of what somebody reads
  * rather than the destruction of a fifteen-year bibliography.
+ *
+ * `canRead` is the other half of that question, and it is a separate field
+ * because the two failures need different sentences. A key with no `access`
+ * block at all — created and never granted anything, or narrowed to nothing
+ * afterwards — is not writable, so `readOnly` is true and a connect flow that
+ * only checks `!readOnly` waves it through. The first sync then 403s, and the
+ * member is told Zotero does not recognise their key, which is false and
+ * unactionable: the key is fine, its permissions are empty. Ask `canRead` at
+ * the door and the refusal can say the true thing instead.
  */
-export type KeyPermissions = { userId: string; readOnly: boolean };
+export type KeyPermissions = {
+  userId: string;
+  readOnly: boolean;
+  /** Whether the key can read *any* library — false for a key granted nothing. */
+  canRead: boolean;
+};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Truthy rather than `=== true`, deliberately.
+ *
+ * Zotero answers JSON booleans today, but this decides whether Margin will
+ * hold a key that can destroy a bibliography, and the safe reading of a `1`,
+ * a `"true"` or anything else unexpected in a `write` field is "yes, it
+ * writes." Strict equality fails the other way: it reads every one of those as
+ * read-only and accepts the key.
+ */
 function canWrite(scope: unknown): boolean {
-  return isRecord(scope) && scope.write === true;
+  return isRecord(scope) && Boolean(scope.write);
+}
+
+/** A scope grants reading when it says the library is visible through it. */
+function canRead(scope: unknown): boolean {
+  return isRecord(scope) && Boolean(scope.library);
 }
 
 export function parseKeyPermissions(body: unknown): KeyPermissions | null {
@@ -197,8 +252,9 @@ export function parseKeyPermissions(body: unknown): KeyPermissions | null {
   const access = isRecord(body.access) ? body.access : {};
   const groups = isRecord(access.groups) ? Object.values(access.groups) : [];
   const writes = canWrite(access.user) || groups.some(canWrite);
+  const reads = canRead(access.user) || groups.some(canRead);
 
-  return { userId: String(userId), readOnly: !writes };
+  return { userId: String(userId), readOnly: !writes, canRead: reads };
 }
 
 export type ZoteroGroup = { id: string; name: string };

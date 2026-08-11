@@ -62,8 +62,12 @@ export type ZoteroAttachment = {
     linkMode?: string;
     contentType?: string;
     filename?: string;
-    /** Present when Zotero is storing the file. Absent means WebDAV. */
-    md5?: string;
+    /**
+     * Present when Zotero is storing the file. Absent — or an explicit `null`,
+     * which is what Zotero actually sends for a WebDAV or never-uploaded
+     * attachment — means the bytes are not on Zotero's servers.
+     */
+    md5?: string | null;
   };
 };
 
@@ -71,6 +75,26 @@ export type ZoteroAttachment = {
 export type ZoteroReference = ReferenceEntry & { zoteroItemKey: string };
 
 const SCHOLARLY = new Set<string>(SCHOLARLY_ITEM_TYPES);
+
+/**
+ * The types above describe what Zotero documents, not what arrives.
+ *
+ * Every value these two functions read comes off a `JSON.parse` of somebody
+ * else's response, and the `ZoteroItem` annotation on the parameter is a claim
+ * about it rather than a check of it. A sync maps over a whole page of those
+ * rows at once, so a single `null` where an object was promised is not one
+ * missing paper — it throws, the page dies, and the hourly sweep retries the
+ * same poisoned row forever. The guards below are what make "skip the bad row"
+ * true instead of aspirational.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** A field Zotero declared a string, when it actually is one. */
+function text(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
 
 /**
  * The DOI a preprint keeps in `extra`.
@@ -88,30 +112,34 @@ export function doiFromExtra(extra: string | undefined): string | undefined {
 
 /** Authors if there are any, everybody named otherwise. */
 function creatorNames(creators: ZoteroCreator[] | undefined): string[] {
-  const all = creators ?? [];
+  const all = Array.isArray(creators) ? creators.filter(isRecord) : [];
   const authors = all.filter((creator) => creator.creatorType === "author");
   // An edited volume has editors and no authors. Dropping them would leave the
   // row with nobody's name on it, which is worse than the wrong kind of name.
   const chosen = authors.length > 0 ? authors : all;
   return chosen
-    .map((creator) =>
-      creator.name !== undefined
-        ? // Institutional authors are one field, and `normalizeAuthor`'s
-          // "Last, First" flip would mangle "Silva, Hospital of".
-          cleanReferenceText(creator.name)
-        : normalizeAuthor(
-            [creator.lastName, creator.firstName]
-              .filter((part) => part !== undefined && part.length > 0)
-              .join(", "),
-          ),
-    )
+    .map((creator) => {
+      const whole = text(creator.name);
+      if (whole !== undefined) {
+        // Institutional authors are one field, and `normalizeAuthor`'s
+        // "Last, First" flip would mangle "Silva, Hospital of".
+        return cleanReferenceText(whole);
+      }
+      return normalizeAuthor(
+        [text(creator.lastName), text(creator.firstName)]
+          .filter((part) => part !== undefined && part.length > 0)
+          .join(", "),
+      );
+    })
     .filter((name) => name.length > 0);
 }
 
-function firstText(...candidates: (string | undefined)[]): string | undefined {
+/** The first of these that is a non-empty string once cleaned. */
+function firstText(...candidates: unknown[]): string | undefined {
   for (const candidate of candidates) {
-    if (candidate === undefined) continue;
-    const cleaned = cleanReferenceText(candidate);
+    const value = text(candidate);
+    if (value === undefined) continue;
+    const cleaned = cleanReferenceText(value);
     if (cleaned.length > 0) return cleaned;
   }
   return undefined;
@@ -126,25 +154,34 @@ function firstText(...candidates: (string | undefined)[]): string | undefined {
  * like a feature nobody asked for. A title check for the same reason: an item
  * with no title is not a paper, it is a stub somebody made and abandoned, and
  * `cleanTitle` in `convex/papers.ts:145` would throw on it at the door.
+ *
+ * A row that is not an object, or has no `data` object on it, is `null` too
+ * rather than a thrown `TypeError`. The caller is mapping this over a page of
+ * parsed JSON, and one malformed row should cost that row — not the page, and
+ * not every hourly retry of the page after it.
  */
 export function toReference(item: ZoteroItem): ZoteroReference | null {
+  if (!isRecord(item) || !isRecord(item.data)) return null;
   const data = item.data;
   if (!SCHOLARLY.has(data.itemType)) return null;
 
   const title = firstText(data.title);
   if (title === undefined) return null;
 
+  const key = text(item.key);
+  if (key === undefined) return null;
+
   return {
-    zoteroItemKey: item.key,
+    zoteroItemKey: key,
     title,
     authors: creatorNames(data.creators),
-    year: readYear(data.date),
+    year: readYear(text(data.date)),
     venue: firstText(
       data.publicationTitle,
       data.proceedingsTitle,
       data.bookTitle,
     ),
-    doi: firstText(data.DOI) ?? doiFromExtra(data.extra),
+    doi: firstText(data.DOI) ?? doiFromExtra(text(data.extra)),
     abstract: firstText(data.abstractNote),
     url: firstText(data.url),
   };
@@ -178,19 +215,28 @@ export function toReference(item: ZoteroItem): ZoteroReference | null {
  * presigned Amazon URL. That hop is never followed with the key still on the
  * request — the rule lives in `convex/zotero.ts` with the credential, because
  * nothing here holds one.
+ *
+ * A child that is not an object, or carries no `data`, is skipped like any
+ * other unusable attachment — for the same reason `toReference` answers `null`
+ * to one. This runs per accepted item across a whole sync; a `TypeError` here
+ * would take down a page of papers over one malformed row.
  */
 export function pickPdfAttachment(
   children: readonly ZoteroAttachment[],
 ): ZoteroAttachment | null {
+  if (!Array.isArray(children)) return null;
   return (
-    children.find(
-      (child) =>
-        child.data.itemType === "attachment" &&
-        (child.data.linkMode === "imported_file" ||
-          child.data.linkMode === "imported_url") &&
-        child.data.contentType === "application/pdf" &&
-        typeof child.data.md5 === "string" &&
-        child.data.md5.length > 0,
-    ) ?? null
+    children.find((child) => {
+      if (!isRecord(child) || !isRecord(child.data)) return false;
+      const data = child.data;
+      return (
+        data.itemType === "attachment" &&
+        (data.linkMode === "imported_file" ||
+          data.linkMode === "imported_url") &&
+        data.contentType === "application/pdf" &&
+        typeof data.md5 === "string" &&
+        data.md5.length > 0
+      );
+    }) ?? null
   );
 }

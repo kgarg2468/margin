@@ -141,6 +141,49 @@ describe("toReference", () => {
       authors: [],
     });
   });
+
+  it("answers null for a row that is not an item at all", () => {
+    // The `ZoteroItem` annotation is a claim about a `JSON.parse` result, not
+    // a check of it. A sync maps this over a whole page at once, so a single
+    // `null` where an object was promised must cost that row — not the page,
+    // and not every hourly retry of the page afterwards.
+    for (const malformed of [null, undefined, "error", 42, [], {}, { key: "K" }, { key: "K", data: null }, { data: { itemType: "journalArticle", title: "T" } }]) {
+      expect(toReference(malformed as unknown as ZoteroItem)).toBeNull();
+    }
+  });
+
+  it("survives an item whose fields are the wrong types", () => {
+    const wrong = {
+      key: "WRNG0001",
+      version: "eight",
+      data: {
+        key: "WRNG0001",
+        itemType: "journalArticle",
+        title: "A real title",
+        creators: "Ana Ruiz",
+        date: 2024,
+        DOI: 10.1038,
+        extra: ["DOI: 10.1000/xyz"],
+        abstractNote: null,
+      },
+    };
+    expect(toReference(wrong as unknown as ZoteroItem)).toEqual({
+      zoteroItemKey: "WRNG0001",
+      title: "A real title",
+      authors: [],
+    });
+  });
+
+  it("skips a creator that is not a creator", () => {
+    const ragged = {
+      ...article,
+      data: {
+        ...article.data,
+        creators: [null, { creatorType: "author", lastName: "Ruiz", firstName: "Ana" }, "Ben"],
+      },
+    };
+    expect(toReference(ragged as unknown as ZoteroItem)?.authors).toEqual(["Ana Ruiz"]);
+  });
 });
 
 describe("doiFromExtra", () => {
@@ -153,6 +196,15 @@ describe("doiFromExtra", () => {
     expect(doiFromExtra("arXiv:1706.03762")).toBeUndefined();
     expect(doiFromExtra(undefined)).toBeUndefined();
     expect(doiFromExtra("")).toBeUndefined();
+  });
+
+  it("wants the DOI to be the whole line, and says nothing when it is not", () => {
+    // Deliberate, and pinned so a later loosening is a decision rather than an
+    // accident. A wrong DOI dedupes a paper onto a different paper, which is
+    // worse and quieter than no DOI at all — an annotated line falls through
+    // to the title-and-year identity instead.
+    expect(doiFromExtra("DOI: 10.1000/xyz (accessed 2024)")).toBeUndefined();
+    expect(doiFromExtra("See DOI: 10.1000/xyz")).toBeUndefined();
   });
 });
 
@@ -171,6 +223,18 @@ describe("pickPdfAttachment", () => {
 
   it("takes a PDF Zotero itself is storing", () => {
     expect(pickPdfAttachment([stored])?.key).toBe("PDF00001");
+  });
+
+  it("takes a PDF dragged in from a disk just the same", () => {
+    // `imported_file` is the commoner of the two stored modes — it is what a
+    // member gets dropping a PDF onto an item, where `imported_url` is what
+    // the browser connector saves. Both have bytes on Zotero's servers, and
+    // only the fixture above covered one of them.
+    const dragged: ZoteroAttachment = {
+      key: "PDF00003",
+      data: { ...stored.data, key: "PDF00003", linkMode: "imported_file" },
+    };
+    expect(pickPdfAttachment([dragged])?.key).toBe("PDF00003");
   });
 
   it("passes over a link, which has no bytes behind it", () => {
@@ -198,6 +262,17 @@ describe("pickPdfAttachment", () => {
     expect(pickPdfAttachment([webdav])).toBeNull();
   });
 
+  it("reads Zotero's literal null md5 as the same absence", () => {
+    // The field is not merely missing on an unuploaded or WebDAV attachment —
+    // Zotero sends `"md5": null`. The runtime always handled it; now the type
+    // says so too, so a caller cannot write `md5 ? …` against a lie.
+    const unuploaded: ZoteroAttachment = {
+      ...stored,
+      data: { ...stored.data, md5: null },
+    };
+    expect(pickPdfAttachment([unuploaded])).toBeNull();
+  });
+
   it("takes the first storable PDF when an item has several attachments", () => {
     // The common shape: a snapshot, a supplement, and the paper.
     const snapshot = {
@@ -211,5 +286,18 @@ describe("pickPdfAttachment", () => {
 
   it("takes nothing from an item with no children at all", () => {
     expect(pickPdfAttachment([])).toBeNull();
+  });
+
+  it("steps over a malformed child rather than throwing on the page", () => {
+    // Same argument as `toReference`: this runs per accepted item across a
+    // whole sync, and a `TypeError` here would cost a page of papers over one
+    // bad row — every hour, forever, since the cursor would never advance.
+    const ragged = [null, undefined, "attachment", 7, {}, { key: "K", data: null }, stored];
+    expect(pickPdfAttachment(ragged as unknown as ZoteroAttachment[])?.key).toBe(
+      "PDF00001",
+    );
+    expect(
+      pickPdfAttachment(ragged.slice(0, -1) as unknown as ZoteroAttachment[]),
+    ).toBeNull();
   });
 });

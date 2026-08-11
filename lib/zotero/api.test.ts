@@ -119,6 +119,67 @@ describe("the URLs", () => {
   });
 });
 
+describe("the URLs, built from segments nobody sanitised", () => {
+  // The pin above proves the builders do not *add* a credential, on input that
+  // is already well formed. This proves they cannot be made to grow one. Every
+  // id in a Zotero URL is somebody else's string: a library id and a collection
+  // key are typed or picked by a member, and an item key and an attachment key
+  // are read straight out of remote JSON. Interpolated raw, a collection named
+  // `A?key=SECRET` turns a builder that takes no key into one that emits one.
+  const SEPARATORS = [
+    "A?key=SECRET",
+    "A#fragment",
+    "1/../groups/9",
+    "a b",
+    "%2F",
+    "A&key=SECRET",
+  ];
+
+  it("keeps a separator inside the segment it was written into", () => {
+    for (const segment of SEPARATORS) {
+      const escaped = encodeURIComponent(segment);
+
+      expect(
+        new URL(itemsUrl({ library: USER, collectionKey: segment, start: 0, limit: 25 }))
+          .pathname,
+      ).toBe(`/users/475425/collections/${escaped}/items/top`);
+      expect(new URL(childrenUrl(USER, segment)).pathname).toBe(
+        `/users/475425/items/${escaped}/children`,
+      );
+      expect(new URL(fileUrl(USER, segment)).pathname).toBe(
+        `/users/475425/items/${escaped}/file`,
+      );
+      expect(new URL(collectionsUrl({ type: "group", id: segment })).pathname).toBe(
+        `/groups/${escaped}/collections`,
+      );
+      expect(new URL(groupsUrl(segment)).pathname).toBe(`/users/${escaped}/groups`);
+    }
+  });
+
+  it("still carries no credential, whatever a segment says", () => {
+    // A dot segment is in the corpus on purpose: the URL parser resolves `.`
+    // and `..` before any encoding is visible to it, so the property that
+    // survives is not "the segment is preserved" but "the URL still addresses
+    // the library it was built for, and still has no key on it".
+    for (const segment of [...SEPARATORS, "..", ".", "?key=SECRET"]) {
+      const urls = [
+        itemsUrl({ library: USER, collectionKey: segment, start: 0, limit: 25 }),
+        childrenUrl(USER, segment),
+        fileUrl(USER, segment),
+      ];
+      for (const raw of urls) {
+        // The text "SECRET" may well still be in there — escaped, as part of
+        // an absurd collection key. What must never be there is a `key`
+        // *parameter*, which is the thing an access log records and the API
+        // would read as a credential.
+        expect(raw).not.toMatch(/[?&]key=/);
+        expect(new URL(raw).searchParams.has("key")).toBe(false);
+        expect(new URL(raw).pathname.startsWith("/users/475425/")).toBe(true);
+      }
+    }
+  });
+});
+
 describe("parseKeyPermissions", () => {
   /** What `GET /keys/current` actually answers, key and all. */
   const body = {
@@ -157,6 +218,49 @@ describe("parseKeyPermissions", () => {
       access: { user: { library: true, write: false }, groups: { 234567: { library: true, write: true } } },
     };
     expect(parseKeyPermissions(writable)?.readOnly).toBe(false);
+  });
+
+  it("believes any truthy write, not only the boolean", () => {
+    // `=== true` fails toward accepting the key. If Zotero ever answers a `1`
+    // here, the safe reading is "it writes" — the cost of being wrong that way
+    // is a refusal the member can fix, and the cost of being wrong the other
+    // way is Margin holding a key that can delete a career's bibliography.
+    const writable = { ...body, access: { user: { library: true, write: 1 } } };
+    expect(parseKeyPermissions(writable)?.readOnly).toBe(false);
+  });
+
+  it("says a normal key can read", () => {
+    expect(parseKeyPermissions(body)?.canRead).toBe(true);
+  });
+
+  it("says a key granted nothing cannot read, though it cannot write either", () => {
+    // The case that needs its own field. A key with no access block is not
+    // writable, so `readOnly` is true and a connect flow checking only that
+    // waves it through — and the first sync 403s, and the member is told
+    // Zotero does not recognise their key, which is false. The key is fine;
+    // its permissions are empty. `canRead` is how the refusal says so.
+    for (const empty of [{ userID: 475425 }, { userID: 475425, access: {} }]) {
+      const read = parseKeyPermissions(empty);
+      expect(read?.readOnly).toBe(true);
+      expect(read?.canRead).toBe(false);
+    }
+  });
+
+  it("says a key with the library switched off cannot read", () => {
+    const narrowed = { ...body, access: { user: { library: false, files: true } } };
+    expect(parseKeyPermissions(narrowed)?.canRead).toBe(false);
+  });
+
+  it("says a group-only key can read", () => {
+    // A member whose key reaches no personal library but one shared group is
+    // connectable, and the group is the whole point of connecting.
+    const groupOnly = {
+      ...body,
+      access: { groups: { 234567: { library: true, write: false } } },
+    };
+    const read = parseKeyPermissions(groupOnly);
+    expect(read?.canRead).toBe(true);
+    expect(read?.readOnly).toBe(true);
   });
 
   it("refuses a body that is not a key description at all", () => {
