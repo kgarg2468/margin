@@ -4,7 +4,11 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { citationNumbering } from "@/lib/citations/numbering";
 import { GOLD_PAIRS } from "@/lib/digest/engine";
-import { ownPrivateNotes, tallyContributors } from "@/lib/brief/prep";
+import {
+  lineCitations,
+  ownPrivateNotes,
+  tallyContributors,
+} from "@/lib/brief/prep";
 import { cleanQuote } from "@/lib/quotes";
 import { formatDate, relativeWhen } from "@/lib/sessions-ui";
 import {
@@ -192,11 +196,7 @@ export function PresenterBrief({
   const numbering = citationNumbering(
     stored.flatMap((section) =>
       section.items.map((item) => ({
-        annotationIds: item.annotationIds.every((id) =>
-          visibleAnnotationIds.has(id),
-        )
-          ? item.annotationIds
-          : [],
+        annotationIds: lineCitations(item, visibleAnnotationIds).cited,
       })),
     ),
   );
@@ -535,12 +535,11 @@ function BriefLine({
   numbering: ReadonlyMap<Id<"annotations">, number>;
   anchored: ReadonlySet<string>;
 }) {
-  const cited = item.annotationIds.filter((id) => visibleAnnotationIds.has(id));
-  // All or nothing, which is the rule the server applies on the way out. A
-  // collision line is built from both the notes it cites and names both
-  // members, so one of the two going is not a line with a gap in it — it is a
-  // line that is still about somebody who took their note back.
-  const withdrawn = cited.length < item.annotationIds.length;
+  // One rule, two call sites (the registry above folds the same function over
+  // the same lines), and it lives in `lib/` because the interesting half is
+  // the deferral: a cross-paper citation is not on this page's paper, so this
+  // page has no standing to call it withdrawn.
+  const { withdrawn, cited } = lineCitations(item, visibleAnnotationIds);
   const label = item.pairType === undefined ? undefined : GOLD_PAIRS[item.pairType];
 
   return (

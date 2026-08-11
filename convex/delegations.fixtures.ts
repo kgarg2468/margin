@@ -591,6 +591,8 @@ export async function seedAnnotation(
     type: string;
     labId: Id<"labs">;
     paperId: Id<"papers">;
+    /** The passage it sits on — what a cross-paper pairing is made of. */
+    quote: string;
     /** The meeting it was written under — what makes a note carriable forward. */
     sessionId: Id<"sessions">;
   }> = {},
@@ -601,7 +603,7 @@ export async function seedAnnotation(
     sessionId: overrides.sessionId,
     memberId: seed.memberId,
     anchor: {
-      quote: "incubation at 4°C",
+      quote: overrides.quote ?? "incubation at 4°C",
       prefix: "",
       suffix: "",
       start: 0,

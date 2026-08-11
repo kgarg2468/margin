@@ -225,3 +225,37 @@ describe("the scout rides the brief", () => {
     ).toEqual([]);
   });
 });
+
+describe("the brief past the paper boundary", () => {
+  it("draws a line between two papers and marks the far citation", async () => {
+    const ctx = new FakeCtx();
+    const seed = await seedLab(ctx);
+    const claim =
+      "data were collected from two independent cohorts under identical conditions";
+    const other = await ctx.db.insert("papers", {
+      labId: seed.labId,
+      title: "The other one",
+      addedBy: seed.pi,
+      ingestStatus: "ready",
+    });
+    await seedAnnotation(ctx, { ...seed, memberId: seed.pi }, {
+      type: "hypothesis",
+      quote: claim,
+    });
+    await seedAnnotation(ctx, { ...seed, memberId: seed.member }, {
+      type: "critique",
+      paperId: other,
+      quote: claim,
+    });
+
+    ctx.auth = { userId: seed.pi };
+    await handlerOf(generate)(ctx, { sessionId: seed.sessionId } as never);
+
+    const brief = rowAt(ctx.db.all("briefs"));
+    const line = brief.sections
+      .find((s) => s.key === "collisions")
+      ?.items.find((item) => item.crossPaperIds !== undefined);
+    expect(line?.text).toContain("The other one");
+    expect(line?.crossPaperIds).toHaveLength(1);
+  });
+});

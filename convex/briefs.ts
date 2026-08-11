@@ -16,6 +16,7 @@ import { canApprove } from "./sessions";
 import { WITHDRAWN_ITEM_TEXT } from "./synthesis";
 import { assembleBrief, type BriefAnnotation } from "../lib/brief/assemble";
 import { redactWhenAnyWithdrawn } from "../lib/citations/redaction";
+import { detectCrossPaperCollisions } from "../lib/digest/engine";
 import { isStillShared } from "../lib/citations/visibility";
 
 /**
@@ -79,6 +80,25 @@ import { isStillShared } from "../lib/citations/visibility";
 const POOL_LIMIT = 1000;
 
 /**
+ * How far past this paper one assembly looks, and how much of each neighbour
+ * it reads.
+ *
+ * A brief is built in a mutation that must stay instant — the presenter's
+ * button is a transaction, not a job — so the boundary lift is bought with a
+ * fixed read budget rather than with "every paper the lab has". Twelve
+ * neighbours at 150 rows is 1,800 documents on top of this paper's 1,000: a
+ * fifth of the transaction ceiling, for a lab with a reading list longer than
+ * anyone's memory of it. Newest papers first, because a cross-paper collision
+ * is only interesting while both halves are live reading.
+ *
+ * The pairing itself is bounded separately and reports when it ran out:
+ * `MAX_CROSS_PAPER_COMPARISONS` and `CrossPaperScan.capped`
+ * (`lib/digest/engine.ts`).
+ */
+const CROSS_PAPER_PAPERS = 12;
+const CROSS_PAPER_POOL_LIMIT = 150;
+
+/**
  * How many earlier meetings on this paper the carried-over section reaches
  * back through. A lab that has read one paper across twenty sessions has a
  * different problem than this feature solves.
@@ -93,6 +113,8 @@ const briefItem = v.object({
   text: v.string(),
   annotationIds: v.array(v.id("annotations")),
   pairType: v.optional(v.string()),
+  /** See the schema — the far half of a cross-paper line. */
+  crossPaperIds: v.optional(v.array(v.id("annotations"))),
   fromSessionId: v.optional(v.id("sessions")),
   fromSessionAt: v.optional(v.number()),
 });
@@ -269,10 +291,81 @@ async function writeBrief(
     ...(a.sessionId === undefined ? {} : { sessionId: a.sessionId }),
   }));
 
+  // The one boundary a brief may see past.
+  //
+  // `detectCollisions` stops inside a document because a collision is a
+  // passage; the second detector (#56, shipped for the digest) crosses on an
+  // identical claim of at least sixty characters between two members writing a
+  // gold type pair. A session's prep used to have nothing to pair across
+  // because its pool was one paper — so this reads the neighbours, and reads
+  // them exactly the way the pool above was read: privacy is the index,
+  // `by_paper_and_visibility` at "lab", which cannot return a private row.
+  const paperTitles = new Map<Id<"papers">, string>([[paper._id, paper.title]]);
+  const neighbours = await ctx.db
+    .query("papers")
+    .withIndex("by_lab", (q) => q.eq("labId", session.labId))
+    .order("desc")
+    .take(CROSS_PAPER_PAPERS + 1);
+
+  const across: BriefAnnotation<
+    Id<"papers">,
+    Id<"annotations">,
+    Id<"users">,
+    Id<"sessions">
+  >[] = [];
+  for (const other of neighbours) {
+    if (other._id === session.paperId) {
+      continue;
+    }
+    const rows = await ctx.db
+      .query("annotations")
+      .withIndex("by_paper_and_visibility", (q) =>
+        q.eq("paperId", other._id).eq("visibility", "lab"),
+      )
+      .order("desc")
+      .take(CROSS_PAPER_POOL_LIMIT);
+    const liveRows = rows.filter((a) => a.deletedAt === undefined);
+    if (liveRows.length === 0) {
+      continue;
+    }
+    paperTitles.set(other._id, other.title);
+    for (const authorId of new Set(liveRows.map((a) => a.memberId))) {
+      if (names.has(authorId)) continue;
+      const user = await ctx.db.get(authorId);
+      names.set(authorId, user?.name ?? user?.email ?? "A lab member");
+    }
+    for (const a of liveRows) {
+      across.push({
+        id: a._id,
+        paperId: a.paperId,
+        memberId: a.memberId,
+        memberName: names.get(a.memberId) ?? "A lab member",
+        type: a.type,
+        pageIndex: a.anchor.pageIndex,
+        start: a.anchor.start,
+        end: a.anchor.end,
+        quote: a.anchor.quote,
+        body: a.body,
+        createdAt: a._creationTime,
+        ...(a.parentId === undefined ? {} : { parentId: a.parentId }),
+        ...(a.sessionId === undefined ? {} : { sessionId: a.sessionId }),
+      });
+    }
+  }
+
   const { sections, citationCount } = assembleBrief({
     pool,
+    paperId: session.paperId,
     paperTitle: paper.title,
     priorSessions: await priorSessions(ctx, session),
+    // The scan gets both sides; the assembler keeps only pairs that touch this
+    // meeting's paper. The neighbours never enter `pool` itself — they are
+    // evidence for one section, not material for the other three, and a
+    // carried-over question from another paper is a different feature.
+    crossPaper: {
+      scan: detectCrossPaperCollisions([...pool, ...across]),
+      paperTitles,
+    },
   });
   if (citationCount === 0) {
     return null;

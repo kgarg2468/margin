@@ -1842,6 +1842,15 @@ export default defineSchema({
             /** The gold matrix cell, on collision lines only. */
             pairType: v.optional(v.string()),
             /**
+             * Which of this line's citations sit on another paper.
+             *
+             * Cross-paper collision lines only. Stored rather than re-derived,
+             * because the reader that needs it — the presenter's panel — has
+             * one paper's margin and no way to ask which document a foreign id
+             * belongs to. See `lib/brief/assemble.ts`.
+             */
+            crossPaperIds: v.optional(v.array(v.id("annotations"))),
+            /**
              * Which earlier session left this open, and when it was held — on
              * carried-over lines only. An epoch number, not a formatted date:
              * a date has a timezone and a reader, and the server has neither.
