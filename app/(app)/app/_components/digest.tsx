@@ -57,32 +57,50 @@ export function SessionDigest({
   sessionId: Id<"sessions">;
 }) {
   const digests = useQuery(api.digests.listMine, { labId });
+  const reduce = useReducedMotion();
   const mine = (digests ?? []).filter(
     (digest) => digest.sessionId === sessionId,
   );
 
-  // The same slot-holding as the inbox, minus the mutation: nothing on this
-  // page builds a prep digest, so the subscription is the only late path. It
-  // sits between the presenter's brief and the manage panel, which is as
-  // mid-page as it gets — a card appearing here after the page settled would
-  // push the meeting's controls out from under a cursor already on them.
-  if (digests === undefined) {
+  // Nothing on this page builds a prep digest, so the subscription is the only
+  // late path — and for a session with none, which is most of them, the whole
+  // effect of the answer arriving is to take this slot away. It used to take it
+  // between two frames, and it sits between the presenter's brief and the
+  // manage panel: the controls under the cursor moved before the reader did.
+  // So the ghost folds shut, and the presence stays mounted through the empty
+  // state or there would be nothing left to run the exit. It folds to nothing
+  // rather than to a shell because a session scheduled for next week has no
+  // prep yet, and an empty "Your prep" heading over a blank box is worse than
+  // the absence of one. What the fold does not own is the page's gap between
+  // siblings, which still closes in one frame once the span unmounts — the
+  // same tail the inbox's section leaves.
+  if (mine.length === 0) {
     return (
-      <span
-        aria-label="Loading"
-        role="status"
-        className={`${skeletonClass} h-6 w-56`}
-      />
+      <AnimatePresence initial={false}>
+        {digests === undefined && (
+          <motion.span
+            key="prep-ghost"
+            aria-label="Loading"
+            role="status"
+            exit={
+              reduce === true
+                ? { opacity: 0, transition: { duration: 0 } }
+                : { opacity: 0, height: 0, transition: { duration: 0.28 } }
+            }
+            style={{ overflow: "hidden" }}
+            className={`${skeletonClass} h-6 w-56`}
+          />
+        )}
+      </AnimatePresence>
     );
   }
 
-  // Renders nothing at all once the answer is in and it is "none": a session
-  // scheduled for next week has no prep yet, and an empty "Your prep" heading
-  // over a blank box is worse than the absence of one.
-  if (mine.length === 0) {
-    return null;
-  }
-
+  // Prep to show is the one arrival that does not fold: the presence goes with
+  // the same render that brings the section, so the ghost is gone rather than
+  // shrinking underneath the very thing it was standing in for. Kept inside the
+  // presence it would exit while the section entered, and the reader would get
+  // the cards, then a settle, then the gap's snap — three movements to say one
+  // digest turned up.
   return (
     <section className="flex flex-col gap-4">
       <h2 className={eyebrowClass}>Your prep</h2>
