@@ -106,7 +106,7 @@ function TabButton({
       aria-controls={`add-paper-panel-${id}`}
       onClick={onSelect}
       className={
-        "-mb-px border-b-2 pb-2 font-sans text-sm transition-colors " +
+        "-mb-px border-b-2 pb-2 font-sans text-sm pressable " +
         (active
           ? "border-accent text-ink-strong"
           : "border-transparent text-ink-faint hover:text-ink-muted")

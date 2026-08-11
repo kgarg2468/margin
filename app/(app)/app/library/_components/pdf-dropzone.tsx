@@ -57,7 +57,7 @@ export function PdfDropzone({
         }}
         className={
           "flex w-full flex-col items-center gap-1 rounded-md border border-dashed px-6 py-10 " +
-          "transition-colors disabled:cursor-not-allowed disabled:opacity-50 " +
+          "pressable disabled:cursor-not-allowed disabled:opacity-50 " +
           (over
             ? "border-accent bg-highlight"
             : "border-rule bg-surface hover:border-ink-faint")

@@ -10,6 +10,7 @@ import {
   eyebrowClass,
   inputClass,
   labelClass,
+  linkButtonClass,
   secondaryButtonClass,
 } from "@/lib/ui";
 import { useAuthToken } from "@convex-dev/auth/react";
@@ -258,7 +259,7 @@ export function PdfPanel({
               type="button"
               disabled={opening}
               onClick={() => void openPdf()}
-              className="tap-target font-sans text-sm text-accent underline-offset-4 hover:underline disabled:opacity-50"
+              className={`${linkButtonClass} tap-target disabled:opacity-50`}
             >
               {opening ? "Opening the PDF…" : "Open the PDF"}
             </button>
@@ -267,7 +268,7 @@ export function PdfPanel({
                 type="button"
                 disabled={busyMessage !== null}
                 onClick={() => void textLayer.read(paperId, true)}
-                className="tap-target font-sans text-sm text-accent underline-offset-4 hover:underline disabled:opacity-50"
+                className={`${linkButtonClass} tap-target disabled:opacity-50`}
               >
                 {ingestStatus === "failed"
                   ? "Try reading it again"

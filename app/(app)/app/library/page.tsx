@@ -183,6 +183,10 @@ function Library({
           setHint(false);
           setFiling(null);
           setMarked(null);
+          // `a` opens the panel and nothing closed it but a link at the bottom
+          // of it. On an empty shelf this is a no-op by design — the panel is
+          // rendered by `isEmpty` there, and there is nothing to put away.
+          setAdding(false);
           return;
         case "ArrowDown":
           if (shown.length > 0) {
@@ -251,7 +255,7 @@ function Library({
                 "application/x-bibtex;charset=utf-8",
               )
             }
-            className="tap-target self-start font-sans text-xs text-ink-faint underline-offset-4 hover:text-accent hover:underline"
+            className="pressable tap-target self-start font-sans text-xs text-ink-faint underline-offset-4 hover:text-accent hover:underline"
           >
             Download BibTeX
           </button>
@@ -271,7 +275,9 @@ function Library({
             <button
               type="button"
               onClick={() => setAdding(false)}
-              className="tap-target self-start font-sans text-sm text-accent underline-offset-4 hover:underline"
+              // The way out of a panel should not be quieter than the way in:
+              // this is the same control as `Add a paper` above, run backwards.
+              className={`${secondaryButtonClass} tap-target self-start`}
             >
               Done adding
             </button>
@@ -407,8 +413,8 @@ function Library({
                       href={`/app/library/${paper._id}`}
                       className={
                         row.record.tone === "quiet"
-                          ? "tap-target font-sans text-xs text-ink-faint underline-offset-4 hover:text-accent hover:underline"
-                          : "tap-target font-sans text-sm text-accent underline-offset-4 hover:underline"
+                          ? "pressable tap-target font-sans text-xs text-ink-faint underline-offset-4 hover:text-accent hover:underline"
+                          : "pressable tap-target font-sans text-sm text-accent underline-offset-4 hover:underline"
                       }
                     >
                       {row.record.label}
@@ -421,7 +427,7 @@ function Library({
                         setMarked(index);
                         setFiling(filing === paper._id ? null : paper._id);
                       }}
-                      className="tap-target font-sans text-xs text-ink-faint underline-offset-4 hover:text-accent hover:underline"
+                      className="pressable tap-target font-sans text-xs text-ink-faint underline-offset-4 hover:text-accent hover:underline"
                     >
                       {filing === paper._id ? "Close" : "Filed as…"}
                     </button>
