@@ -1744,7 +1744,10 @@ export const remove = mutation({
 
     // Before either ending, and that ordering is the point: the no-replies
     // branch below hard-deletes the row, and the cascade reads it to place the
-    // cancellation in the ledger. Afterwards there would be nothing to read.
+    // cancellation in the ledger. Afterwards there would be nothing to read —
+    // for rows that predate the denormalized paperId today's enqueue writes;
+    // for the rest, the ordering is defense-in-depth rather than the only
+    // source.
     // The actor is the author, not the job — a ledger entry saying a *machine*
     // cancelled the run would leave the person who took the note back out of
     // the one record of them doing it.

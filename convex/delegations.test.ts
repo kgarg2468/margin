@@ -1742,6 +1742,13 @@ describe("a note taken back stops the run on it", () => {
       seed.questionId,
     );
     expect(rowAt(ctx.db.all("delegations")).status).toBe("cancelled");
+    // Placement is what the before-the-delete ordering buys: run the cascade
+    // after the delete and the event still records, but with nowhere to read
+    // a paper out of.
+    expect(
+      ctx.db.all("events").find((e) => e.type === "delegation.cancelled")
+        ?.paperId,
+    ).toBe(seed.paperId);
   });
 
   it("leaves a finding that already returned alone", async () => {
@@ -1753,7 +1760,12 @@ describe("a note taken back stops the run on it", () => {
     const { ctx, seed } = await seeded();
     await corpus(ctx, seed);
     await run(ctx, await queue(ctx, seed));
-    const pending = await queue(ctx, seed);
+    // Requested by someone other than the acting PI, so the actor assertion
+    // below can tell "the human who acted" from `requestedBy` — cancelRow
+    // falls back to the requester when no actor is passed, and with both set
+    // to the PI that fallback would satisfy the assertion for the wrong
+    // reason.
+    const pending = await queue(ctx, seed, { requestedBy: seed.member });
     ctx.auth = { userId: seed.pi };
 
     await handlerOf(annotations.setVisibility)(ctx, {
