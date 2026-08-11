@@ -7,6 +7,7 @@ import { annotationsToCsv, annotationsToJson } from "@/lib/export/csv";
 import { downloadText, exportFilename } from "@/lib/export/download";
 import { pdfAuthHeaders, pdfEndpoint } from "@/lib/pdf/delivery";
 import { loadPdfjs, normalizePdfText } from "@/lib/pdf/extract";
+import { adoptSeed } from "@/lib/scout/adopt";
 import { boxAnchor, eyebrowClass, skeletonClass } from "@/lib/ui";
 import { useAuthToken } from "@convex-dev/auth/react";
 import { useQuery } from "convex-helpers/react/cache/hooks";
@@ -929,9 +930,22 @@ export function Reader({
    * code the way it does.
    */
   const [requestedNote, setRequestedNote] = useState<string | null>(null);
+  /**
+   * Somebody arrived here from a finding, to answer the question themselves.
+   *
+   * Read from the URL in the same effect and spent in the same cleanup as
+   * `?note=`, because they are one gesture: a pointer at a note, and a request
+   * to open its composer on the citations behind a scout's report of it. The
+   * finding is fetched here rather than carried in the link — a URL is a place
+   * a person can paste anything, and the composer's contents are decided by
+   * what the server will still serve, not by what a query string said.
+   */
+  const [adoptFor, setAdoptFor] = useState<string | null>(null);
   useEffect(() => {
-    setRequestedNote(
-      new URL(window.location.href).searchParams.get("note"),
+    const searchParams = new URL(window.location.href).searchParams;
+    setRequestedNote(searchParams.get("note"));
+    setAdoptFor(
+      searchParams.get("adopt") === "1" ? searchParams.get("note") : null,
     );
   }, []);
 
@@ -960,6 +974,7 @@ export function Reader({
     // than a second jump to a note the reader has already dealt with.
     const url = new URL(window.location.href);
     url.searchParams.delete("note");
+    url.searchParams.delete("adopt");
     window.history.replaceState(
       null,
       "",
@@ -974,6 +989,50 @@ export function Reader({
     focusPassage,
     pageOf,
   ]);
+
+  const adoptFinding = useQuery(
+    api.findings.newestForSubject,
+    adoptFor === null
+      ? "skip"
+      : {
+          subject: {
+            kind: "annotation",
+            annotationId: adoptFor as Id<"annotations">,
+          },
+        },
+  );
+
+  const seedReply = useMemo(() => {
+    if (adoptFor === null || adoptFinding === undefined || adoptFinding === null) {
+      return undefined;
+    }
+    const byId = new Map(rows.map((row) => [row._id, row]));
+    // Only the items still standing. A redacted item's citations are the ones
+    // that moved; carrying them into somebody's draft would put a withdrawn
+    // note's passage back on a screen through a side door.
+    const cited = new Set(
+      adoptFinding.items
+        .filter((item) => !item.redacted)
+        .flatMap((item) => item.citedAnnotationIds),
+    );
+    const body = adoptSeed(
+      [...cited].flatMap((id) => {
+        const row = byId.get(id);
+        return row === undefined || row.deleted
+          ? []
+          : [
+              {
+                authorName: row.authorName,
+                pageIndex: row.anchor.pageIndex,
+                quote: row.anchor.quote,
+              },
+            ];
+      }),
+    );
+    return body.length === 0
+      ? undefined
+      : { annotationId: adoptFor as Id<"annotations">, body };
+  }, [adoptFor, adoptFinding, rows]);
 
   const counts = useMemo(() => {
     const map = new Map<AnnotationType, number>();
@@ -1467,6 +1526,7 @@ export function Reader({
             activeId={activeId}
             onActivate={activate}
             onFocusPassage={focusPassage}
+            seedReply={seedReply}
           />
 
           {draft !== null && composerAnchor !== undefined && (

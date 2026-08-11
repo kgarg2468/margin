@@ -10,7 +10,7 @@ import {
   droppedLine,
   type KnownNote,
 } from "@/lib/scout/surface";
-import { chipClass } from "@/lib/ui";
+import { chipClass, linkButtonClass } from "@/lib/ui";
 import { useQuery } from "convex-helpers/react/cache/hooks";
 import Link from "next/link";
 
@@ -168,6 +168,19 @@ export function ScoutFinding({
           <p className="font-sans text-[11px] text-ink-faint tabular-nums">
             {dropped}
           </p>
+        )}
+
+        {subject.kind === "annotation" && (
+          // Into the reader, at the question, with the composer open on its
+          // citations. Action rows get no adopt (design §7): there is no thread
+          // under an outcome to reply into, and inventing one would be a second
+          // place the lab argues about the same question.
+          <Link
+            href={`/app/library/${paperId}/read?note=${subject.annotationId}&adopt=1`}
+            className={`${linkButtonClass} self-start text-xs`}
+          >
+            Adopt citations
+          </Link>
         )}
       </div>
     </>
