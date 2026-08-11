@@ -124,6 +124,18 @@ const READ_ATTEMPTS = 2;
  *     one already handles. `retryAfterMs` is imported rather than restated; it
  *     already reads both spellings of the header and already refuses to
  *     believe a delay longer than this is willing to wait.
+ *
+ * The two ceilings that wait are different mechanisms, and they are meant to
+ * disagree. This one is the **in-request** wait: one `429`, `retry-after`
+ * honoured through `retryAfterMs`, capped at that function's `MAX_BACKOFF_MS`
+ * of 8s, and a longer directed delay is declined outright — the cursor is a
+ * better answer than an action holding a socket open. The other is the
+ * **between-page** wait: Zotero's `Backoff` header, which arrives on successful
+ * responses too and asks for room before the *next* page rather than a re-ask
+ * of this one. `readSyncHeaders` in `lib/zotero/api.ts` reads that one and caps
+ * it at 30s, which is affordable precisely because nothing is in flight while
+ * it is honoured. A single shared ceiling would have to be the smaller of the
+ * two, and would then throw away the room Zotero explicitly asked for.
  *   - **A `304` is an answer.** It is the cheap "nothing has changed" the
  *     hourly sweep is built on, and returning it as a response rather than
  *     raising is what lets a caller treat it as the no-op it is.
@@ -467,6 +479,17 @@ export const callerIn = internalQuery({
  *
  * An action because it is a network call, public because a picker needs it,
  * and it returns names and ids — never the key that fetched them.
+ *
+ * **`/keys/current` is asked again rather than `link.libraryId` being reused.**
+ * The two are the same string only until the member picks a group: after that,
+ * `libraryId` is the group's id, and a picker built on it asks Zotero for
+ * `/users/<groupId>/groups` — which the key cannot read, so the picker 403s and
+ * the member can never leave the library they chose. The same mistake would put
+ * the group's id on the "My library" entry, and choosing it would write a
+ * personal library that does not exist: every sync from then on answers `403`,
+ * and `permanentStatus` reports a revoked key to somebody whose key is fine.
+ * `libraryId` is the *scope*. The member's Zotero userID is a property of the
+ * credential, so it is read from the credential.
  */
 export const listLibraries = action({
   args: { labId: v.id("labs") },
@@ -481,11 +504,19 @@ export const listLibraries = action({
   }),
   handler: async (ctx, args) => {
     const link = await callerLink(ctx, args.labId);
-    const response = await zoteroFetch(groupsUrl(link.libraryId), link.apiKey);
+    const identity = parseKeyPermissions(
+      await bodyOf(await zoteroFetch(keysCurrentUrl(), link.apiKey)),
+    );
+    if (identity === null) {
+      throw new ConvexError(
+        "Zotero answered something Margin couldn't read. Try again in a minute.",
+      );
+    }
+    const response = await zoteroFetch(groupsUrl(identity.userId), link.apiKey);
     const groups = parseGroups(await bodyOf(response));
     return {
       libraries: [
-        { type: "user" as const, id: link.libraryId, name: "My library" },
+        { type: "user" as const, id: identity.userId, name: "My library" },
         ...groups.map((group) => ({
           type: "group" as const,
           id: group.id,
@@ -513,6 +544,15 @@ export const listCollections = action({
 });
 
 /**
+ * What Zotero issues as a collection key: eight uppercase alphanumerics.
+ *
+ * Wider than that on purpose, and for the reason `normalizeApiKey` gives —
+ * this is not the authority on Zotero's key format, and a length that shifts
+ * by a character should not lock a member out of their own collection.
+ */
+const COLLECTION_KEY = /^[A-Za-z0-9]{4,32}$/;
+
+/**
  * Point the link at a library, and optionally at one collection in it.
  *
  * **The version counter is thrown away on every change.** A
@@ -529,7 +569,10 @@ export const listCollections = action({
  * The reason that matters is `encodeSegment` in `lib/zotero/api.ts`: a key is
  * interpolated into a path, and the one shape no encoding survives is a dot
  * segment. A stored key that never came from Zotero is the only way one gets
- * that far, so it does not.
+ * that far, so the shape is checked here as well: this is a public mutation and
+ * "the picker only sends real keys" is a fact about the client. It also
+ * disposes of the empty string, which is not a dot segment but builds
+ * `/collections//items/top` and asks about a library nobody named.
  */
 export const chooseScope = mutation({
   args: {
@@ -547,6 +590,14 @@ export const chooseScope = mutation({
     if (link === null) {
       throw new ConvexError(
         "There's no Zotero library linked here yet. Paste a key first.",
+      );
+    }
+    if (
+      args.collectionKey !== undefined &&
+      !COLLECTION_KEY.test(args.collectionKey)
+    ) {
+      throw new ConvexError(
+        "That isn't a Zotero collection. Pick one from the list.",
       );
     }
     await ctx.db.patch(link._id, {

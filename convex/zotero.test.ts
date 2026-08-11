@@ -6,12 +6,15 @@ import { FakeCtx, handlerOf, seedLab } from "./delegations.fixtures";
 import {
   ZoteroRefusal,
   callerIn,
+  callerLinkId,
   chooseScope,
   connect,
   disconnect,
+  listLibraries,
   permanentStatus,
   saveLink,
   status,
+  syncPayload,
   zoteroFetch,
 } from "./zotero";
 
@@ -79,6 +82,8 @@ async function world() {
   ctx.auth = { userId: seed.pi };
   ctx.register(internalApi.zotero.saveLink, saveLink);
   ctx.register(internalApi.zotero.callerIn, callerIn);
+  ctx.register(internalApi.zotero.callerLinkId, callerLinkId);
+  ctx.register(internalApi.zotero.syncPayload, syncPayload);
   return { ctx, seed };
 }
 
@@ -107,16 +112,22 @@ describe("zoteroFetch", () => {
   });
 
   it("waits out a 429 and asks once more", async () => {
-    const calls = stubFetch([
-      { status: 429, headers: { "Retry-After": "1" } },
-      { status: 200, body: [] },
-    ]);
-    const response = await zoteroFetch(
-      "https://api.zotero.org/keys/current",
-      KEY,
-    );
-    expect(response.status).toBe(200);
-    expect(calls).toHaveLength(2);
+    // On fake timers: the wait is real, and a suite that sits out every
+    // backoff it asserts about is a suite people stop running.
+    vi.useFakeTimers();
+    try {
+      const calls = stubFetch([
+        { status: 429, headers: { "Retry-After": "1" } },
+        { status: 200, body: [] },
+      ]);
+      const pending = zoteroFetch("https://api.zotero.org/keys/current", KEY);
+      await vi.runAllTimersAsync();
+      const response = await pending;
+      expect(response.status).toBe(200);
+      expect(calls).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not re-ask anything else — the cursor is the retry", async () => {
@@ -311,6 +322,81 @@ describe("connect", () => {
   });
 });
 
+/* --- the picker ------------------------------------------------------- */
+
+describe("listLibraries", () => {
+  /** `GET /users/<id>/groups` for one group the member belongs to. */
+  const GROUPS_BODY = [
+    { id: 234567, data: { id: 234567, name: "Rahmani Lab reading" } },
+  ];
+
+  type Libraries = { libraries: { type: string; id: string; name: string }[] };
+
+  const list = async (ctx: FakeCtx, labId: Id<"labs">): Promise<Libraries> =>
+    (await handlerOf(listLibraries)(ctx, { labId } as never)) as Libraries;
+
+  /** One member, linked to their own library, exactly as `connect` leaves it. */
+  async function linked() {
+    const { ctx, seed } = await world();
+    await ctx.db.insert("zoteroLinks", {
+      userId: seed.pi,
+      labId: seed.labId,
+      apiKey: KEY,
+      connectedAt: 1_000,
+      libraryType: "user",
+      libraryId: "475425",
+    });
+    return { ctx, seed };
+  }
+
+  it("asks about the member's own account, not the library in the row", async () => {
+    const { ctx, seed } = await linked();
+    const calls = stubFetch([
+      { status: 200, body: READ_ONLY_BODY },
+      { status: 200, body: GROUPS_BODY },
+    ]);
+
+    const answer = await list(ctx, seed.labId);
+    expect(calls[0]?.url).toBe("https://api.zotero.org/keys/current");
+    expect(calls[1]?.url).toContain("/users/475425/groups");
+    expect(answer.libraries).toEqual([
+      { type: "user", id: "475425", name: "My library" },
+      { type: "group", id: "234567", name: "Rahmani Lab reading" },
+    ]);
+  });
+
+  it("still offers the way back after the member has picked a group", async () => {
+    // The bug this exists for. `libraryId` is the *scope*, and after a group is
+    // chosen it is the group's id — so a picker built on it asks Zotero for
+    // `/users/<groupId>/groups`, gets a 403 the key could never have satisfied,
+    // and renders nothing: the member is stuck in the library they chose. Worse
+    // still, "My library" would carry the group's id, and choosing it would
+    // write a personal library that does not exist — every sync from then on a
+    // 403, reported to the member as a revoked key.
+    const { ctx, seed } = await linked();
+    await handlerOf(chooseScope)(ctx, {
+      labId: seed.labId,
+      libraryType: "group",
+      libraryId: "234567",
+      libraryName: "Rahmani Lab reading",
+    } as never);
+
+    const calls = stubFetch([
+      { status: 200, body: READ_ONLY_BODY },
+      { status: 200, body: GROUPS_BODY },
+    ]);
+    const answer = await list(ctx, seed.labId);
+
+    expect(calls[1]?.url).toContain("/users/475425/groups");
+    expect(calls[1]?.url).not.toContain("/users/234567");
+    expect(answer.libraries[0]).toEqual({
+      type: "user",
+      id: "475425",
+      name: "My library",
+    });
+  });
+});
+
 /* --- scope, disconnect, status ---------------------------------------- */
 
 describe("chooseScope", () => {
@@ -364,6 +450,25 @@ describe("chooseScope", () => {
     const link = ctx.db.all("zoteroLinks")[0];
     expect(link?.collectionKey).toBe("C0LL3CTN");
     expect(link?.lastVersion).toBeUndefined();
+  });
+
+  it("refuses a collection key that did not come from Zotero", async () => {
+    // The picker sends keys it read out of `parseCollections`, but this is a
+    // public mutation and that is a fact about the client. A stored key is
+    // interpolated into a path, and the empty string builds
+    // `/collections//items/top` — a request about a library nobody named.
+    const { ctx, seed } = await linked();
+    for (const collectionKey of ["", "../..", "a b", "C0LL3CTN/x"]) {
+      await expect(
+        choose(ctx, {
+          labId: seed.labId,
+          libraryType: "user",
+          libraryId: "475425",
+          collectionKey,
+        }),
+      ).rejects.toBeInstanceOf(ConvexError);
+    }
+    expect(ctx.db.all("zoteroLinks")[0]?.collectionKey).toBeUndefined();
   });
 
   it("refuses when this member has no link to scope", async () => {
