@@ -1,5 +1,7 @@
 import { getFunctionName } from "convex/server";
+import { internal } from "./_generated/api";
 import type { Doc, Id, TableNames } from "./_generated/dataModel";
+import { STUB_MODEL, type DelegationModelFailure } from "./delegations";
 
 /**
  * A database that runs in a test process.
@@ -352,6 +354,70 @@ export class FakeCtx {
   runMutation = (reference: unknown, args: unknown) =>
     this.call(reference, args);
   runAction = (reference: unknown, args: unknown) => this.call(reference, args);
+}
+
+/* -------------------------------------------------------------------------
+ * The model
+ * ---------------------------------------------------------------------- */
+
+const MATERIAL_MARKER = "MATERIAL (JSON):\n";
+
+/**
+ * A model that reads its prompt and cites everything it was shown.
+ *
+ * The offline stand-in for `internal.delegations.callScoutModel`, registered
+ * against the real reference so the suites drive the whole run — claim,
+ * gather, the privacy gate, the prompt, the citation gate, the store — and
+ * fake only the network.
+ *
+ * It parses the prompt's own JSON payload rather than being handed the
+ * material out of band, which is both what a model does and what makes it a
+ * fixture that cannot pass while the prompt is broken. It cites rather than
+ * paraphrases: a stub that invented prose could clear the citation gate while
+ * saying something about notes it had not read, and a fixture that lies is
+ * worse than none.
+ */
+export function fakeScoutModel(prompt: string): {
+  ok: true;
+  text: string;
+  model: string;
+} {
+  const at = prompt.indexOf(MATERIAL_MARKER);
+  if (at === -1) {
+    throw new Error(
+      "The scout prompt no longer carries a `MATERIAL (JSON):` payload; the fake model cannot read what the real one is shown.",
+    );
+  }
+  const payload = JSON.parse(prompt.slice(at + MATERIAL_MARKER.length)) as {
+    annotations: { label: string }[];
+  };
+  return {
+    ok: true,
+    model: STUB_MODEL,
+    text: JSON.stringify({
+      items: payload.annotations.map((one) => ({
+        text: `The lab has written on this before [${one.label}].`,
+        citations: [one.label],
+      })),
+    }),
+  };
+}
+
+/** Register it, and hand back the log of what the run asked the model. */
+export function registerFakeScoutModel(
+  ctx: FakeCtx,
+  options: { modelFailure?: DelegationModelFailure } = {},
+): { prompt: string }[] {
+  const calls: { prompt: string }[] = [];
+  ctx.register(internal.delegations.callScoutModel, {
+    _handler: (_ctx: unknown, args: { prompt: string }) => {
+      calls.push({ prompt: args.prompt });
+      return options.modelFailure === undefined
+        ? fakeScoutModel(args.prompt)
+        : { ok: false, failure: options.modelFailure };
+    },
+  });
+  return calls;
 }
 
 /* -------------------------------------------------------------------------

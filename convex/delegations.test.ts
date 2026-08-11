@@ -6,6 +6,7 @@ import * as actions from "./actions";
 import {
   DAILY_RUN_BUDGET,
   DELEGATION_LEASE_MS,
+  FAILURE_SENTENCES,
   MAX_ACTIVE_PER_LAB,
   MAX_SEARCH_LENGTH,
   actionSubjectIsOpen,
@@ -22,16 +23,20 @@ import {
   holdsLease,
   leaseExpired,
   listForSubject,
+  parseScoutJson,
+  readModelPayload,
   reduceToSearchQuery,
   request,
   runForBrief,
   store,
   storeEmpty,
   subjectOf,
+  type DelegationModelFailure,
 } from "./delegations";
 import {
   FakeCtx,
   handlerOf,
+  registerFakeScoutModel,
   rowAt,
   seedAnnotation,
   seedLab,
@@ -58,7 +63,7 @@ vi.mock("@convex-dev/auth/server", async (importOriginal) => ({
 
 type Seed = Awaited<ReturnType<typeof seedLab>>;
 
-async function seeded() {
+async function seeded(options: { modelFailure?: DelegationModelFailure } = {}) {
   const ctx = new FakeCtx();
   const seed = await seedLab(ctx);
   ctx
@@ -67,7 +72,8 @@ async function seeded() {
     .register(internal.delegations.store, store)
     .register(internal.delegations.storeEmpty, storeEmpty)
     .register(internal.delegations.fail, fail);
-  return { ctx, seed };
+  const calls = registerFakeScoutModel(ctx, options);
+  return { ctx, seed, calls };
 }
 
 /** A lab-visible note the stub scout will find and cite. */
@@ -582,6 +588,123 @@ describe("a run, start to finish", () => {
 
     expect((await ctx.db.get(orphan))?.status).toBe("cancelled");
     expect((await ctx.db.get(good))?.status).toBe("returned");
+  });
+});
+
+/* -------------------------------------------------------------------------
+ * What a model can do to a run
+ * ---------------------------------------------------------------------- */
+
+describe("readModelPayload", () => {
+  it("reads the text out of the output array, not out of output_text", () => {
+    // A run that spends its whole budget reasoning comes back with an
+    // `output` array and no message in it. The flat convenience property is
+    // something the SDKs assemble, and there is no SDK here.
+    expect(
+      readModelPayload({
+        status: "completed",
+        output: [
+          { type: "reasoning", content: [] },
+          { type: "message", content: [{ type: "output_text", text: "{}" }] },
+        ],
+      }),
+    ).toEqual({ ok: true, text: "{}" });
+  });
+
+  it("refuses a truncated answer rather than storing half of one", () => {
+    expect(
+      readModelPayload({
+        status: "incomplete",
+        incomplete_details: { reason: "max_output_tokens" },
+      }),
+    ).toEqual({ ok: false, failure: "over-budget" });
+  });
+
+  it("calls a failed run and a refusal what they are", () => {
+    expect(
+      readModelPayload({ status: "failed", error: { message: "boom" } }),
+    ).toEqual({ ok: false, failure: "model-unavailable" });
+    expect(
+      readModelPayload({
+        status: "completed",
+        output: [
+          { type: "message", content: [{ type: "refusal", refusal: "no" }] },
+        ],
+      }),
+    ).toEqual({ ok: false, failure: "model-output-invalid" });
+  });
+
+  it("treats an empty answer as unreadable output", () => {
+    expect(readModelPayload({ status: "completed", output: [] })).toEqual({
+      ok: false,
+      failure: "model-output-invalid",
+    });
+  });
+});
+
+describe("parseScoutJson", () => {
+  it("survives a fenced answer, because a model that was told bare JSON may fence anyway", () => {
+    expect(parseScoutJson('```json\n{"items":[]}\n```')).toEqual({ items: [] });
+  });
+
+  it("is null for anything that is not an object", () => {
+    expect(parseScoutJson("not json")).toBeNull();
+    expect(parseScoutJson("[1,2]")).toBeNull();
+  });
+});
+
+describe("a model call that does not come back with items", () => {
+  const cases = [
+    ["model-unavailable", "couldn’t reach"],
+    ["model-timeout", "in time"],
+    ["model-output-invalid", "couldn’t read"],
+    ["over-budget", "more to read"],
+  ] as const;
+
+  for (const [failure] of cases) {
+    it(`fails the run as ${failure}, stores nothing, and frees the slot`, async () => {
+      const { ctx, seed } = await seeded({ modelFailure: failure });
+      await corpus(ctx, seed);
+
+      await run(ctx, await queue(ctx, seed));
+
+      const row = rowAt(ctx.db.all("delegations"));
+      expect(row.status).toBe("failed");
+      expect(row.failure).toBe(failure);
+      // The sentence the reader gets is ours, not the model's.
+      expect(row.failureReason).toBe(FAILURE_SENTENCES[failure]);
+      expect(row.lease).toBeUndefined();
+      expect(ctx.db.all("findings")).toEqual([]);
+      // The ledger gets the vocabulary, never the sentence.
+      const failed = ctx.db
+        .all("events")
+        .find((event) => event.type === "delegation.failed");
+      expect(failed?.reason).toBe(failure);
+      expect(JSON.stringify(failed)).not.toContain(FAILURE_SENTENCES[failure]);
+    });
+  }
+
+  it("gives every new failure a sentence written by us", () => {
+    for (const [failure] of cases) {
+      const sentence = FAILURE_SENTENCES[failure];
+      expect(sentence.length).toBeGreaterThan(0);
+      // C4 renders these verbatim, and a reader is owed what happened to
+      // their question and what to do about it.
+      expect(sentence).toMatch(/Nothing was stored/);
+    }
+  });
+
+  it("does not call the model twice when the run is retried", async () => {
+    // §6.2, structurally: the second attempt finds the row `running` with a
+    // live lease and exits before the seam.
+    const { ctx, seed, calls } = await seeded();
+    await corpus(ctx, seed);
+    const delegationId = await queue(ctx, seed);
+
+    await run(ctx, delegationId);
+    await run(ctx, delegationId);
+
+    expect(calls).toHaveLength(1);
   });
 });
 

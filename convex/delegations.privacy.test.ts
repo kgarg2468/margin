@@ -5,6 +5,7 @@ import type { Id } from "./_generated/dataModel";
 import {
   FakeCtx,
   handlerOf,
+  registerFakeScoutModel,
   rowAt,
   seedAnnotation,
   seedLab,
@@ -137,8 +138,17 @@ async function world() {
   };
 }
 
-/** The five internal steps a run is made of, wired to the real references. */
+/**
+ * The steps a run is made of, wired to the real references — including the
+ * model, which is the only one of them that is faked.
+ *
+ * Every assertion in this file was written against a run whose model was a
+ * function call inside the action. They all still hold against a run whose
+ * model is a network call behind an action boundary, and that is the point:
+ * the seam moved and the constitution did not.
+ */
 function wire(ctx: FakeCtx): FakeCtx {
+  registerFakeScoutModel(ctx);
   return ctx
     .register(internal.delegations.claim, claim)
     .register(internal.delegations.gather, gather)

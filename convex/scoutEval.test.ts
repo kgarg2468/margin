@@ -4,6 +4,7 @@ import type { Id } from "./_generated/dataModel";
 import {
   FakeCtx,
   handlerOf,
+  registerFakeScoutModel,
   seedAnnotation,
   seedLab,
 } from "./delegations.fixtures";
@@ -368,9 +369,14 @@ describe("the baseline", () => {
 
 describe("the report", () => {
   function registered(): FakeCtx {
-    return new FakeCtx()
+    const ctx = new FakeCtx()
       .register(internal.scoutEval.questions, questions)
       .register(internal.scoutEval.retrieve, retrieve);
+    // The harness ranks through the product's own model seam, so an offline
+    // report needs the same stand-in the lifecycle suites use — and the report
+    // says so, because the fixture is what ranked it.
+    registerFakeScoutModel(ctx);
+    return ctx;
   }
 
   it("scores both sides and refuses a verdict off one question", async () => {
@@ -410,7 +416,7 @@ describe("the report", () => {
       row.baseline.candidatesConsidered,
     );
     expect(report.asymmetry.join(" ")).toMatch(/Candidate counts are not equal/);
-    expect(report.asymmetry.join(" ")).toMatch(/stub ranker/);
+    expect(report.asymmetry.join(" ")).toMatch(/offline fixture/);
     expect(report.groundTruth.caveats.join(" ")).toMatch(/proxies/);
   });
 
