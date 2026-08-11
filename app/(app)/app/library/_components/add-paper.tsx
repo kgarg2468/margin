@@ -279,12 +279,15 @@ function DoiTab({
   // outcome sentence — the whole point of the lookup — down with it.
   useEffect(() => {
     onBusy(lookupHold(pending));
-    // Defence in depth, and unreachable today only because a tab switch is
-    // refused while this is running. The outer cleanup already does this on the
-    // panel's behalf; a tab that reports a hold should be able to withdraw it
-    // without depending on that.
-    return () => onBusy(null);
   }, [pending, onBusy]);
+  // Defence in depth, and unreachable today only because a tab switch is
+  // refused while this is running. The outer cleanup already does this on the
+  // panel's behalf; a tab that reports a hold should be able to withdraw it
+  // without depending on that.
+  //
+  // Its own effect, keyed on the stable callback, so the cleanup fires on
+  // unmount and not on every change of `pending`.
+  useEffect(() => () => onBusy(null), [onBusy]);
 
   /**
    * Nothing to abort, so what is given back is the panel and the truth.
@@ -538,10 +541,13 @@ function UploadTab({
   // held shut by a stage whose exit is not on screen.
   useEffect(() => {
     onBusy(cancelOffer(phase));
-    // See `DoiTab`: a tab withdraws its own hold rather than trusting the
-    // panel to notice it has gone.
-    return () => onBusy(null);
   }, [phase, onBusy]);
+  // See `DoiTab`: a tab withdraws its own hold rather than trusting the panel
+  // to notice it has gone. Kept out of the effect above because `phase` carries
+  // the sent-byte count and changes on every progress event: a cleanup paired
+  // with it would clear and re-state the hold each time, and the panel's
+  // by-value check would be reading against a null it had just been handed.
+  useEffect(() => () => onBusy(null), [onBusy]);
 
   async function read(file: File) {
     setError(null);

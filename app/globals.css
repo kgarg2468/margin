@@ -268,13 +268,17 @@
  * component. In the base layer: any utility (`disabled:cursor-not-allowed`,
  * `cursor-text`) still wins without a fight.
  *
- * This is the *only* place cursor policy is stated, which is what makes both
- * directions safe. The two rules have identical specificity and are resolved by
- * source order, so `not-allowed` wins on a disabled control — but that is only
- * true while nothing in the utilities layer also has an opinion. A `cursor` in
- * `@utility pressable` would beat both of these on layer order regardless of
- * specificity, and a disabled control wearing the press grammar would promise a
- * press it will not honour. See the note on `pressable` below.
+ * This is where cursor policy is *decided*; it is not the only place a cursor
+ * is written. `lib/ui.ts` carries `disabled:cursor-not-allowed` in the two
+ * button classes, and a handful of call sites repeat it — all of them saying
+ * the same thing these rules say, which is the only reason they are harmless.
+ * The two rules below have identical specificity and are resolved by source
+ * order, so `not-allowed` wins on a disabled control; a utility that *disagreed*
+ * would win outright on layer order, specificity notwithstanding. That is the
+ * rule to hold: restating this policy in a utility is redundant, contradicting
+ * it is a silent override. A `cursor` in `@utility pressable`, for instance,
+ * would put the press grammar's promise on a control that will not act. See the
+ * note on `pressable` below.
  */
 @layer base {
   /* `aria-disabled` counts as refusing, the same as `disabled`. A control that

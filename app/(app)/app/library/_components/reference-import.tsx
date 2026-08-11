@@ -81,10 +81,30 @@ export function ReferenceImport({
 
   const hold = importHold(importing);
 
+  /**
+   * A run outlives this component: its workers are holding promises that no
+   * unmount cancels. Silencing them on the way out keeps a straggler from
+   * calling `onAdded` into a closed panel, which the library reads as a fresh
+   * arrival and re-opens on.
+   */
+  useEffect(
+    () => () => {
+      stopped.current = true;
+      attempt.current += 1;
+    },
+    [],
+  );
+
   useEffect(() => {
     onBusy?.(importHold(importing));
-    return () => onBusy?.(null);
   }, [importing, onBusy]);
+  /**
+   * Separate from the report above so its cleanup runs on unmount alone. Paired
+   * with it, every change would first withdraw the hold and then re-state it,
+   * and the parent's identity check would see two different values where the
+   * member saw one unbroken wait.
+   */
+  useEffect(() => () => onBusy?.(null), [onBusy]);
 
   function prepare(text: string, name: string | null) {
     setError(null);
@@ -149,7 +169,11 @@ export function ReferenceImport({
     stopped.current = false;
 
     const results = await importReferences({
-      cancelled: () => stopped.current,
+      // Two ways to be over, and the older run needs both. `stopped` is shared,
+      // so the line above un-cancels it the moment a second run starts — an
+      // earlier run's workers would read the new run's `false` and resume
+      // sending. The generation is the half that cannot be taken back.
+      cancelled: () => stopped.current || attempt.current !== mine,
       entries: preview.entries,
       selected: [...selected].sort((left, right) => left - right),
       createFromDoi: async (entry) => {
@@ -201,8 +225,14 @@ export function ReferenceImport({
       // a reference the export listed twice is answered from the first copy's
       // result without a round trip of its own. The sentence has to be true of
       // the whole list, and only the second half is about the network.
+      //
+      // A stop that beats the first entry leaves nothing above to point at, and
+      // pointing at an empty list is how a member starts looking for the rows
+      // that were never there.
       setNote(
-        "Stopped. The references above are settled; the rest were never sent.",
+        results.size > 0
+          ? "Stopped. The references above are settled; the rest were never sent."
+          : "Stopped. Nothing was sent.",
       );
     }
   }
