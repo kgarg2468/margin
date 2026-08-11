@@ -10,6 +10,7 @@ import {
   tallyContributors,
 } from "@/lib/brief/prep";
 import { cleanQuote } from "@/lib/quotes";
+import type { KnownNote } from "@/lib/scout/surface";
 import { formatDate, relativeWhen } from "@/lib/sessions-ui";
 import {
   errorClass,
@@ -27,6 +28,7 @@ import { readableError } from "../../../_components/errors";
 import { typeStyle } from "../../../library/[paperId]/read/_components/ontology";
 import type { AnnotationView } from "../../../library/[paperId]/read/_components/types";
 import type { SessionDetail } from "./manage";
+import { ScoutFinding } from "./scout";
 import { CitationRef } from "./session-board";
 import { anchoredIds, groupSessionNotes } from "./session-notes";
 
@@ -155,6 +157,22 @@ export function PresenterBrief({
     () => anchoredIds(groupSessionNotes(rows, session._id)),
     [rows, session._id],
   );
+  // Author and page for every note this page holds a row for, so a finding's
+  // citations can be named instead of counted. Built from the same
+  // subscription the board renders — no second query, and nothing in it that
+  // the page was not already showing.
+  const known = useMemo(
+    () =>
+      new Map(
+        rows
+          .filter((row) => row.visibility === "lab" && !row.deleted)
+          .map((row) => [
+            row._id,
+            { authorName: row.authorName, pageIndex: row.anchor.pageIndex },
+          ]),
+      ),
+    [rows],
+  );
 
   // Nobody else's business. The server answers `null` for anyone who is not
   // the presenter or the PI; this is the same rule, applied before the panel
@@ -268,6 +286,8 @@ export function PresenterBrief({
                 visibleAnnotationIds={visibleAnnotationIds}
                 numbering={numbering}
                 anchored={anchored}
+                paperId={session.paperId}
+                known={known}
               />
             );
           })}
@@ -497,6 +517,8 @@ function BriefSection({
   visibleAnnotationIds,
   numbering,
   anchored,
+  paperId,
+  known,
 }: {
   position: number;
   section: Section;
@@ -505,6 +527,10 @@ function BriefSection({
   numbering: ReadonlyMap<Id<"annotations">, number>;
   /** The notes the board on this page really has an anchor for. */
   anchored: ReadonlySet<string>;
+  /** The paper this session is about, which a finding's citations link into. */
+  paperId: Id<"papers">;
+  /** The notes this page can name, for a finding's citations. */
+  known: ReadonlyMap<Id<"annotations">, KnownNote>;
 }) {
   const ink = SECTION_INK[section.key];
   return (
@@ -529,6 +555,9 @@ function BriefSection({
             visibleAnnotationIds={visibleAnnotationIds}
             numbering={numbering}
             anchored={anchored}
+            paperId={paperId}
+            known={known}
+            scouted={section.key === "carried-over"}
           />
         ))}
       </ul>
@@ -542,18 +571,26 @@ function BriefLine({
   visibleAnnotationIds,
   numbering,
   anchored,
+  paperId,
+  known,
+  scouted,
 }: {
   item: Item;
   ink: string;
   visibleAnnotationIds: ReadonlySet<Id<"annotations">>;
   numbering: ReadonlyMap<Id<"annotations">, number>;
   anchored: ReadonlySet<string>;
+  paperId: Id<"papers">;
+  known: ReadonlyMap<Id<"annotations">, KnownNote>;
+  /** Whether this line's section is the one the scout was pointed at. */
+  scouted: boolean;
 }) {
   // One rule, two call sites (the registry above folds the same function over
   // the same lines), and it lives in `lib/` because the interesting half is
   // the deferral: a cross-paper citation is not on this page's paper, so this
   // page has no standing to call it withdrawn.
   const { withdrawn, cited } = lineCitations(item, visibleAnnotationIds);
+  const firstId = item.annotationIds[0];
   const label = item.pairType === undefined ? undefined : GOLD_PAIRS[item.pairType];
 
   return (
@@ -603,6 +640,18 @@ function BriefLine({
               );
             })}
           </p>
+
+          {/* Only the carried-over lens has subjects: `assembleBrief` builds it
+              from unanswered open questions one id at a time, and
+              `briefs.writeBrief` hands those same ids to `enqueueForBrief`. One
+              definition of "what the scout was pointed at", read twice. */}
+          {scouted && firstId !== undefined && (
+            <ScoutFinding
+              subject={{ kind: "annotation", annotationId: firstId }}
+              paperId={paperId}
+              known={known}
+            />
+          )}
         </>
       )}
     </li>
