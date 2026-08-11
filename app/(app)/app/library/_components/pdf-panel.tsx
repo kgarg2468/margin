@@ -537,14 +537,16 @@ export function PdfPanel({
           ) : null}
         </div>
       )}
-      {note !== null && (
-        // Announced: the button that was pressed unmounts under the finger and
-        // the progress line goes with it, so without this a cancellation
-        // finishes in silence.
-        <p role="status" className="font-sans text-sm text-ink-muted">
-          {note}
-        </p>
-      )}
+      {/* Announced: the button that was pressed unmounts under the finger and
+          the progress line goes with it, so without this a cancellation
+          finishes in silence. Permanently mounted — a status region inserted
+          together with its content is the shape screen readers miss. */}
+      <p
+        role="status"
+        className={note === null ? "sr-only" : "font-sans text-sm text-ink-muted"}
+      >
+        {note ?? ""}
+      </p>
       {problem !== null && (
         <p role="alert" className={errorClass}>
           {problem}
