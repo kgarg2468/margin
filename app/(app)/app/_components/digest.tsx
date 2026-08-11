@@ -153,9 +153,18 @@ export function DigestInbox({ labId }: { labId: Id<"labs"> }) {
   // slot while the new lab's catch-up is still out, which is the exact pop this
   // component exists to prevent. Compared against the current `labId`, both of
   // those stale writes are simply false.
+  //
+  // And a stale completion must not *write* at all, being false is not enough:
+  // if the lab just left settles after the current one, its unguarded write
+  // would replace the current lab's answer — an answer nothing will ever give
+  // again, because that request already ran. `live` names the lab the page is
+  // on when a completion lands; a request that outlived its lab settles
+  // nothing.
   const asked = useRef<string | null>(null);
+  const live = useRef(labId);
   const [settledFor, setSettledFor] = useState<Id<"labs"> | null>(null);
   useEffect(() => {
+    live.current = labId;
     if (asked.current === labId) return;
     asked.current = labId;
     void catchUp({ labId })
@@ -163,7 +172,7 @@ export function DigestInbox({ labId }: { labId: Id<"labs"> }) {
         if (asked.current === labId) asked.current = null;
       })
       .finally(() => {
-        setSettledFor(labId);
+        if (live.current === labId) setSettledFor(labId);
       });
   }, [labId, catchUp]);
 
