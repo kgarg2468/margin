@@ -8,9 +8,12 @@ import {
   DELEGATION_LEASE_MS,
   FAILURE_SENTENCES,
   MAX_ACTIVE_PER_LAB,
+  MAX_BATCH_CANDIDATES,
+  MAX_CANDIDATES,
   MAX_SEARCH_LENGTH,
   actionSubjectIsOpen,
   annotationSubjectIsOpen,
+  buildBatchPrompt,
   cancel,
   capVerdict,
   cascadeForAnnotation,
@@ -573,7 +576,7 @@ describe("a run, start to finish", () => {
     expect(rowAt(stored).supersededAt).toBeTypeOf("number");
   });
 
-  it("runs a batch sequentially and lets one failure not stop the rest", async () => {
+  it("cancels a row whose subject has gone and keeps the rest of the batch", async () => {
     const { ctx, seed } = await seeded();
     await corpus(ctx, seed);
     const good = await queue(ctx, seed);
@@ -697,6 +700,48 @@ describe("a brief's questions, in one call", () => {
     expect((await ctx.db.get(orphan))?.status).toBe("cancelled");
   });
 
+  it("strands no claimed row when a gather throws mid-batch", async () => {
+    // The per-row wrapper this batch replaced caught exactly this. Without a
+    // catch here the action rejects while holding live leases on every row it
+    // had already taken: they sit `running` with nothing coming back, holding
+    // the lab's slots until the sweep notices, and the questions behind them
+    // never start.
+    const { ctx, seed, calls } = await seeded();
+    await corpus(ctx, seed);
+    const second = await seedAnnotation(
+      ctx,
+      { ...seed, memberId: seed.member },
+      { type: "open-question", body: "Which cohort ran the second replicate?" },
+    );
+    const first = await queue(ctx, seed);
+    const other = await queue(ctx, seed, { annotationId: second });
+
+    // A read limit on a lab with a long history, a conflict, a transient
+    // failure — the second row's gather does not come back.
+    let reads = 0;
+    const real = handlerOf(gather);
+    ctx.register(internal.delegations.gather, {
+      _handler: async (inner: unknown, args: unknown) => {
+        reads += 1;
+        if (reads === 2) throw new Error("too many reads in this query");
+        return await real(inner, args as never);
+      },
+    });
+
+    await handlerOf(runForBrief)(ctx, {
+      delegationIds: [first, other],
+    } as never);
+
+    expect(calls).toEqual([]);
+    for (const delegationId of [first, other]) {
+      const row = await ctx.db.get(delegationId);
+      expect(row?.status).toBe("failed");
+      expect(row?.failure).toBe("run-error");
+      // Failing is not stranding: the slot goes back either way.
+      expect(row?.lease).toBeUndefined();
+    }
+  });
+
   it("still spends nothing on a batch that gathered nothing", async () => {
     const { ctx, seed, calls } = await seeded();
     await run(ctx, await queue(ctx, seed));
@@ -704,6 +749,85 @@ describe("a brief's questions, in one call", () => {
     // answer, and `storeEmpty` is where it is recorded.
     expect(calls).toEqual([]);
     expect(rowAt(ctx.db.all("delegations")).status).toBe("empty");
+  });
+});
+
+/* -------------------------------------------------------------------------
+ * How big one prompt is allowed to get
+ * ---------------------------------------------------------------------- */
+
+describe("the batch's candidate cap", () => {
+  const labId = "labs_1" as Id<"labs">;
+
+  /** A question with `count` lab-visible notes of its own, in rank order. */
+  const question = (index: number, count: number) => ({
+    ref: `Q${index + 1}`,
+    question: `Question ${index}`,
+    candidates: Array.from({ length: count }, (_, rank) => ({
+      _id: `annotations_${index}_${rank}` as Id<"annotations">,
+      labId,
+      paperId: "papers_1" as Id<"papers">,
+      visibility: "lab" as const,
+      type: "note",
+      body: `note ${index}/${rank}`,
+    })),
+  });
+
+  it("truncates a union past the cap and still gives every question its best", () => {
+    // Three questions at the per-question ceiling is 120 distinct notes, and
+    // a lab whose notes run long would put a megabyte in one input — not a
+    // slow call but a `context_length_exceeded` the whole brief dies of,
+    // repeated exactly every brief, since the corpus does not change.
+    const questions = [0, 1, 2].map((index) =>
+      question(index, MAX_CANDIDATES),
+    );
+    const gate = buildBatchPrompt(labId, questions);
+    const payload = materialOf(gate.prompt);
+
+    expect(payload.annotations).toHaveLength(MAX_BATCH_CANDIDATES);
+    // Round-robin by rank: every question's best note is laid out before any
+    // question's second, so a cap that bites takes the tail off all of them
+    // rather than the whole of the last one.
+    expect(payload.annotations.slice(0, 3).map((one) => one.body)).toEqual([
+      "note 0/0",
+      "note 1/0",
+      "note 2/0",
+    ]);
+    for (const [index, one] of payload.questions.entries()) {
+      expect(one.labels).toContain(`A${index + 1}`);
+      expect(one.labels.length).toBeGreaterThanOrEqual(
+        Math.floor(MAX_BATCH_CANDIDATES / questions.length),
+      );
+    }
+  });
+
+  it("promises no question a label the prompt does not carry", () => {
+    // The right to cite is derived from the layout, not from the gather. A
+    // question told it may cite a note that fell off the end would be a
+    // question whose every citation of it is dropped as invented — the item
+    // lost and the reason invisible.
+    const gate = buildBatchPrompt(
+      labId,
+      [0, 1, 2].map((index) => question(index, MAX_CANDIDATES)),
+    );
+    const payload = materialOf(gate.prompt);
+    const laid = new Set(payload.annotations.map((one) => one.label));
+
+    expect(gate.byLabel.size).toBe(payload.annotations.length);
+    for (const one of payload.questions) {
+      for (const label of one.labels) {
+        expect(laid.has(label)).toBe(true);
+        expect(gate.byLabel.has(label)).toBe(true);
+      }
+      expect([...(gate.allowed.get(one.ref) ?? [])]).toEqual(one.labels);
+    }
+  });
+
+  it("leaves a union that fits alone, however many questions share it", () => {
+    const questions = [0, 1].map((index) => question(index, 3));
+    const payload = materialOf(buildBatchPrompt(labId, questions).prompt);
+    expect(payload.annotations).toHaveLength(6);
+    for (const one of payload.questions) expect(one.labels).toHaveLength(3);
   });
 });
 

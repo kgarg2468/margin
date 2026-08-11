@@ -552,9 +552,15 @@ async function scoutRanking(
   }
   const parsed = parseScoutJson(result.text);
   // A batch of one. The seam answers in the `answers` envelope whatever it was
-  // asked, so the harness unwraps it the way the product does rather than
-  // reading a shape only a one-question call would produce — a report scored
-  // against a different wire format than the run is a report about nothing.
+  // asked, so the harness reads the same wire format the product does — a
+  // report scored against a different one would be a report about nothing.
+  //
+  // Where it deliberately parts company is the missing ref. `runForBrief`
+  // passes `?? []` and files an unanswered question as `nothing-citable`,
+  // which is the right verdict on one row of a brief. Here `?? {}` throws,
+  // and that is the point: a question the model never answered would
+  // otherwise be scored recall 0 and printed as a measurement of the scout
+  // rather than of a call that went wrong. The report refuses instead.
   const answers = parsed === null ? null : answersByRef(parsed);
   const { items } = sanitizeFindingItems(
     answers?.get(SOLE_QUESTION_REF) ?? {},

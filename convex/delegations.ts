@@ -129,6 +129,35 @@ export const DAILY_RUN_BUDGET = 40;
  */
 export const MAX_CANDIDATES = 40;
 
+/**
+ * How many questions one call can carry.
+ *
+ * A batch is one brief's rows, and a lab can never hold more than
+ * `MAX_ACTIVE_PER_LAB` of those open at once — `enqueueForBrief` stops at the
+ * cap rather than queueing past it. So this is a ceiling the code enforces
+ * elsewhere, not an estimate, and the two budgets below can be derived from it.
+ */
+export const MAX_BATCH_QUESTIONS = MAX_ACTIVE_PER_LAB;
+
+/**
+ * How many notes one *batch* may lay out, across all of its questions.
+ *
+ * `MAX_CANDIDATES` bounds one question's gather, and nothing bounded their
+ * union until the questions shared a prompt. Eight questions at forty each is
+ * 320 annotations in one input, and a note tops out at 4,000 characters
+ * (`annotations.MAX_BODY_LENGTH`) — over a megabyte, which is not a slow call
+ * but a `context_length_exceeded` the whole brief fails on. The corpus does
+ * not change between briefs, so that failure would repeat exactly, and a big
+ * lab's scout would go dark permanently rather than noisily.
+ *
+ * Twice one question's ceiling. The layout is round-robin by each question's
+ * own rank (`buildBatchPrompt`), so a cap that bites takes the tail off every
+ * question instead of the whole of the last one, and every question keeps at
+ * least `MAX_BATCH_CANDIDATES / MAX_BATCH_QUESTIONS` — ten — of its own best
+ * notes however many its neighbours brought.
+ */
+export const MAX_BATCH_CANDIDATES = MAX_CANDIDATES * 2;
+
 /** The search index's own limit, which the question text is reduced to fit. */
 export const MAX_SEARCH_LENGTH = 200;
 
@@ -802,23 +831,42 @@ export const SOLE_QUESTION_REF = "Q1";
  * ambiguous. What is *not* shared is the right to cite — each question may
  * only cite the labels its own gather returned, so a finding still rests on
  * the retrieval whose coverage the reader is shown.
+ *
+ * The union is laid out round-robin by rank and capped at
+ * `MAX_BATCH_CANDIDATES`. Concatenating the questions instead would spend the
+ * whole budget on the first ones and show the last question nothing, and a cap
+ * is needed at all because six questions' unbounded union is an input a lab
+ * can grow past the model's context — deterministically, every brief, since
+ * the corpus that produced it is the same one next time.
  */
 export function buildBatchPrompt(
   labId: Id<"labs">,
   questions: readonly BatchQuestion[],
 ): BatchPrompt {
   const all = questions.flatMap((one) => [...one.candidates]);
-  // The second gate, at batch scale. Throws rather than filters — one private
-  // row and the whole batch refuses rather than being trimmed to the rows that
-  // passed, which is the existing rule and the existing reason for it.
+  // The second gate, at batch scale, and before the cap: it runs over
+  // everything retrieved rather than over what survived the layout, so a
+  // private row cannot be excused by having fallen off the end. Throws rather
+  // than filters — one private row and the whole batch refuses rather than
+  // being trimmed to the rows that passed.
   assertAllLabVisible(all, labId);
 
   const distinct: Candidate[] = [];
   const seen = new Set<Id<"annotations">>();
-  for (const candidate of all) {
-    if (seen.has(candidate._id)) continue;
-    seen.add(candidate._id);
-    distinct.push(candidate);
+  const deepest = Math.max(0, ...questions.map((one) => one.candidates.length));
+  // Every question's best note, then every question's second, and so on. A
+  // question whose turn lands on a note a neighbour already contributed keeps
+  // the label anyway — it is in the union, and `allowed` is built from the
+  // union rather than from who put it there.
+  for (let rank = 0; rank < deepest; rank += 1) {
+    for (const one of questions) {
+      if (distinct.length >= MAX_BATCH_CANDIDATES) break;
+      const candidate = one.candidates[rank];
+      if (candidate === undefined || seen.has(candidate._id)) continue;
+      seen.add(candidate._id);
+      distinct.push(candidate);
+    }
+    if (distinct.length >= MAX_BATCH_CANDIDATES) break;
   }
   const labelled = issueLabels(distinct);
   const labelOf = new Map(labelled.map((one) => [one._id, one.label]));
@@ -1346,9 +1394,51 @@ export type DelegationModelFailure = Infer<typeof delegationModelFailure>;
 const DEFAULT_SCOUT_MODEL = "gpt-5.6-sol";
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 
-/** Reasoning tokens included, the way `max_output_tokens` counts them. */
-const SCOUT_MAX_OUTPUT_TOKENS = 16_000;
 const SCOUT_REASONING_EFFORT = "low";
+
+/** Conservative in the direction a budget wants: short tokens mean more of them. */
+const CHARS_PER_TOKEN = 3;
+
+/** What JSON adds around the prose: refs, labels, braces, quoting. */
+const ANSWER_JSON_OVERHEAD = 1.2;
+
+/**
+ * Room set aside for thinking about one question, at `low` effort.
+ *
+ * Generous on purpose. Reasoning tokens are invisible in the answer and count
+ * against the same ceiling, so under-reserving does not produce a worse answer
+ * — it produces `over-budget`, which is now the whole brief's failure rather
+ * than one question's.
+ */
+const REASONING_TOKENS_PER_QUESTION = 4_000;
+
+/**
+ * How much one call may write, reasoning included — the way
+ * `max_output_tokens` counts it.
+ *
+ * Derived, because the batch made the old number wrong in a way no test would
+ * catch. `MAX_FINDING_ITEMS` is a per-*question* cap, so the answer a full
+ * batch is authorized to write is `MAX_BATCH_QUESTIONS` times what one
+ * question could: 8 × 6 × 600 characters, plus JSON, over three characters a
+ * token — about 11,500 tokens where a single question needed 1,500. A fixed
+ * 16,000 left roughly twice that for reasoning across eight questions, and the
+ * failure it buys is expensive and asymmetric: `readModelPayload` reads
+ * `incomplete` before parsing anything, so four finished answers are thrown
+ * away with the fifth truncated one, all eight rows have already been spent
+ * against `DAILY_RUN_BUDGET`, and §6.2 means nobody retries.
+ *
+ * A ceiling is not a bill — only the tokens actually written are charged — so
+ * the honest move is to size it for the worst case the prompt permits.
+ */
+const SCOUT_MAX_OUTPUT_TOKENS =
+  Math.ceil(
+    (MAX_BATCH_QUESTIONS *
+      MAX_FINDING_ITEMS *
+      MAX_FINDING_ITEM_CHARS *
+      ANSWER_JSON_OVERHEAD) /
+      CHARS_PER_TOKEN,
+  ) +
+  MAX_BATCH_QUESTIONS * REASONING_TOKENS_PER_QUESTION;
 
 /**
  * How long one call may take.
@@ -1646,56 +1736,29 @@ type Claimed = {
  *
  * What a failure costs depends on which phase it happens in, and that is the
  * design rather than an accident. A row whose subject moved fails alone,
- * before the call. A call that fails fails every row that was in it — they
- * were one request and there is nothing to tell them apart. And one question's
- * answer being unreadable is that question's failure, not the batch's: the
- * five beside it cited real notes.
+ * before the call. A throw anywhere in the claim-and-gather phase fails every
+ * row this run is holding, because it is holding their leases and nothing is
+ * coming back for them. A call that fails fails every row that was in it —
+ * they were one request and there is nothing to tell them apart. And one
+ * question's answer being unreadable is that question's failure, not the
+ * batch's: the five beside it cited real notes.
+ *
+ * Every exit is a terminal state for every row this run took. That is the
+ * invariant the phases are arranged around: a row left `running` with a live
+ * lease is a slot the lab does not get back until the sweep finds it.
  */
 export const runForBrief = internalAction({
   args: { delegationIds: v.array(v.id("delegations")) },
   returns: v.null(),
   handler: async (ctx, args) => {
     const claimed: Claimed[] = [];
-    for (const delegationId of args.delegationIds) {
-      const claim = await ctx.runMutation(internal.delegations.claim, {
-        delegationId,
-      });
-      if (claim === null) continue;
-      const gathered = await ctx.runQuery(internal.delegations.gather, {
-        delegationId,
-        lease: claim.lease,
-      });
-      // The lease, the subject, or the row moved. Whoever moved it has
-      // already written the terminal state; writing a second one here would
-      // overwrite a cancellation with a failure.
-      if (gathered === null) continue;
-      if (gathered.candidates.length === 0) {
-        // The refusal belongs here, before the money is spent: an empty
-        // corpus is an answer, not a thing to ask a model about.
-        await ctx.runMutation(internal.delegations.storeEmpty, {
-          delegationId,
-          lease: claim.lease,
-        });
-        continue;
-      }
-      claimed.push({
-        delegationId,
-        lease: claim.lease,
-        labId: claim.labId,
-        // Positional, and assigned here rather than from the argument list:
-        // the refs have to be dense over the questions that actually made it
-        // into the prompt, since a ref the model was never shown is a ref
-        // nothing can come back under.
-        ref: `Q${claimed.length + 1}`,
-        ...gathered,
-      });
-    }
 
-    const [first, ...rest] = claimed;
-    if (first === undefined) return null;
-
-    const failAll = async (failure: Doc<"delegations">["failure"] & string) => {
-      for (const one of claimed) {
+    /** Terminalize the rows this run is holding. Every exit path goes here. */
+    const failRows = async (
+      rows: readonly { delegationId: Id<"delegations">; lease: string }[],
+      failure: Doc<"delegations">["failure"] & string,
+    ) => {
+      for (const one of rows) {
         await ctx.runMutation(internal.delegations.fail, {
           delegationId: one.delegationId,
           lease: one.lease,
@@ -1704,6 +1767,72 @@ export const runForBrief = internalAction({
         });
       }
     };
+    const failAll = async (failure: Doc<"delegations">["failure"] & string) =>
+      await failRows(claimed, failure);
+
+    // The row whose claim is held while its own gather runs: taken, not yet in
+    // `claimed`, and nobody else's to close.
+    let holding: { delegationId: Id<"delegations">; lease: string } | null =
+      null;
+    try {
+      for (const delegationId of args.delegationIds) {
+        const claim = await ctx.runMutation(internal.delegations.claim, {
+          delegationId,
+        });
+        if (claim === null) continue;
+        holding = { delegationId, lease: claim.lease };
+        const gathered = await ctx.runQuery(internal.delegations.gather, {
+          delegationId,
+          lease: claim.lease,
+        });
+        // The lease, the subject, or the row moved. Whoever moved it has
+        // already written the terminal state; writing a second one here would
+        // overwrite a cancellation with a failure.
+        if (gathered === null) {
+          holding = null;
+          continue;
+        }
+        if (gathered.candidates.length === 0) {
+          // The refusal belongs here, before the money is spent: an empty
+          // corpus is an answer, not a thing to ask a model about.
+          await ctx.runMutation(internal.delegations.storeEmpty, {
+            delegationId,
+            lease: claim.lease,
+          });
+          holding = null;
+          continue;
+        }
+        claimed.push({
+          delegationId,
+          lease: claim.lease,
+          labId: claim.labId,
+          // Positional, and assigned here rather than from the argument list:
+          // the refs have to be dense over the questions that actually made it
+          // into the prompt, since a ref the model was never shown is a ref
+          // nothing can come back under.
+          ref: `Q${claimed.length + 1}`,
+          ...gathered,
+        });
+        holding = null;
+      }
+    } catch (error) {
+      // §6.7, and the one thing the deleted per-row wrapper was still doing
+      // for us. A gather can throw — a read limit on a lab with a long
+      // history, a conflict inside `storeEmpty`, a transient failure — and
+      // without this the action rejects holding live leases on every row it
+      // had already claimed. Those rows would sit `running` with nothing
+      // coming back for them, occupying the lab's slots until the sweep
+      // eventually noticed, and the questions behind them would never start.
+      console.error("Scout batch failed before the call:", error);
+      await failRows(
+        holding === null ? claimed : [...claimed, holding],
+        "run-error",
+      );
+      return null;
+    }
+
+    const [first, ...rest] = claimed;
+    if (first === undefined) return null;
 
     // A batch is one brief's questions, and a brief belongs to one lab. Two
     // labs' material in one prompt is the disclosure this feature is not
@@ -1756,6 +1885,17 @@ export const runForBrief = internalAction({
           answers.get(one.ref) ?? [],
           byLabel,
         );
+        // Coverage counted off what this question was actually shown, not off
+        // what its gather returned. The two are the same number until
+        // `MAX_BATCH_CANDIDATES` bites, and when it does, the gather's count
+        // would be a claim about material the model never saw — the same
+        // overstatement the retrieval gate refuses to make.
+        const shown = [...byLabel.values()];
+        const coverage = {
+          annotationsSearched: shown.length,
+          papersTouched: new Set(shown.map((row) => row.paperId)).size,
+          queriesRun: one.coverage.queriesRun,
+        };
         if (items.length === 0) {
           await ctx.runMutation(internal.delegations.fail, {
             delegationId: one.delegationId,
@@ -1769,7 +1909,7 @@ export const runForBrief = internalAction({
           delegationId: one.delegationId,
           lease: one.lease,
           items,
-          coverage: one.coverage,
+          coverage,
           droppedForCitation,
           model,
         });
