@@ -8,13 +8,31 @@ import crons from "./crons";
  * so silently, on a deployment, at 3am.
  */
 describe("the schedule", () => {
-  it("polls Zotero hourly and nothing more often", () => {
-    const jobs = Object.values(
-      (crons as unknown as { crons: Record<string, { schedule: unknown }> })
-        .crons,
+  const scheduled = () =>
+    Object.values(
+      (
+        crons as unknown as {
+          crons: Record<string, { name: string; schedule: unknown }>;
+        }
+      ).crons,
     );
-    expect(jobs).toHaveLength(1);
+
+  it("polls Zotero hourly and nothing more often", () => {
+    const jobs = scheduled();
+    expect(jobs).toHaveLength(2);
     expect(jobs[0]?.schedule).toEqual({ type: "interval", minutes: 60 });
+  });
+
+  it("sweeps abandoned rate counters often enough to mean the promise", () => {
+    // The `shareRateWindows` comment says what survives at rest and for how
+    // long, and the second half of that sentence is this number. A cron that
+    // drifted to daily would leave a stale minute sitting for a day while the
+    // schema went on claiming otherwise.
+    const sweep = scheduled().find((job) =>
+      job.name.includes("sweepRateWindows"),
+    );
+    expect(sweep, "the rate-window sweep must be scheduled").toBeDefined();
+    expect(sweep?.schedule).toEqual({ type: "interval", minutes: 30 });
   });
 
   it("points at the sweep, which is the part that stays cheap", () => {

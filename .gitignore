@@ -46,3 +46,6 @@ next-env.d.ts
 
 # playwright MCP browser artifacts
 .playwright-mcp/
+
+# Worker scratch: task reports and review packages, never part of a change.
+.superpowers/

@@ -21,4 +21,23 @@ const crons = cronJobs();
 
 crons.interval("zotero sweep", { minutes: 60 }, internal.zotero.sweep, {});
 
+/**
+ * Rate counters for links nobody came back to.
+ *
+ * A live link's counter is overwritten in place by its next fetch, so this is
+ * only ever about abandoned ones — and without it, a link opened once and
+ * forgotten would leave one number and one minute in the table indefinitely.
+ * The table's promise about what survives at rest is bounded by this cadence,
+ * which is the only reason the promise is worth writing down.
+ *
+ * Meets the bar the comment above sets: one index scan for windows that have
+ * ended, finding nothing on a deployment where no link has been fetched.
+ */
+crons.interval(
+  "share rate window sweep",
+  { minutes: 30 },
+  internal.shares.sweepRateWindows,
+  {},
+);
+
 export default crons;

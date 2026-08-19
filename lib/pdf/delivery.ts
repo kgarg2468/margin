@@ -39,6 +39,28 @@ export function pdfEndpoint(paperId: string): string {
 }
 
 /**
+ * The address of a shared paper's PDF, for a reader with no account.
+ *
+ * A different route from the one above, not the same route with the check
+ * relaxed. `/shared-pdf` accepts no `Authorization` header at all, so there is
+ * no bearer credential anywhere near it: the share token is the whole
+ * permission, it is scoped to one artifact somebody deliberately published, it
+ * grants read and nothing else, and revoking it stops these bytes at the same
+ * moment it stops the page. See the route's own comment in `convex/http.ts`
+ * for why a capability in a URL is not the mistake a session token in a URL
+ * would be.
+ */
+export function sharedPdfEndpoint(token: string): string {
+  const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
+  if (!convexUrl) {
+    throw new Error(
+      "Missing NEXT_PUBLIC_CONVEX_URL, so there is no deployment to fetch the PDF from.",
+    );
+  }
+  return `${siteOriginFrom(convexUrl)}/shared-pdf?token=${encodeURIComponent(token)}`;
+}
+
+/**
  * The header that makes the endpoint answer.
  *
  * pdf.js takes this as `httpHeaders` and `fetch` as `headers`, so both routes

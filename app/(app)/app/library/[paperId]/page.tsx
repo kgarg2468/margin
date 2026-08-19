@@ -12,6 +12,7 @@ import { SessionStatusChip } from "../../sessions/_components/session-row";
 import { FiledAs } from "../_components/marks";
 import { StatusChip, byline } from "../_components/paper-meta";
 import { PdfPanel } from "../_components/pdf-panel";
+import { SharePanel } from "./_components/share-panel";
 import { PaperMemory } from "./_components/temporal";
 
 /**
@@ -133,6 +134,10 @@ export default function PaperPage({
       <Reading paperId={paper._id} ready={paper.hasPdf && paper.hasText} />
 
       <Sessions paperId={paper._id} labId={paper.labId} />
+
+      {/* Under the sessions, because sharing is something a lab does after it
+          has read a paper together rather than a property of filing one. */}
+      <SharePanel paperId={paper._id} />
 
       {/* Below the calendar, because it is about the meetings that already
           happened and the calendar above is about the one coming. Draws nothing
