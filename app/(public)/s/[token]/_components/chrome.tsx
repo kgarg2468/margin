@@ -57,10 +57,16 @@ export function ShareFrame({
 /**
  * The line that says a page is not the whole margin.
  *
- * Shown when consent left some of it out. It says that the view is partial
- * without saying how partial, because a count would be a measurement of what
- * the members who declined had written, and publishing the size of a thing is
- * a way of publishing part of it.
+ * Rendered always, and that is the design rather than laziness. Shown only
+ * when something *was* withheld, its presence becomes a one-bit disclosure —
+ * a reader who sees it learns that somebody in this lab declined, and a reader
+ * who does not learns that everybody agreed. Rendered unconditionally it says
+ * what is true of every share page under this consent model and measures
+ * nothing.
+ *
+ * It says the view is partial without saying how partial for the same reason.
+ * A count would be a measurement of what the members who declined had written,
+ * and publishing the size of a thing is a way of publishing part of it.
  */
 export function PartialNotice() {
   return (

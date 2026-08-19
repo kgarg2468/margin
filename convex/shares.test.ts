@@ -11,6 +11,7 @@ import {
 import {
   REDACTED_NOTE_TEXT,
   forPaper,
+  forSession,
   pdfForShare,
   revoke,
   setPaperOptIn,
@@ -76,6 +77,8 @@ const publicView = call<
         authorName: string;
         body: string;
         quote: string;
+        pageIndex: number;
+        createdAt: number;
         redacted: boolean;
         status?: string;
         replies: { _id: Id<"annotations">; authorName: string; body: string }[];
@@ -106,6 +109,10 @@ const panel = call<
     optedInCount: number;
   }
 >(forPaper);
+const sessionPanel = call<
+  { sessionId: Id<"sessions"> },
+  { share: { _id: Id<"shares">; token: string } | null; approved: boolean; canShare: boolean }
+>(forSession);
 const pdf = call<
   { token: string },
   { storageId: Id<"_storage">; title: string } | null
@@ -355,6 +362,86 @@ describe("a withdrawn note", () => {
     expect(thread?.replies.map((reply) => reply._id)).toEqual([replyId]);
   });
 
+  it("leaves nothing at all where a non-consenting root stood, and promotes its replies", async () => {
+    const { ctx, pi, member, labId, paperId } = await setup();
+    // Marcus writes the note; Elena replies. Elena shares, which opts in Elena
+    // and nobody else — so the root is his and he has never agreed to it.
+    const parentId = await seedAnnotation(
+      ctx,
+      { labId, paperId, memberId: member },
+      { body: SECRET, quote: SECRET },
+    );
+    const replyId = await ctx.db.insert("annotations", {
+      labId,
+      paperId,
+      memberId: pi,
+      parentId,
+      anchor: {
+        quote: "incubation at 4°C",
+        prefix: "",
+        suffix: "",
+        start: 0,
+        end: 17,
+        pageIndex: 2,
+      },
+      type: "note",
+      body: "Answering the note above.",
+      visibility: "lab",
+    });
+    const { token } = await share(ctx, { paperId });
+
+    const answer = asPaper(await publicView(ctx, { token }));
+
+    // Not a marker, not a placeholder, not an id: a reader must not be able to
+    // learn that a member who declined wrote something here, or when.
+    expect(JSON.stringify(answer)).not.toContain(SECRET);
+    expect(JSON.stringify(answer)).not.toContain(REDACTED_NOTE_TEXT);
+    expect(JSON.stringify(answer)).not.toContain(parentId);
+    expect(answer.notes.map((note) => note._id)).not.toContain(parentId);
+
+    // Elena's reply is her own writing and she said yes, so it stands alone.
+    const promoted = answer.notes.find((note) => note._id === replyId);
+    expect(promoted).toBeDefined();
+    expect(promoted?.body).toBe("Answering the note above.");
+    expect(promoted?.redacted).toBe(false);
+    expect(promoted?.replies).toEqual([]);
+  });
+
+  it("does not carry a withdrawn note's own timestamp on its marker", async () => {
+    const { ctx, pi, labId, paperId } = await setup();
+    const parentId = await seedAnnotation(ctx, { labId, paperId, memberId: pi });
+    const replyId = await ctx.db.insert("annotations", {
+      labId,
+      paperId,
+      memberId: pi,
+      parentId,
+      anchor: {
+        quote: "incubation at 4°C",
+        prefix: "",
+        suffix: "",
+        start: 0,
+        end: 17,
+        pageIndex: 2,
+      },
+      type: "note",
+      body: "Answering the note above.",
+      visibility: "lab",
+    });
+    const { token } = await share(ctx, { paperId });
+    const root = await ctx.db.get(parentId);
+    const reply = await ctx.db.get(replyId);
+    await ctx.db.patch(parentId, { deletedAt: 5 });
+
+    const answer = asPaper(await publicView(ctx, { token }));
+    const marker = answer.notes.find((note) => note._id === parentId);
+
+    expect(marker?.redacted).toBe(true);
+    // The minute somebody wrote a note is a fact about their working day, and
+    // it does not survive the note it belonged to.
+    expect(marker?.createdAt).not.toBe(root?._creationTime);
+    expect(marker?.createdAt).toBe(reply?._creationTime);
+  });
+
   it("drops a reply whose own author has not opted in, with no marker left", async () => {
     const { ctx, pi, member, labId, paperId } = await setup();
     const parentId = await seedAnnotation(ctx, { labId, paperId, memberId: pi }, {
@@ -472,6 +559,63 @@ describe("a write-up share", () => {
 
     await expect(shareWriteUp(ctx, { sessionId })).rejects.toThrow(ConvexError);
     expect(ctx.db.all("shares")).toHaveLength(0);
+  });
+
+  it("deads when the record does not say what it was checked against", async () => {
+    const { ctx, pi, labId, paperId, sessionId } = await setup();
+    const citedId = await seedAnnotation(
+      ctx,
+      { labId, paperId, memberId: pi },
+      { body: SECRET },
+    );
+    await ctx.db.patch(sessionId, {
+      synthesis: "## What we worked out",
+      synthesisApprovedAt: 100,
+      synthesisCitedAnnotationIds: [citedId],
+    });
+    const { token } = await shareWriteUp(ctx, { sessionId });
+    expect(await publicView(ctx, { token })).not.toBeNull();
+
+    // The shape of a record approved before the snapshot field existed. Read as
+    // an empty list it would sail through the withdrawal check having never
+    // been subjected to one — so an absent snapshot deads the link instead.
+    await ctx.db.patch(sessionId, {
+      synthesisCitedAnnotationIds: undefined,
+    });
+
+    expect(await publicView(ctx, { token })).toBeNull();
+
+    // And it stays dead however private the notes behind it become, because
+    // the link was never claiming anything checkable in the first place.
+    await ctx.db.patch(citedId, { visibility: "private" });
+    expect(await publicView(ctx, { token })).toBeNull();
+  });
+
+  it("will not mint against a signature that has been cleared", async () => {
+    const { ctx, sessionId } = await setup();
+    // Text without a signature: a draft somebody approved and then un-approved.
+    await ctx.db.patch(sessionId, {
+      synthesis: "## What we worked out",
+      synthesisCitedAnnotationIds: [],
+    });
+
+    await expect(shareWriteUp(ctx, { sessionId })).rejects.toThrow(ConvexError);
+    // No row, and no ledger entry claiming the lab published something.
+    expect(ctx.db.all("shares")).toHaveLength(0);
+    expect(ctx.db.all("events").map((event) => event.type)).not.toContain(
+      "share.created",
+    );
+  });
+
+  it("does not offer the control while only a draft exists", async () => {
+    const { ctx, sessionId } = await setup();
+    await ctx.db.patch(sessionId, { synthesis: "## What we worked out" });
+
+    const panelState = await sessionPanel(ctx, { sessionId });
+
+    // The panel asked `synthesis !== undefined` and would have offered a link
+    // that minted a token whose page 404s.
+    expect(panelState.approved).toBe(false);
   });
 
   it("deads if the sign-off is taken away afterwards", async () => {

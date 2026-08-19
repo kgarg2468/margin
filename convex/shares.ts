@@ -144,8 +144,6 @@ const publicPaperView = v.object({
   /** Whether there are bytes to fetch from the token-scoped delivery route. */
   hasPdf: v.boolean(),
   notes: v.array(publicNote),
-  /** The ceiling was reached; this margin is not all of it. */
-  truncated: v.boolean(),
 });
 
 const publicSynthesisView = v.object({
@@ -244,6 +242,15 @@ export type PublicNote = {
 /** A top-level note and whether the consent gates left anything of it. */
 type Thread = { root: Doc<"annotations">; redacted: boolean };
 
+/** A card on the public page: a surviving thread, or a promoted orphan reply. */
+type Card = {
+  root: Doc<"annotations">;
+  redacted: boolean;
+  replies: Doc<"annotations">[];
+  /** What the card sorts by — see the redaction rule about `createdAt`. */
+  createdAt: number;
+};
+
 /**
  * The paper's margin, as much of it as consent allows.
  *
@@ -258,17 +265,37 @@ type Thread = { root: Doc<"annotations">; redacted: boolean };
  * 3. **The author's own consent.** Lab-visible is a decision about the lab.
  *    Public is a second decision, and it belongs to the author.
  *
- * Then the one structural exception, and the only place a redaction sentence
- * appears: a thread whose top-level note fails those gates and whose replies
- * do not. The whole-item rule from `lib/citations/redaction.ts` is what
- * decides it — a thread rests on its parent, and an item whose citation has
- * stopped being shared loses its text outright rather than being dropped,
- * which is exactly the remedy this case needs.
+ * A thread whose top-level note fails while its replies pass is the awkward
+ * case, and *why* the root failed decides what happens to it. The two reasons
+ * are not the same kind of fact and must not produce the same page.
+ *
+ * **Missing consent — the root is dropped whole, and its consented replies are
+ * promoted to cards of their own.** Nothing is left where it stood: no marker,
+ * no id, no page number, no timestamp. Its author never agreed to appear here,
+ * and a placeholder would still say *somebody in this lab wrote a note on this
+ * passage, and here is when* — which is a disclosure about a person who
+ * declined to make one. Their colleagues' replies are their colleagues' own
+ * writing and survive on their own feet.
+ *
+ * **Withdrawal — the root keeps a redaction marker.** Here the note *was*
+ * public, somebody may already have read it, and the all-or-nothing rule from
+ * `lib/citations/redaction.ts` is exactly right: the item loses its text
+ * outright rather than vanishing, because the replies underneath are answers
+ * to something and a page that silently reparented them would misattribute a
+ * conversation. The marker carries the sentence, the page it sat on, and
+ * nothing else — in particular not `createdAt`, which is taken from the first
+ * surviving reply instead. The minute a note was written is not part of its
+ * redaction sentence, and a withdrawn note's exact timestamp is a fact about
+ * the author's working day that survives nothing else about it.
+ *
+ * Consent is checked *before* withdrawal for the root, so a note that fails
+ * both fails as a consent case and leaves nothing behind. The stricter
+ * disclosure rule wins.
  */
 export async function paperMargin(
   ctx: QueryCtx,
   paper: Doc<"papers">,
-): Promise<{ notes: PublicNote[]; truncated: boolean }> {
+): Promise<{ notes: PublicNote[] }> {
   const shared = await ctx.db
     .query("annotations")
     .withIndex("by_paper_and_visibility", (q) =>
@@ -308,16 +335,23 @@ export async function paperMargin(
     }
   }
 
-  // Threads worth drawing: the parent may be shown, or something underneath it
-  // may. Anything else never reaches the redaction rule below, because there
-  // is nothing there for a redaction to protect.
+  const consented = (annotation: Doc<"annotations">): boolean =>
+    optedIn.has(annotation.memberId);
+
+  const rootsById = new Map(
+    shared.filter((row) => row.parentId === undefined).map((row) => [row._id, row]),
+  );
+
+  // Threads whose root's author consented. Only these can reach the redaction
+  // rule below, because a redaction marker is a statement about a note that was
+  // once public and a non-consenting author's note never was.
   const threads: Thread[] = shared
     .filter(
       (row) =>
         row.parentId === undefined &&
+        consented(row) &&
         (shareable(row) || (repliesByParent.get(row._id)?.length ?? 0) > 0),
     )
-    .sort((a, b) => a._creationTime - b._creationTime)
     .map((root) => ({ root, redacted: false }));
 
   const { items: gated } = redactWhenAnyWithdrawn<Id<"annotations">, Thread>(
@@ -329,16 +363,56 @@ export async function paperMargin(
     (thread) => ({ ...thread, redacted: true }),
   );
 
-  const notes: PublicNote[] = [];
-  for (const { root, redacted } of gated) {
+  const cards: Card[] = gated.map(({ root, redacted }) => {
     const replies = (repliesByParent.get(root._id) ?? []).sort(
       (a, b) => a._creationTime - b._creationTime,
     );
+    return {
+      root,
+      redacted,
+      replies,
+      // A redacted card borrows the first surviving reply's time rather than
+      // carrying its own. Sorting by it keeps the conversation in order without
+      // the position of the card itself disclosing when the withdrawn note was
+      // written. Zero when nothing survives — which cannot happen, since a
+      // thread with no surviving replies and a withdrawn root never got here.
+      createdAt: redacted
+        ? (replies[0]?._creationTime ?? 0)
+        : root._creationTime,
+    };
+  });
+
+  // Replies orphaned by the consent rule: their thread's root belongs to
+  // somebody who never opted in, so the root is gone with nothing left in its
+  // place, and these stand on their own. They are their authors' writing and
+  // their authors said yes.
+  //
+  // Replies to a root that is *absent* from `shared` — a private parent — are
+  // deliberately not promoted. That root was never part of this margin as far
+  // as a public read is concerned, and lifting its replies out would be this
+  // function inventing a thread nobody wrote.
+  for (const row of shared) {
+    if (row.parentId === undefined || !shareable(row)) continue;
+    const root = rootsById.get(row.parentId);
+    if (root === undefined || consented(root)) continue;
+    cards.push({
+      root: row,
+      redacted: false,
+      replies: [],
+      createdAt: row._creationTime,
+    });
+  }
+
+  cards.sort((a, b) => a.createdAt - b.createdAt);
+
+  const notes: PublicNote[] = [];
+  for (const { root, redacted, replies, createdAt } of cards) {
     notes.push({
       _id: root._id,
-      // What a redacted thread is left with: the sentence, and the two
-      // identifiers needed to draw it in order. No body, no quote, no author,
-      // no type, no status — nothing its author or the lab wrote.
+      // What a redacted thread is left with: the sentence, the page it sat on,
+      // and a borrowed timestamp. No body, no quote, no author, no type, no
+      // status — nothing its author or the lab wrote, and not the minute they
+      // wrote it in.
       authorName: redacted ? "" : await nameOf(root.memberId),
       type: redacted ? "note" : root.type,
       body: redacted ? REDACTED_NOTE_TEXT : root.body,
@@ -346,7 +420,7 @@ export async function paperMargin(
       // Kept even when redacted: it places the card against the right sheet
       // and says nothing anybody wrote.
       pageIndex: root.anchor.pageIndex,
-      createdAt: root._creationTime,
+      createdAt,
       ...(redacted || root.status === undefined ? {} : { status: root.status }),
       redacted,
       replies: await Promise.all(
@@ -361,7 +435,7 @@ export async function paperMargin(
     });
   }
 
-  return { notes, truncated: shared.length >= MAX_ANNOTATIONS_PER_PAPER };
+  return { notes };
 }
 
 /**
@@ -395,7 +469,19 @@ export async function approvedWriteUp(
   // at the moment somebody signed it, which is exactly the scope of the
   // signature. The draft's own citations are re-checked where the draft is
   // read; this link does not carry the draft.
-  const snapshot = session.synthesisCitedAnnotationIds ?? [];
+  //
+  // An *absent* snapshot is not an empty one, and reading it as `?? []` was a
+  // hole: a record approved before the field existed, or written by a path
+  // that never set it, would be treated as citing nothing and would therefore
+  // pass a withdrawal check it was never actually subjected to. What the field
+  // says when it is missing is "nobody knows what this was checked against",
+  // and the only safe reading of that on a public surface is no. An empty
+  // array still means what it says — a copy deliberately signed against no
+  // citations — and still publishes.
+  const snapshot = session.synthesisCitedAnnotationIds;
+  if (snapshot === undefined) {
+    return null;
+  }
   const stillShared = new Set<Id<"annotations">>();
   for (const annotationId of new Set(snapshot)) {
     if (isStillShared(await ctx.db.get(annotationId), session.labId)) {
@@ -439,7 +525,7 @@ export const view = query({
       if (paper === null || paper.labId !== share.labId) {
         return null;
       }
-      const { notes, truncated } = await paperMargin(ctx, paper);
+      const { notes } = await paperMargin(ctx, paper);
       return {
         kind: "paper" as const,
         labName: await labNameOf(ctx, share.labId),
@@ -451,7 +537,6 @@ export const view = query({
         ...(paper.pageCount === undefined ? {} : { pageCount: paper.pageCount }),
         hasPdf: paper.storageId !== undefined,
         notes,
-        truncated,
       };
     }
 
@@ -631,7 +716,11 @@ export const forSession = query({
         await liveShareForSession(ctx, session._id),
         membership,
       ),
-      approved: session.synthesis !== undefined,
+      // Signed, not merely drafted. `synthesis` is the text; `synthesisApprovedAt`
+      // is somebody's signature on it, and the signature is what the public read
+      // requires — so a panel that offered a link on the strength of the text
+      // alone would offer a link to a 404.
+      approved: session.synthesisApprovedAt !== undefined,
       canShare: canApprove(session, membership),
     };
   },
@@ -715,7 +804,13 @@ export const shareSynthesis = mutation({
         "Only the presenter or the lab's PI can publish the write-up.",
       );
     }
-    if (session.synthesis === undefined) {
+    // The same fact `approvedWriteUp` checks, asked at the same strength. A
+    // cleared signature used to still mint a token here — and ledger it —
+    // producing a live row whose page had never been publishable.
+    if (
+      session.synthesis === undefined ||
+      session.synthesisApprovedAt === undefined
+    ) {
       throw new ConvexError(
         "There is no approved write-up to share yet. Sign one off first — the signature is what makes it publishable.",
       );

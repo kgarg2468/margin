@@ -123,7 +123,9 @@ export function SharePanel({ paperId }: { paperId: Id<"papers"> }) {
         </label>
         <p className="max-w-prose pl-6 font-sans text-xs leading-relaxed text-ink-faint">
           Only notes you marked visible to the lab — anything private stays
-          private, and unticking this removes yours from the link immediately.
+          private. Unticking removes yours from the link on the next load, with
+          nothing left in their place; replies your colleagues wrote under them
+          are their own and stay, on their own.
         </p>
       </div>
     </section>

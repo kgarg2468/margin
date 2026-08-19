@@ -68,7 +68,7 @@ export function SharedPaper({
           <aside className="flex flex-col gap-4 lg:sticky lg:top-6 lg:max-h-[calc(100dvh-3rem)] lg:overflow-y-auto">
             <div className="flex flex-col gap-2">
               <p className={eyebrowClass}>In the margin</p>
-              {shared.truncated ? <PartialNotice /> : null}
+              <PartialNotice />
             </div>
             {shared.notes.length === 0 ? (
               <p className="font-serif text-sm leading-relaxed text-ink-muted">
