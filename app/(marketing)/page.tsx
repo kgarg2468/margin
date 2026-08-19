@@ -5,6 +5,7 @@ import { Magnetic } from "./_components/magnetic";
 import { SweepMark } from "./_components/marks";
 import { ReadingProgress } from "./_components/progress";
 import { Reveal, Rise } from "./_components/reveal";
+import { ScanFieldMount } from "./_components/scan-field-mount";
 import { ShowcaseFig1 } from "./_components/showcase";
 import { COLUMN, CONTAINER, GRID, RAIL, Section } from "./_components/section";
 import { TimelineDraw } from "./_components/timeline";
@@ -100,6 +101,11 @@ export default function LandingPage() {
       <main id="main">
         {/* --- masthead ------------------------------------------------- */}
         <HeroSurface>
+          {/* The ground the sheet is lying on, seen through it. It sits over
+              the flat ruling and under every word — the masthead's content is
+              positioned and comes later in source order, so type always wins
+              — and being out of flow it cannot move a line either way. */}
+          <ScanFieldMount />
           <div className={`relative ${CONTAINER}`}>
             <div className={GRID}>
               <div className={RAIL}>
