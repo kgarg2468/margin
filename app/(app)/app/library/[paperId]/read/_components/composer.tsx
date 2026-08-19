@@ -5,11 +5,12 @@ import type { PopoverDismissal } from "@/app/(app)/app/_components/popover";
 import { readableError } from "@/app/(app)/app/_components/errors";
 import { api } from "@/convex/_generated/api";
 import type { Doc, Id } from "@/convex/_generated/dataModel";
+import { submitLabel } from "@/lib/command";
 import { collectMentionedIds } from "@/lib/mentions";
-import { errorClass } from "@/lib/ui";
+import { errorClass, keycapClass } from "@/lib/ui";
 import { useMutation } from "convex/react";
 import type { ComponentProps } from "react";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { EscapePressedIn } from "./composer-escape";
 import {
   composerEscape,
@@ -145,6 +146,22 @@ export function Composer({
    */
   const [picked, setPicked] = useState<PickedMention[]>([]);
   const mentions = collectMentionedIds(body, picked);
+
+  /**
+   * The keystroke, said out loud.
+   *
+   * `MentionField` has saved on ⌘/Ctrl+Enter since A1 and no surface has ever
+   * mentioned it, which makes it a feature only the person who wrote it has.
+   * Which modifier to name is knowable in the browser only, so the cap is held
+   * back until after hydration rather than guessed and corrected — the row is
+   * laid out from the right and the sheet has a fixed width, so nothing moves
+   * when it arrives.
+   */
+  const [submitKeys, setSubmitKeys] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSubmitKeys(submitLabel(window.navigator.platform));
+  }, []);
 
   async function save() {
     if (saving) {
@@ -389,6 +406,10 @@ export function Composer({
                 type="button"
                 disabled={saving}
                 onClick={() => void save()}
+                // The cap beside this is a glyph, and a glyph read aloud is
+                // noise; this is the same fact in the form a screen reader
+                // was built to announce.
+                aria-keyshortcuts="Meta+Enter Control+Enter"
                 className="pressable inline-flex items-center justify-center rounded-sm bg-accent px-3 py-1.5 font-sans text-sm text-accent-contrast hover:bg-accent-strong disabled:opacity-50"
               >
                 {saving
@@ -404,6 +425,9 @@ export function Composer({
               >
                 Cancel
               </button>
+              <kbd aria-hidden className={`${keycapClass} ml-auto`}>
+                {submitKeys ?? " "}
+              </kbd>
             </div>
           )}
 
