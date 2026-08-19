@@ -152,7 +152,7 @@ http.route({
     return new Response(blob, {
       status: 200,
       headers: {
-        ...SHARED_CORS_HEADERS,
+        ...CORS_HEADERS,
         "Content-Type": "application/pdf",
         "Content-Disposition": `inline; filename="${headerFilename(delivery.title)}"`,
         // The URL is not a secret — the membership check on every request is
@@ -242,7 +242,24 @@ http.route({
     // Between the lookup and the bytes. A dead token never gets here, so a
     // prober cannot make this write; a loop on a live link gets a plain 429
     // rather than the file, which is the whole expense of this route.
-    if (!(await ctx.runMutation(internal.shares.admitShare, { token }))) {
+    //
+    // The throttle lives here and only here. The page beside it is a query
+    // Convex caches, so a flood against one live link is mostly cache hits and
+    // costs nothing worth guarding; fetching megabytes of PDF is the real bill,
+    // and this is where it arrives.
+    //
+    // The throw is caught rather than allowed to surface. Under a genuine
+    // flood the counter is contended enough that Convex may exhaust its
+    // retries, and the honest answer to "your writes kept colliding because
+    // this link is being hammered" is the same 429 the counter itself gives —
+    // never a 500, which would blame the reader's request for the crowd.
+    let admitted: boolean;
+    try {
+      admitted = await ctx.runMutation(internal.shares.admitShare, { token });
+    } catch {
+      admitted = false;
+    }
+    if (!admitted) {
       return refuseShared(429, "This link is busy. Try again shortly.");
     }
 
@@ -254,7 +271,7 @@ http.route({
     return new Response(blob, {
       status: 200,
       headers: {
-        ...CORS_HEADERS,
+        ...SHARED_CORS_HEADERS,
         "Content-Type": "application/pdf",
         "Content-Disposition": `inline; filename="${headerFilename(delivery.title)}"`,
         // `no-store` for the reason the authed route gives — the check on
