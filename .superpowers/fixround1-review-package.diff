@@ -1,0 +1,1989 @@
+68a7f37 Keep the worker's own notes out of the branch
+266fea6 Fix round 1: the throttle spreads out, so a popular link stops fighting itself
+545519f Fix round 1: a throttle that counts links, and two guards that now bite
+dcf90cb Fix round 1: leaving withdraws consent, and anyone can close a paper link
+ae43034 Fix round 1: the signature fails closed, and consent outranks the marker
+
+ .../library/[paperId]/_components/share-panel.tsx  |   4 +-
+ app/(public)/s/[token]/_components/chrome.tsx      |  14 +-
+ .../s/[token]/_components/shared-paper.tsx         |   2 +-
+ app/(public)/s/[token]/page.tsx                    |  60 +++-
+ convex/credentials.guard.test.ts                   | 115 ++++++-
+ convex/http.ts                                     |  60 +++-
+ convex/labs.ts                                     |  19 ++
+ convex/schema.ts                                   |  48 ++-
+ convex/shares.test.ts                              | 352 ++++++++++++++++++++-
+ convex/shares.ts                                   | 340 ++++++++++++++++++--
+ 10 files changed, 949 insertions(+), 65 deletions(-)
+
+diff --git a/app/(app)/app/library/[paperId]/_components/share-panel.tsx b/app/(app)/app/library/[paperId]/_components/share-panel.tsx
+index a135d89..8c10a86 100644
+--- a/app/(app)/app/library/[paperId]/_components/share-panel.tsx
++++ b/app/(app)/app/library/[paperId]/_components/share-panel.tsx
+@@ -116,21 +116,23 @@ export function SharePanel({ paperId }: { paperId: Id<"papers"> }) {
+               void setOptIn({ paperId, included: event.target.checked })
+             }
+             className="accent-accent"
+           />
+           <span className="font-serif text-sm leading-relaxed text-ink">
+             Include my notes on this paper in shared links
+           </span>
+         </label>
+         <p className="max-w-prose pl-6 font-sans text-xs leading-relaxed text-ink-faint">
+           Only notes you marked visible to the lab — anything private stays
+-          private, and unticking this removes yours from the link immediately.
++          private. Unticking removes yours from the link on the next load, with
++          nothing left in their place; replies your colleagues wrote under them
++          are their own and stay, on their own.
+         </p>
+       </div>
+     </section>
+   );
+ }
+ 
+ /**
+  * The URL, and one button that puts it on the clipboard.
+  *
+  * Rendered as text a person can select as well, because the clipboard write
+diff --git a/app/(public)/s/[token]/_components/chrome.tsx b/app/(public)/s/[token]/_components/chrome.tsx
+index d0cdf47..f07ae61 100644
+--- a/app/(public)/s/[token]/_components/chrome.tsx
++++ b/app/(public)/s/[token]/_components/chrome.tsx
+@@ -50,22 +50,28 @@ export function ShareFrame({
+           </p>
+         </div>
+       </footer>
+     </div>
+   );
+ }
+ 
+ /**
+  * The line that says a page is not the whole margin.
+  *
+- * Shown when consent left some of it out. It says that the view is partial
+- * without saying how partial, because a count would be a measurement of what
+- * the members who declined had written, and publishing the size of a thing is
+- * a way of publishing part of it.
++ * Rendered always, and that is the design rather than laziness. Shown only
++ * when something *was* withheld, its presence becomes a one-bit disclosure —
++ * a reader who sees it learns that somebody in this lab declined, and a reader
++ * who does not learns that everybody agreed. Rendered unconditionally it says
++ * what is true of every share page under this consent model and measures
++ * nothing.
++ *
++ * It says the view is partial without saying how partial for the same reason.
++ * A count would be a measurement of what the members who declined had written,
++ * and publishing the size of a thing is a way of publishing part of it.
+  */
+ export function PartialNotice() {
+   return (
+     <p className="font-sans text-xs leading-relaxed text-ink-faint">
+       Only the notes whose authors chose to share them appear here.
+     </p>
+   );
+ }
+diff --git a/app/(public)/s/[token]/_components/shared-paper.tsx b/app/(public)/s/[token]/_components/shared-paper.tsx
+index 82b7bfb..d5a0ab2 100644
+--- a/app/(public)/s/[token]/_components/shared-paper.tsx
++++ b/app/(public)/s/[token]/_components/shared-paper.tsx
+@@ -61,21 +61,21 @@ export function SharedPaper({
+               <p className="font-serif text-sm text-ink-muted">
+                 The paper itself isn&rsquo;t attached to this link — the notes
+                 below are the conversation the lab had about it.
+               </p>
+             )}
+           </div>
+ 
+           <aside className="flex flex-col gap-4 lg:sticky lg:top-6 lg:max-h-[calc(100dvh-3rem)] lg:overflow-y-auto">
+             <div className="flex flex-col gap-2">
+               <p className={eyebrowClass}>In the margin</p>
+-              {shared.truncated ? <PartialNotice /> : null}
++              <PartialNotice />
+             </div>
+             {shared.notes.length === 0 ? (
+               <p className="font-serif text-sm leading-relaxed text-ink-muted">
+                 Nothing from this paper&rsquo;s margin is shared publicly.
+               </p>
+             ) : (
+               shared.notes.map((note) => (
+                 <NoteCard key={note._id} note={note} onJump={jumpToPage} />
+               ))
+             )}
+diff --git a/app/(public)/s/[token]/page.tsx b/app/(public)/s/[token]/page.tsx
+index 8d9f14c..a2ad020 100644
+--- a/app/(public)/s/[token]/page.tsx
++++ b/app/(public)/s/[token]/page.tsx
+@@ -1,11 +1,11 @@
+-import { fetchQuery } from "convex/nextjs";
++import { fetchMutation } from "convex/nextjs";
+ import type { Metadata } from "next";
+ import { notFound } from "next/navigation";
+ import { api } from "@/convex/_generated/api";
+ import { SharedPaper } from "./_components/shared-paper";
+ import { SharedSynthesis } from "./_components/shared-synthesis";
+ 
+ /**
+  * Read fresh on every request, always.
+  *
+  * This is the load-bearing line of the file. `shares.view` re-checks the whole
+@@ -36,21 +36,77 @@ export const metadata: Metadata = {
+ export default async function SharePage({
+   params,
+ }: {
+   params: Promise<{ token: string }>;
+ }) {
+   const { token } = await params;
+ 
+   // One answer for a token that never existed, a link taken down, a paper
+   // deleted under it, and a sign-off withdrawn since. `notFound()` for all of
+   // them, so what a prober learns from a dead link is nothing.
+-  const shared = await fetchQuery(api.shares.view, { token });
++  //
++  // A mutation, because the read is rate-limited and a Convex query cannot
++  // write the counter — see `shares.view`. Nothing about the reader is
++  // recorded; what it writes is a per-link window.
++  const shared = await read(token);
+   if (shared === null) {
+     notFound();
+   }
++  if ("busy" in shared) {
++    return <Busy />;
++  }
+ 
+   return shared.kind === "paper" ? (
+     <SharedPaper token={token} shared={shared} />
+   ) : (
+     <SharedSynthesis shared={shared} />
+   );
+ }
++
++/**
++ * The read, with the one failure it is worth absorbing.
++ *
++ * The rate window is a document every reader of a link writes, and under
++ * enough simultaneous readers Convex answers a contested write with a
++ * conflict. That is the guard's own load showing up as an error, and serving a
++ * 500 to somebody whose link is perfectly good would be the guard breaking the
++ * thing it exists to protect. Retried once, because most conflicts are a
++ * collision rather than a queue; then treated as what it actually is —
++ * this link is busy — rather than as a broken page.
++ *
++ * Deliberately not failing open. Failing open would mean serving the page
++ * without counting the read, and the moment worth counting is exactly this
++ * one.
++ */
++async function read(token: string) {
++  try {
++    return await fetchMutation(api.shares.view, { token });
++  } catch {
++    try {
++      return await fetchMutation(api.shares.view, { token });
++    } catch {
++      return { busy: true as const };
++    }
++  }
++}
++
++/**
++ * The link is good and the moment is not.
++ *
++ * Deliberately not a 404. A reader whose link is fine should not be told it
++ * has been taken down — they would believe it and stop, and there would be no
++ * way back from a wrong answer given once. This says what is true: come back
++ * in a moment.
++ */
++function Busy() {
++  return (
++    <main className="mx-auto flex min-h-dvh max-w-prose flex-col justify-center gap-3 px-6">
++      <h1 className="font-serif text-xl text-ink-strong">
++        This link is busy right now.
++      </h1>
++      <p className="font-serif text-base leading-relaxed text-ink-muted">
++        A lot of people are reading it at once. Give it a minute and reload —
++        the link itself is fine.
++      </p>
++    </main>
++  );
++}
+diff --git a/convex/credentials.guard.test.ts b/convex/credentials.guard.test.ts
+index 9fef1ac..f42c768 100644
+--- a/convex/credentials.guard.test.ts
++++ b/convex/credentials.guard.test.ts
+@@ -119,25 +119,28 @@ function admitsText(fieldType: Json): boolean {
+   if (fieldType.type === "string" || fieldType.type === "any") return true;
+   if (fieldType.type === "union") {
+     return admitsText((fieldType.value ?? null) as Json);
+   }
+   return false;
+ }
+ 
+ /** Every place in `node` a credential could be hiding under a plausible name. */
+ function credentialShaped(node: Json): string[] {
+   return declaredFields(node)
+-    .filter(
+-      (field) =>
+-        CREDENTIAL_ISH.test(field.path.split(".").at(-1) ?? field.path) &&
+-        (field.fieldType === null || admitsText(field.fieldType)),
+-    )
++    .filter((field) => {
++      const name = normalizeName(field.path.split(".").at(-1) ?? field.path);
++      return (
++        !IDENTIFIER_NAMES.has(name) &&
++        CREDENTIAL_ISH.test(name) &&
++        (field.fieldType === null || admitsText(field.fieldType))
++      );
++    })
+     .map((field) => field.path);
+ }
+ 
+ /** Every `v.any()` under `node`, as paths — the places this file cannot see. */
+ function opaquePaths(node: Json, prefix: string[] = []): string[] {
+   if (Array.isArray(node)) {
+     return node.flatMap((child) => opaquePaths(child, prefix));
+   }
+   if (!isRecord(node)) return [];
+   if (node.type === "any") return [prefix.length === 0 ? "<returns>" : prefix.join(".")];
+@@ -236,22 +239,50 @@ function eventVariant(typeName: string): Record<string, Json> {
+  * does the narrowing — on the field's type, which cannot be talked into
+  * anything.
+  *
+  * Two words are deliberately *not* here. Bare `key` would match
+  * `papers.zoteroItemKey`, `zoteroLinks.collectionKey` and the `key` on a
+  * brief section — opaque public identifiers, every one, and flagging them
+  * would either get this pattern relaxed by the next person or force renames
+  * that made the schema worse. Bare `zotero` would match the same item key for
+  * the same non-reason. `apikey` matches `apiKey` and matches neither.
+  */
++const normalizeName = (name: string): string =>
++  name.toLowerCase().replace(/[^a-z]/g, "");
++
++/**
++ * Names that are opaque identifiers rather than secrets.
++ *
++ * The pattern below matches `key` on its own, which is the only way to catch
++ * the spellings nobody thought of — `convexDeployKey`, `openaiKey`,
++ * `OPENAI_API_KEY` all walked past a list of specific compounds. Matching
++ * broadly means the burden inverts: a new `*Key` field is treated as a
++ * credential until it appears here with a reason, rather than being ignored
++ * until somebody adds its exact spelling.
++ *
++ * Each of these is a handle to something, not a permission to do anything.
++ * A Zotero item key names a record in a library the member has already been
++ * authorized for; `key` on a section is which section it is.
++ */
++const IDENTIFIER_NAMES = new Set([
++  "zoteroitemkey",
++  "collectionkey",
++  "key",
++]);
++
++/**
++ * Normalized before matching — lowercased with separators stripped — so
++ * `OPENAI_API_KEY`, `openaiApiKey` and `openai-api-key` are one name and the
++ * pattern cannot be evaded by a change of house style.
++ */
+ const CREDENTIAL_ISH =
+-  /webhook|hook|slack|deliver|destination|endpoint|channel|post|apikey|zoterokey|token|secret|credential/i;
++  /webhook|hook|slack|deliver|destination|endpoint|channel|post|key|token|secret|credential|password/;
+ 
+ /**
+  * The pattern, held to the names it claims to cover.
+  *
+  * A regex is the kind of thing that quietly stops matching what its comment
+  * says it matches — which is precisely how the first version of it shipped.
+  * This list is the review's own; `channel`/`post` are here because two of the
+  * names on it still walked past the widened pattern until they were added,
+  * and the key-and-token spellings are here because a Zotero key is a
+  * credential this file did not cover at all until it was told to —
+@@ -266,25 +297,30 @@ const PLAUSIBLE_NAMES = [
+   "channelUrl",
+   "destinationUrl",
+   "postUrl",
+   "slackDestination",
+   "incomingWebhook",
+   "apiKey",
+   "zoteroApiKey",
+   "zoteroKey",
+   "accessToken",
+   "clientSecret",
++  // The three the second review found still walking past a pattern that
++  // listed compounds instead of matching `key`: a deploy key that would let
++  // its holder push functions, and two spellings of a model provider's key.
++  // `OPENAI_API_KEY` is here in its environment-variable casing on purpose —
++  // the underscores are what defeated `apikey`.
++  "convexDeployKey",
++  "openaiKey",
++  "OPENAI_API_KEY",
+ ] as const;
+ 
+-const normalizeName = (name: string): string =>
+-  name.toLowerCase().replace(/[^a-z]/g, "");
+-
+ /* -------------------------------------------------------------------------
+  * 1. No public function hands the credential to a browser
+  * ---------------------------------------------------------------------- */
+ 
+ /**
+  * Every module under `convex/`, imported.
+  *
+  * Read off the directory rather than listed by hand, for the reason
+  * `email.guard.test.ts` gives: a hard-coded list only constrains what is on it,
+  * so the first leak in a module added next month — which is exactly the drift
+@@ -409,29 +445,45 @@ describe("no credential ever reaches a client", () => {
+     // The same shape with a real type in it is not flagged.
+     expect(
+       opaquePaths(wireForm(v.object({ outer: v.object({ inner: v.string() }) }))),
+     ).toEqual([]);
+   });
+ 
+   it("recognises every name a credential would plausibly be given", () => {
+     // The scan below is only as good as this pattern. Checked directly, so the
+     // day it stops matching one of these it fails here — loudly, with the name
+     // in the message — rather than by returning an empty offender list.
+-    const missed = PLAUSIBLE_NAMES.filter((name) => !CREDENTIAL_ISH.test(name));
++    const missed = PLAUSIBLE_NAMES.filter(
++      (name) => !CREDENTIAL_ISH.test(normalizeName(name)),
++    );
+     expect(missed).toEqual([]);
++
++    // Named one at a time as well, because these three are the reason the
++    // pattern was widened and a regression on any of them is the regression
++    // that matters.
++    for (const name of ["convexDeployKey", "openaiKey", "OPENAI_API_KEY"]) {
++      expect(CREDENTIAL_ISH.test(normalizeName(name)), name).toBe(true);
++    }
+     // And it is not simply matching everything, which would pass the line
+     // above while flagging half the schema. The last three are the names this
+     // widening came closest to eating: opaque identifiers, not secrets.
+     expect(
+-      ["title", "createdAt", "body", "quote", "zoteroItemKey", "collectionKey", "libraryId"]
+-        .filter((n) => CREDENTIAL_ISH.test(n)),
++      ["title", "createdAt", "body", "quote", "libraryId"].filter((n) =>
++        CREDENTIAL_ISH.test(normalizeName(n)),
++      ),
+     ).toEqual([]);
++    // The two opaque `*Key` identifiers are let through by name rather than by
++    // the pattern missing them, which is the part that has to stay deliberate.
++    for (const name of ["zoteroItemKey", "collectionKey"]) {
++      expect(CREDENTIAL_ISH.test(normalizeName(name)), name).toBe(true);
++      expect(IDENTIFIER_NAMES.has(normalizeName(name)), name).toBe(true);
++    }
+   });
+ 
+   /**
+    * The one kind of secret a member is supposed to be handed.
+    *
+    * Every other credential in this codebase is machinery: a lab's Slack
+    * webhook, a member's Zotero key. Nobody ever needs to see one, so the rule
+    * for them is absolute and the assertion below is `[]`.
+    *
+    * A share token is the opposite kind of thing. It is minted *because* a
+@@ -481,20 +533,59 @@ describe("no credential ever reaches a client", () => {
+       )
+       .filter((path) => path.startsWith("shares."))
+       .sort();
+     expect(present).toEqual([...TOKEN_BEARING].sort());
+ 
+     const view = publicFunctions.find((fn) => fn.name === "shares.view");
+     expect(view, "shares.view is the public read; it must exist").toBeDefined();
+     expect(credentialShaped(view?.returns ?? null)).toEqual([]);
+   });
+ 
++  it("checks the membership gate itself, not just what the gate returns", () => {
++    // The assertion above says these four *may* carry a token. What made that
++    // safe was never checked: the exemption was a list of validator paths, so
++    // deleting `requireMembership` from any of these handlers left every test
++    // in this file green while the token went to anyone who asked.
++    //
++    // Read out of the source rather than the introspection because a
++    // membership check is a *call*, and Convex's registry describes shapes.
++    // Crude on purpose: it cannot be satisfied by a function that merely
++    // imports the helper, and it fails if a handler stops calling it.
++    const source = readFileSync(new URL("shares.ts", import.meta.url), "utf8");
++
++    const bodyOf = (name: string): string => {
++      const start = source.indexOf(`export const ${name} = `);
++      expect(start, `shares.${name} should exist`).toBeGreaterThan(-1);
++      const next = source.indexOf("\nexport const ", start + 1);
++      return source.slice(start, next === -1 ? source.length : next);
++    };
++
++    for (const name of [
++      "forPaper",
++      "forSession",
++      "sharePaper",
++      "shareSynthesis",
++      "revoke",
++      "setPaperOptIn",
++    ]) {
++      expect(
++        bodyOf(name),
++        `shares.${name} hands out or acts on a share and must check membership first`,
++      ).toContain("requireMembership(ctx,");
++    }
++
++    // And the inverse, so this is a fact about the module rather than about a
++    // string that happens to be everywhere in it: the public read does not
++    // check membership, because it cannot — there is nobody to check.
++    expect(bodyOf("view")).not.toContain("requireMembership(");
++  });
++
+   it("does put them in the internal queries that need them, so the check is real", () => {
+     // The inverse assertion. If the walk could not see a credential field at
+     // all, the one above would pass for the wrong reason forever. Named rather
+     // than counted, so a payload that stopped carrying its credential — and
+     // therefore stopped proving anything — fails here with its own name.
+     const internalWithCredential = registered
+       .filter((fn) => !fn.isPublic && credentialShaped(fn.returns).length > 0)
+       .map((fn) => fn.name)
+       .sort();
+ 
+diff --git a/convex/http.ts b/convex/http.ts
+index 5bed2ea..df30881 100644
+--- a/convex/http.ts
++++ b/convex/http.ts
+@@ -36,20 +36,36 @@ auth.addHttpRoutes(http);
+ 
+ /**
+  * Wide-open CORS, deliberately.
+  *
+  * This route has no cookie auth and no `credentials` mode — authorization is
+  * a header our own JavaScript attaches, and a cross-origin page has no way to
+  * obtain it. `Access-Control-Allow-Origin: *` therefore grants nothing; the
+  * alternative, pinning to `SITE_URL`, buys no safety and breaks every preview
+  * deployment and local origin that isn't the one configured.
+  */
++/**
++ * The share routes' own block.
++ *
++ * Identical to the authed one except for what is missing: no
++ * `Access-Control-Allow-Headers: Authorization`. Reusing the block next door
++ * advertised a credential header on a route that accepts none, which is a
++ * small lie in a place where the whole argument is that this door has a
++ * different key — and an invitation to some future caller to try attaching a
++ * session to it.
++ */
++const SHARED_CORS_HEADERS: Record<string, string> = {
++  "Access-Control-Allow-Origin": "*",
++  "Access-Control-Allow-Methods": "GET, OPTIONS",
++  "Access-Control-Max-Age": "86400",
++};
++
+ const CORS_HEADERS: Record<string, string> = {
+   "Access-Control-Allow-Origin": "*",
+   "Access-Control-Allow-Methods": "GET, OPTIONS",
+   "Access-Control-Allow-Headers": "Authorization",
+   "Access-Control-Max-Age": "86400",
+ };
+ 
+ /**
+  * A `filename` a header can carry: quotes and control characters would break
+  * the parse, and anything non-ASCII is not this header's business. The title
+@@ -67,20 +83,31 @@ function headerFilename(title: string): string {
+ }
+ 
+ /** Every refusal says the same thing, so probing tells a stranger nothing. */
+ function refuse(status: number, message: string): Response {
+   return new Response(message, {
+     status,
+     headers: { ...CORS_HEADERS, "Content-Type": "text/plain; charset=utf-8" },
+   });
+ }
+ 
++/** The same, minus the credential header the share routes do not accept. */
++function refuseShared(status: number, message: string): Response {
++  return new Response(message, {
++    status,
++    headers: {
++      ...SHARED_CORS_HEADERS,
++      "Content-Type": "text/plain; charset=utf-8",
++    },
++  });
++}
++
+ http.route({
+   path: "/pdf",
+   method: "OPTIONS",
+   handler: httpAction(async () => new Response(null, { status: 204, headers: CORS_HEADERS })),
+ });
+ 
+ http.route({
+   path: "/pdf",
+   method: "GET",
+   handler: httpAction(async (ctx, request) => {
+@@ -118,21 +145,21 @@ http.route({
+       return refuse(404, "No such paper.");
+     }
+ 
+     // Nothing is recorded about this request. Not who asked, not which paper,
+     // not when — the privacy constitution says the only evidence of
+     // engagement Margin ever stores is an annotation someone chose to write,
+     // and a fetch log is a read receipt with a different name on it.
+     return new Response(blob, {
+       status: 200,
+       headers: {
+-        ...CORS_HEADERS,
++        ...SHARED_CORS_HEADERS,
+         "Content-Type": "application/pdf",
+         "Content-Disposition": `inline; filename="${headerFilename(delivery.title)}"`,
+         // The URL is not a secret — the membership check on every request is
+         // what protects the file — so a copy of the bytes sitting in a shared
+         // disk cache under that URL is exactly the leak this route exists to
+         // close. It costs a re-download per open, which for a paper-sized PDF
+         // is the cheaper half of the trade.
+         "Cache-Control": "private, no-store",
+       },
+     });
+@@ -164,50 +191,71 @@ http.route({
+  * somebody deliberately made public, it grants read and nothing else, and it
+  * can be revoked in one press without touching anything else the member has.
+  * Putting a session token in a URL would be a mistake of a different kind, and
+  * this route does not do it: it accepts no `Authorization` header at all, so
+  * there is no bearer credential anywhere near it to reuse or confuse.
+  *
+  * `X-Robots-Tag` because a PDF is a document a crawler indexes on its own
+  * terms — the page's `<meta name="robots">` protects the page and says nothing
+  * about a file fetched from another origin.
+  *
+- * As above and for the same reason: nothing about this request is recorded.
++ * On what is and is not recorded, precisely — the loose version of this
++ * sentence was wrong. Margin writes nothing about this request: no row, no
++ * ledger entry, no counter that could say who came. What Margin does not
++ * control is the transport. The token travels as a query parameter, so it
++ * appears in Convex's own HTTP request logs and in any intermediary that logs
++ * URLs, and **revocation does not reach log storage** — taking the link down
++ * stops it working everywhere that matters and does not unwrite it from a log
++ * line. That is the cost of a capability in a URL, it is the same cost every
++ * unguessable link has, and it is why the token is scoped to one artifact and
++ * grants read only.
++ *
++ * The rate window in `shares.admitShare` is the one thing written on this
++ * path, and it is keyed by the share rather than the reader — see the table's
++ * own comment in `schema.ts`.
+  */
+ http.route({
+   path: "/shared-pdf",
+   method: "OPTIONS",
+   handler: httpAction(
+-    async () => new Response(null, { status: 204, headers: CORS_HEADERS }),
++    async () =>
++      new Response(null, { status: 204, headers: SHARED_CORS_HEADERS }),
+   ),
+ });
+ 
+ http.route({
+   path: "/shared-pdf",
+   method: "GET",
+   handler: httpAction(async (ctx, request) => {
+     const token = new URL(request.url).searchParams.get("token");
+     if (token === null) {
+-      return refuse(400, "Ask for a paper.");
++      return refuseShared(400, "Ask for a paper.");
+     }
+ 
+     // One refusal for a token that was never minted, a link that has been
+     // taken down, a share of a write-up rather than a paper, and a paper with
+     // no file on it. A prober must not be able to tell them apart.
+     const delivery = await ctx.runQuery(internal.shares.pdfForShare, { token });
+     if (delivery === null) {
+-      return refuse(404, "No such paper.");
++      return refuseShared(404, "No such paper.");
++    }
++
++    // Between the lookup and the bytes. A dead token never gets here, so a
++    // prober cannot make this write; a loop on a live link gets a plain 429
++    // rather than the file, which is the whole expense of this route.
++    if (!(await ctx.runMutation(internal.shares.admitShare, { token }))) {
++      return refuseShared(429, "This link is busy. Try again shortly.");
+     }
+ 
+     const blob = await ctx.storage.get(delivery.storageId);
+     if (blob === null) {
+-      return refuse(404, "No such paper.");
++      return refuseShared(404, "No such paper.");
+     }
+ 
+     return new Response(blob, {
+       status: 200,
+       headers: {
+         ...CORS_HEADERS,
+         "Content-Type": "application/pdf",
+         "Content-Disposition": `inline; filename="${headerFilename(delivery.title)}"`,
+         // `no-store` for the reason the authed route gives — the check on
+         // every request is what protects the file, so a copy of the bytes in a
+diff --git a/convex/labs.ts b/convex/labs.ts
+index 3faf35b..d31f30e 100644
+--- a/convex/labs.ts
++++ b/convex/labs.ts
+@@ -225,20 +225,39 @@ async function isSolePi(
+  * the roster, the counter, and the ledger can never disagree.
+  */
+ async function endMembership(
+   ctx: MutationCtx,
+   membership: Doc<"memberships">,
+   actorId: Id<"users">,
+   reason: "left" | "removed",
+ ): Promise<void> {
+   await ctx.db.delete(membership._id);
+ 
++  // Consent to be read by strangers has to stay withdrawable by the person who
++  // gave it, and somebody who has left cannot reach the toggle that would
++  // withdraw it — `setPaperOptIn` requires a membership, so it would answer
++  // them with a refusal. Leaving the rows in place would make their notes go
++  // on publishing with no way back, which is the one state this consent model
++  // must not be able to reach. So leaving is the withdrawal.
++  //
++  // Not ledgered per paper. The departure is the fact, and it is already
++  // recorded below; a row per paper would bury it in its own consequences.
++  const optIns = await ctx.db
++    .query("paperShareOptIns")
++    .withIndex("by_user_and_lab", (q) =>
++      q.eq("userId", membership.userId).eq("labId", membership.labId),
++    )
++    .collect();
++  for (const optIn of optIns) {
++    await ctx.db.delete(optIn._id);
++  }
++
+   const lab = await ctx.db.get(membership.labId);
+   if (lab !== null) {
+     await ctx.db.patch(lab._id, {
+       memberCount: Math.max(0, lab.memberCount - 1),
+     });
+   }
+ 
+   await recordEvent(ctx, {
+     labId: membership.labId,
+     type: "member.left",
+diff --git a/convex/schema.ts b/convex/schema.ts
+index 30f4f73..32f9c7f 100644
+--- a/convex/schema.ts
++++ b/convex/schema.ts
+@@ -2816,12 +2816,58 @@ export default defineSchema({
+    */
+   paperShareOptIns: defineTable({
+     labId: v.id("labs"),
+     paperId: v.id("papers"),
+     userId: v.id("users"),
+     optedInAt: v.number(),
+   })
+     /** The read path: whose notes may be shown on this paper. */
+     .index("by_paper", ["paperId"])
+     /** One member's own answer, for the toggle and for the write. */
+-    .index("by_paper_and_user", ["paperId", "userId"]),
++    .index("by_paper_and_user", ["paperId", "userId"])
++    /**
++     * Every paper one member has opened up in one lab.
++     *
++     * Read by `endMembership`. Consent to be published has to be withdrawable
++     * by the person who gave it, and somebody who has left the lab can no
++     * longer reach the toggle that would withdraw it — so leaving withdraws
++     * all of it. Scoped by lab as well as user because a member of two labs
++     * leaving one of them has said nothing about the other.
++     */
++    .index("by_user_and_lab", ["userId", "labId"]),
++
++  /**
++   * A coarse rate window per live share. **Not a read log, and the difference
++   * is structural rather than a promise.**
++   *
++   * There is at most one row per share, it holds a start time and a running
++   * count, and the count resets in place when the window rolls over. It cannot
++   * answer who read anything, when any particular read happened, how many
++   * distinct people came, or whether a given person came at all — there is no
++   * identity in it, no per-read row, and no history, because the previous
++   * window is overwritten rather than kept. What it can answer is "is one link
++   * being hammered right now", which is the only question an abuse guard asks.
++   *
++   * Keyed by the share row rather than by the token string, for two reasons:
++   * it is the same 1:1 fact, and it keeps the capability from being copied
++   * into a second table where revocation does not reach.
++   *
++   * Rows are only ever created for a share that exists and is live, so probing
++   * cannot inflate this table, and `revoke` deletes the row — which is what
++   * keeps it bounded by the number of live shares rather than growing forever.
++   */
++  shareRateWindows: defineTable({
++    shareId: v.id("shares"),
++    /**
++     * Which of the fixed set of counters this row is.
++     *
++     * A single row per share is the obvious design and it is the wrong one: it
++     * makes one document that every reader of a popular link has to write,
++     * and Convex answers that with write conflicts — so the guard meant to let
++     * a viral link survive would be the thing breaking it. Readers spread
++     * across a few counters instead, each holding its share of the ceiling.
++     */
++    shard: v.number(),
++    windowStart: v.number(),
++    count: v.number(),
++  }).index("by_share_and_shard", ["shareId", "shard"]),
+ });
+diff --git a/convex/shares.test.ts b/convex/shares.test.ts
+index 0df58de..2cdc39d 100644
+--- a/convex/shares.test.ts
++++ b/convex/shares.test.ts
+@@ -4,27 +4,29 @@ import type { Id } from "./_generated/dataModel";
+ import {
+   FakeCtx,
+   handlerOf,
+   rowAt,
+   seedAnnotation,
+   seedLab,
+ } from "./delegations.fixtures";
+ import {
+   REDACTED_NOTE_TEXT,
+   forPaper,
++  forSession,
+   pdfForShare,
+   revoke,
+   setPaperOptIn,
+   sharePaper,
+   shareSynthesis,
+   view,
+ } from "./shares";
++import { leaveLab as leaveLabMutation } from "./labs";
+ import schema from "./schema";
+ 
+ vi.mock("@convex-dev/auth/server", async (importOriginal) => ({
+   ...(await importOriginal<typeof import("@convex-dev/auth/server")>()),
+   getAuthUserId: async (ctx: unknown) =>
+     (ctx as { auth?: { userId?: string } }).auth?.userId ?? null,
+ }));
+ 
+ /**
+  * THE PUBLIC SURFACE, MECHANICALLY.
+@@ -58,31 +60,33 @@ const SECRET = "ZZZ-PRIVATE-NOBODY-SHARED-THIS-ZZZ";
+ type Handler<A, R> = (ctx: FakeCtx, args: A) => Promise<R>;
+ 
+ /** `handlerOf`, with the argument and answer types the call site knows. */
+ function call<A, R>(registered: unknown): Handler<A, R> {
+   return handlerOf(registered) as unknown as Handler<A, R>;
+ }
+ 
+ const publicView = call<
+   { token: string },
+   | null
++  | { busy: true }
+   | {
+       kind: "paper";
+       labName: string;
+       title: string;
+       hasPdf: boolean;
+-      truncated: boolean;
+       notes: {
+         _id: Id<"annotations">;
+         authorName: string;
+         body: string;
+         quote: string;
++        pageIndex: number;
++        createdAt: number;
+         redacted: boolean;
+         status?: string;
+         replies: { _id: Id<"annotations">; authorName: string; body: string }[];
+       }[];
+     }
+   | {
+       kind: "synthesis";
+       labName: string;
+       paperTitle: string;
+       text: string;
+@@ -99,20 +103,25 @@ const optIn = call<{ paperId: Id<"papers">; included: boolean }, null>(
+   setPaperOptIn,
+ );
+ const panel = call<
+   { paperId: Id<"papers"> },
+   {
+     share: { _id: Id<"shares">; token: string; canRevoke: boolean } | null;
+     optedIn: boolean;
+     optedInCount: number;
+   }
+ >(forPaper);
++const sessionPanel = call<
++  { sessionId: Id<"sessions"> },
++  { share: { _id: Id<"shares">; token: string } | null; approved: boolean; canShare: boolean }
++>(forSession);
++const leaveLab = call<{ labId: Id<"labs"> }, null>(leaveLabMutation);
+ const pdf = call<
+   { token: string },
+   { storageId: Id<"_storage">; title: string } | null
+ >(pdfForShare);
+ 
+ /** A lab, a paper, a session, and the PI signed in. */
+ async function setup() {
+   const ctx = new FakeCtx();
+   const seed = await seedLab(ctx);
+   ctx.auth = { userId: seed.pi };
+@@ -132,23 +141,25 @@ function wireForm(validator: unknown): unknown {
+   const json = (validator as { json?: unknown }).json;
+   if (json === undefined) {
+     throw new Error(
+       "Convex validator has no `.json` wire form; this guard cannot introspect the schema and must not be assumed to pass.",
+     );
+   }
+   return json;
+ }
+ 
+ function asPaper(answer: Awaited<ReturnType<typeof publicView>>) {
+-  if (answer === null || answer.kind !== "paper") {
++  if (answer === null || "busy" in answer || answer.kind !== "paper") {
+     throw new Error(
+-      `expected a live paper share, got ${answer === null ? "null" : answer.kind}`,
++      `expected a live paper share, got ${
++        answer === null ? "null" : "busy" in answer ? "busy" : answer.kind
++      }`,
+     );
+   }
+   return answer;
+ }
+ 
+ /* -------------------------------------------------------------------------
+  * 1. Private notes
+  * ---------------------------------------------------------------------- */
+ 
+ describe("a private note never reaches a public page", () => {
+@@ -348,20 +359,100 @@ describe("a withdrawn note", () => {
+     expect(thread?.redacted).toBe(true);
+     // "And nothing else": the sentence, and not one thing its author wrote.
+     expect(thread?.body).toBe(REDACTED_NOTE_TEXT);
+     expect(thread?.quote).toBe("");
+     expect(thread?.authorName).toBe("");
+     expect(thread?.status).toBeUndefined();
+     expect(JSON.stringify(answer)).not.toContain(SECRET);
+     expect(thread?.replies.map((reply) => reply._id)).toEqual([replyId]);
+   });
+ 
++  it("leaves nothing at all where a non-consenting root stood, and promotes its replies", async () => {
++    const { ctx, pi, member, labId, paperId } = await setup();
++    // Marcus writes the note; Elena replies. Elena shares, which opts in Elena
++    // and nobody else — so the root is his and he has never agreed to it.
++    const parentId = await seedAnnotation(
++      ctx,
++      { labId, paperId, memberId: member },
++      { body: SECRET, quote: SECRET },
++    );
++    const replyId = await ctx.db.insert("annotations", {
++      labId,
++      paperId,
++      memberId: pi,
++      parentId,
++      anchor: {
++        quote: "incubation at 4°C",
++        prefix: "",
++        suffix: "",
++        start: 0,
++        end: 17,
++        pageIndex: 2,
++      },
++      type: "note",
++      body: "Answering the note above.",
++      visibility: "lab",
++    });
++    const { token } = await share(ctx, { paperId });
++
++    const answer = asPaper(await publicView(ctx, { token }));
++
++    // Not a marker, not a placeholder, not an id: a reader must not be able to
++    // learn that a member who declined wrote something here, or when.
++    expect(JSON.stringify(answer)).not.toContain(SECRET);
++    expect(JSON.stringify(answer)).not.toContain(REDACTED_NOTE_TEXT);
++    expect(JSON.stringify(answer)).not.toContain(parentId);
++    expect(answer.notes.map((note) => note._id)).not.toContain(parentId);
++
++    // Elena's reply is her own writing and she said yes, so it stands alone.
++    const promoted = answer.notes.find((note) => note._id === replyId);
++    expect(promoted).toBeDefined();
++    expect(promoted?.body).toBe("Answering the note above.");
++    expect(promoted?.redacted).toBe(false);
++    expect(promoted?.replies).toEqual([]);
++  });
++
++  it("does not carry a withdrawn note's own timestamp on its marker", async () => {
++    const { ctx, pi, labId, paperId } = await setup();
++    const parentId = await seedAnnotation(ctx, { labId, paperId, memberId: pi });
++    const replyId = await ctx.db.insert("annotations", {
++      labId,
++      paperId,
++      memberId: pi,
++      parentId,
++      anchor: {
++        quote: "incubation at 4°C",
++        prefix: "",
++        suffix: "",
++        start: 0,
++        end: 17,
++        pageIndex: 2,
++      },
++      type: "note",
++      body: "Answering the note above.",
++      visibility: "lab",
++    });
++    const { token } = await share(ctx, { paperId });
++    const root = await ctx.db.get(parentId);
++    const reply = await ctx.db.get(replyId);
++    await ctx.db.patch(parentId, { deletedAt: 5 });
++
++    const answer = asPaper(await publicView(ctx, { token }));
++    const marker = answer.notes.find((note) => note._id === parentId);
++
++    expect(marker?.redacted).toBe(true);
++    // The minute somebody wrote a note is a fact about their working day, and
++    // it does not survive the note it belonged to.
++    expect(marker?.createdAt).not.toBe(root?._creationTime);
++    expect(marker?.createdAt).toBe(reply?._creationTime);
++  });
++
+   it("drops a reply whose own author has not opted in, with no marker left", async () => {
+     const { ctx, pi, member, labId, paperId } = await setup();
+     const parentId = await seedAnnotation(ctx, { labId, paperId, memberId: pi }, {
+       body: "The PI's note.",
+     });
+     await ctx.db.insert("annotations", {
+       labId,
+       paperId,
+       memberId: member,
+       parentId,
+@@ -467,20 +558,77 @@ describe("revocation", () => {
+  * ---------------------------------------------------------------------- */
+ 
+ describe("a write-up share", () => {
+   it("is refused outright when nobody has signed one off", async () => {
+     const { ctx, sessionId } = await setup();
+ 
+     await expect(shareWriteUp(ctx, { sessionId })).rejects.toThrow(ConvexError);
+     expect(ctx.db.all("shares")).toHaveLength(0);
+   });
+ 
++  it("deads when the record does not say what it was checked against", async () => {
++    const { ctx, pi, labId, paperId, sessionId } = await setup();
++    const citedId = await seedAnnotation(
++      ctx,
++      { labId, paperId, memberId: pi },
++      { body: SECRET },
++    );
++    await ctx.db.patch(sessionId, {
++      synthesis: "## What we worked out",
++      synthesisApprovedAt: 100,
++      synthesisCitedAnnotationIds: [citedId],
++    });
++    const { token } = await shareWriteUp(ctx, { sessionId });
++    expect(await publicView(ctx, { token })).not.toBeNull();
++
++    // The shape of a record approved before the snapshot field existed. Read as
++    // an empty list it would sail through the withdrawal check having never
++    // been subjected to one — so an absent snapshot deads the link instead.
++    await ctx.db.patch(sessionId, {
++      synthesisCitedAnnotationIds: undefined,
++    });
++
++    expect(await publicView(ctx, { token })).toBeNull();
++
++    // And it stays dead however private the notes behind it become, because
++    // the link was never claiming anything checkable in the first place.
++    await ctx.db.patch(citedId, { visibility: "private" });
++    expect(await publicView(ctx, { token })).toBeNull();
++  });
++
++  it("will not mint against a signature that has been cleared", async () => {
++    const { ctx, sessionId } = await setup();
++    // Text without a signature: a draft somebody approved and then un-approved.
++    await ctx.db.patch(sessionId, {
++      synthesis: "## What we worked out",
++      synthesisCitedAnnotationIds: [],
++    });
++
++    await expect(shareWriteUp(ctx, { sessionId })).rejects.toThrow(ConvexError);
++    // No row, and no ledger entry claiming the lab published something.
++    expect(ctx.db.all("shares")).toHaveLength(0);
++    expect(ctx.db.all("events").map((event) => event.type)).not.toContain(
++      "share.created",
++    );
++  });
++
++  it("does not offer the control while only a draft exists", async () => {
++    const { ctx, sessionId } = await setup();
++    await ctx.db.patch(sessionId, { synthesis: "## What we worked out" });
++
++    const panelState = await sessionPanel(ctx, { sessionId });
++
++    // The panel asked `synthesis !== undefined` and would have offered a link
++    // that minted a token whose page 404s.
++    expect(panelState.approved).toBe(false);
++  });
++
+   it("deads if the sign-off is taken away afterwards", async () => {
+     const { ctx, sessionId } = await setup();
+     await ctx.db.patch(sessionId, {
+       synthesis: "## What we worked out\n\n- The 4°C step is the difference.",
+       synthesisApprovedAt: 100,
+       synthesisCitedAnnotationIds: [],
+     });
+     const { token } = await shareWriteUp(ctx, { sessionId });
+     expect(await publicView(ctx, { token })).not.toBeNull();
+ 
+@@ -555,21 +703,23 @@ describe("a write-up share", () => {
+       synthesisApprovedAt: 100,
+       synthesisCitedAnnotationIds: [],
+     });
+     const { token } = await shareWriteUp(ctx, { sessionId });
+ 
+     const answer = await publicView(ctx, { token });
+ 
+     // The draft is a model's rearrangement that nobody signed. Only the copy a
+     // person read, edited and put the lab's name on leaves the building.
+     expect(JSON.stringify(answer)).not.toContain(SECRET);
+-    expect(answer?.kind).toBe("synthesis");
++    expect(answer === null || "busy" in answer ? null : answer.kind).toBe(
++      "synthesis",
++    );
+   });
+ 
+   it("is not something an ordinary member may publish", async () => {
+     const { ctx, member, sessionId } = await setup();
+     await ctx.db.patch(sessionId, {
+       synthesis: "## What we worked out",
+       synthesisApprovedAt: 100,
+     });
+     ctx.auth = { userId: member };
+ 
+@@ -615,20 +765,214 @@ describe("the authed side", () => {
+     const seen = await panel(ctx, { paperId });
+ 
+     // The people whose writing could end up on the other end of a link are the
+     // ones owed the knowledge that it exists.
+     expect(seen.share).not.toBeNull();
+     expect(seen.optedIn).toBe(false);
+     expect(seen.optedInCount).toBe(1);
+   });
+ });
+ 
++describe("leaving the lab", () => {
++  it("withdraws the departing member's consent, because they can no longer reach it", async () => {
++    const { ctx, pi, member, labId, paperId } = await setup();
++    await seedAnnotation(ctx, { labId, paperId, memberId: member }, {
++      body: SECRET,
++    });
++    ctx.auth = { userId: member };
++    await optIn(ctx, { paperId, included: true });
++    ctx.auth = { userId: pi };
++    const { token } = await share(ctx, { paperId });
++    expect(JSON.stringify(await publicView(ctx, { token }))).toContain(SECRET);
++
++    ctx.auth = { userId: member };
++    await leaveLab(ctx, { labId });
++
++    // Their writing stops being published in the same act that takes away
++    // their ability to stop it.
++    expect(JSON.stringify(await publicView(ctx, { token }))).not.toContain(
++      SECRET,
++    );
++    expect(ctx.db.all("paperShareOptIns").map((row) => row.userId)).not.toContain(
++      member,
++    );
++  });
++
++  it("says nothing about a lab the member has not left", async () => {
++    const { ctx, member, labId, paperId } = await setup();
++    const otherLab = await ctx.db.insert("labs", {
++      name: "Second Lab",
++      createdBy: member,
++      memberCount: 1,
++    });
++    await ctx.db.insert("memberships", {
++      labId: otherLab,
++      userId: member,
++      role: "member",
++      joinedAt: 1,
++    });
++    const otherPaper = await ctx.db.insert("papers", {
++      labId: otherLab,
++      title: "Another paper",
++      addedBy: member,
++      ingestStatus: "ready",
++    });
++    ctx.auth = { userId: member };
++    await optIn(ctx, { paperId, included: true });
++    await optIn(ctx, { paperId: otherPaper, included: true });
++
++    await leaveLab(ctx, { labId });
++
++    const remaining = ctx.db
++      .all("paperShareOptIns")
++      .filter((row) => row.userId === member);
++    expect(remaining.map((row) => row.paperId)).toEqual([otherPaper]);
++  });
++});
++
++describe("taking a link down", () => {
++  it("lets any member close a paper link, whoever opened it", async () => {
++    const { ctx, member, paperId } = await setup();
++    // The PI mints it; an ordinary member takes it down.
++    await share(ctx, { paperId });
++
++    ctx.auth = { userId: member };
++    const seen = await panel(ctx, { paperId });
++    expect(seen.share?.canRevoke).toBe(true);
++    await expect(
++      takeDown(ctx, { shareId: seen.share!._id }),
++    ).resolves.toBeNull();
++
++    expect(await publicView(ctx, { token: seen.share!.token })).toBeNull();
++  });
++
++  it("keeps a write-up link with the people who could have published it", async () => {
++    const { ctx, member, sessionId } = await setup();
++    await ctx.db.patch(sessionId, {
++      synthesis: "## What we worked out",
++      synthesisApprovedAt: 100,
++      synthesisCitedAnnotationIds: [],
++    });
++    const created = await shareWriteUp(ctx, { sessionId });
++    expect(created.token).toBeTypeOf("string");
++
++    ctx.auth = { userId: member };
++    const seen = await sessionPanel(ctx, { sessionId });
++    await expect(
++      takeDown(ctx, { shareId: seen.share!._id }),
++    ).rejects.toThrow(ConvexError);
++  });
++});
++
++describe("the abuse guard", () => {
++  /**
++   * Read until the guard says no.
++   *
++   * Loops rather than counting to a fixed number because the ceiling is spread
++   * across shards a reader lands on at random — the exact read that trips it
++   * is not deterministic, and a test that assumed it was would be a test that
++   * failed one morning for no reason. What is being asserted is that a link
++   * being hammered stops answering, which is the promise.
++   */
++  async function hammer(ctx: FakeCtx, token: string): Promise<unknown> {
++    for (let i = 0; i < 5_000; i++) {
++      const answer = await publicView(ctx, { token });
++      if (answer !== null && "busy" in answer) return answer;
++    }
++    throw new Error("the rate guard never refused a link under 5000 reads");
++  }
++
++  it("serves a popular link and refuses a hammered one, differently from a dead one", async () => {
++    const { ctx, paperId } = await setup();
++    const { token } = await share(ctx, { paperId });
++
++    const refused = await hammer(ctx, token);
++
++    // Not `null`. A reader holding a good link must never be told it is gone —
++    // they would believe it, and there is no way back from that answer.
++    expect(refused).not.toBeNull();
++    expect(refused).toEqual({ busy: true });
++    expect(await publicView(ctx, { token: "abcdefghijkmnpqrstuvwxyz23" })).toBeNull();
++  });
++
++  it("lets the same link through again once the window rolls over", async () => {
++    vi.useFakeTimers();
++    try {
++      vi.setSystemTime(new Date("2026-08-18T12:00:00Z"));
++      const { ctx, paperId } = await setup();
++      const { token } = await share(ctx, { paperId });
++      await hammer(ctx, token);
++
++      vi.setSystemTime(new Date("2026-08-18T12:01:30Z"));
++
++      // Every shard rolls over on its own next read, so a link that was
++      // refusing answers again — and carries no memory of having refused.
++      const answers = await Promise.all(
++        Array.from({ length: 50 }, () => publicView(ctx, { token })),
++      );
++      expect(answers.some((answer) => answer !== null && !("busy" in answer))).toBe(
++        true,
++      );
++      const rows = ctx.db.all("shareRateWindows");
++      expect(rows.length).toBeLessThanOrEqual(8);
++      expect(rows.every((row) => row.windowStart >= Date.now() - 60_000)).toBe(
++        true,
++      );
++    } finally {
++      vi.useRealTimers();
++    }
++  });
++
++  it("cannot be made to write anything by somebody guessing tokens", async () => {
++    const { ctx } = await setup();
++
++    for (const guess of [
++      "abcdefghijkmnpqrstuvwxyz23",
++      "zzzzzzzzzzzzzzzzzzzzzzzzzz",
++      "not-a-token",
++    ]) {
++      expect(await publicView(ctx, { token: guess })).toBeNull();
++    }
++
++    // A row per guessed token would be a storage denial-of-service wearing the
++    // costume of a rate limiter.
++    expect(ctx.db.all("shareRateWindows")).toEqual([]);
++  });
++
++  it("forgets the count when the link is taken down", async () => {
++    const { ctx, paperId } = await setup();
++    const { token } = await share(ctx, { paperId });
++    await publicView(ctx, { token });
++    expect(ctx.db.all("shareRateWindows")).toHaveLength(1);
++
++    const live = (await panel(ctx, { paperId })).share;
++    await takeDown(ctx, { shareId: live!._id });
++
++    expect(ctx.db.all("shareRateWindows")).toEqual([]);
++  });
++
++  it("counts links, and has nothing in it that could count people", () => {
++    const fields = Object.keys(
++      (
++        wireForm(schema.tables.shareRateWindows.validator) as {
++          value: Record<string, unknown>;
++        }
++      ).value,
++    ).sort();
++
++    // The whole assertion. There is no user, no session, no address, no
++    // fingerprint and no per-read row — so the question "who read this" has no
++    // answer here, structurally, rather than by anybody's restraint.
++    expect(fields).toEqual(["count", "shard", "shareId", "windowStart"]);
++  });
++});
++
+ /* -------------------------------------------------------------------------
+  * 7. The schema's own promises
+  * ---------------------------------------------------------------------- */
+ 
+ describe("the shares table", () => {
+   it("is reachable by token and never by anything that could list it", () => {
+     const names = indexesOf(schema.tables.shares).map(
+       (index) => index.indexDescriptor,
+     );
+ 
+diff --git a/convex/shares.ts b/convex/shares.ts
+index 70ca2d8..854213b 100644
+--- a/convex/shares.ts
++++ b/convex/shares.ts
+@@ -1,14 +1,19 @@
+ import { ConvexError, v } from "convex/values";
+ import type { Doc, Id } from "./_generated/dataModel";
+ import type { MutationCtx, QueryCtx } from "./_generated/server";
+-import { internalQuery, mutation, query } from "./_generated/server";
++import {
++  internalMutation,
++  internalQuery,
++  mutation,
++  query,
++} from "./_generated/server";
+ import { requireMembership } from "./lib/authz";
+ import { recordEvent } from "./lib/ledger";
+ import { annotationType, epistemicStatus } from "./schema";
+ import { canApprove } from "./sessions";
+ import { countWithdrawn } from "./synthesis";
+ import { redactWhenAnyWithdrawn } from "../lib/citations/redaction";
+ import { isStillShared } from "../lib/citations/visibility";
+ import { looksLikeShareToken, mintShareToken } from "../lib/shares/token";
+ 
+ /**
+@@ -55,20 +60,56 @@ import { looksLikeShareToken, mintShareToken } from "../lib/shares/token";
+  * the same reason: a page anyone can open is not permission to run an
+  * unbounded query. Restated rather than imported because that module does not
+  * export it, and a cross-module import for one number would be a worse
+  * coupling than a number.
+  */
+ const MAX_ANNOTATIONS_PER_PAPER = 1_000;
+ 
+ /** A lab is a research group; every member having opted in is the ceiling. */
+ const MAX_OPT_INS_PER_PAPER = 500;
+ 
++/**
++ * The abuse guard on the one surface that does not ask who you are.
++ *
++ * A public read is not free: it walks up to `MAX_ANNOTATIONS_PER_PAPER` rows
++ * and resolves a name per author, and the PDF route streams the whole file
++ * with `no-store`, which means every request pays for it again. Neither is a
++ * problem until somebody points a loop at one link.
++ *
++ * **Keyed by the share, and by nothing else.** Not by IP, not by session, not
++ * by any fingerprint of the reader — the privacy constitution's ban on read
++ * tracking is not softened by the reader being a stranger, and a per-viewer
++ * counter is a read log whatever it is called. What this counts is how hard
++ * one *link* is being pulled, which is a fact about the link.
++ *
++ * The ceiling is deliberately generous. A paper that gets posted somewhere
++ * busy must survive being popular; the guard exists for the loop, not for the
++ * crowd. Ten reads a second, sustained, on a single link is already far past
++ * anything a lab sharing a paper produces.
++ */
++const READ_WINDOW_MS = 60_000;
++const MAX_READS_PER_WINDOW = 600;
++
++/**
++ * How many counters one link's ceiling is split across.
++ *
++ * Contention, not precision, is what decides this number. Every reader of a
++ * link has to write the counter, and a single document that hundreds of
++ * concurrent readers all write is a document Convex refuses with write
++ * conflicts — which would turn the guard meant to let a popular link survive
++ * into the thing that broke it, and 500s are what a reader would see. Spread
++ * across a few rows, each holding its share of the ceiling, the conflicts go
++ * away and the guard stays coarse in the direction it was already coarse.
++ */
++const RATE_SHARDS = 8;
++const MAX_READS_PER_SHARD = MAX_READS_PER_WINDOW / RATE_SHARDS;
++
+ /* -------------------------------------------------------------------------
+  * The public view model
+  * ---------------------------------------------------------------------- */
+ 
+ /**
+  * What stands in for a note the public page may no longer show.
+  *
+  * Carried in `body` rather than signalled only by the flag beside it, on the
+  * same reasoning as `synthesis.WITHDRAWN_ITEM_TEXT`: a client that reads only
+  * the text — a cache, a scraper, the next surface somebody builds — must get
+@@ -137,24 +178,34 @@ const publicPaperView = v.object({
+   labName: v.string(),
+   title: v.string(),
+   authors: v.optional(v.array(v.string())),
+   year: v.optional(v.number()),
+   venue: v.optional(v.string()),
+   doi: v.optional(v.string()),
+   pageCount: v.optional(v.number()),
+   /** Whether there are bytes to fetch from the token-scoped delivery route. */
+   hasPdf: v.boolean(),
+   notes: v.array(publicNote),
+-  /** The ceiling was reached; this margin is not all of it. */
+-  truncated: v.boolean(),
+ });
+ 
++/**
++ * The link is fine; the moment is not.
++ *
++ * Deliberately its own shape rather than a `null`. `null` means *dead* — no
++ * such link, or revoked — and the page turns it into a 404 that a reader is
++ * meant to believe. Answering a rate-limited read the same way would tell
++ * somebody holding a perfectly good link that it had been taken down, which is
++ * both false and unrecoverable: they would stop trying. This is a slow path,
++ * and it says so.
++ */
++const busyView = v.object({ busy: v.literal(true) });
++
+ const publicSynthesisView = v.object({
+   kind: v.literal("synthesis"),
+   labName: v.string(),
+   /** The paper the meeting was about. */
+   paperTitle: v.string(),
+   sessionTitle: v.optional(v.string()),
+   /** The approved copy: markdown a person wrote and signed off. */
+   text: v.string(),
+   approvedAt: v.number(),
+ });
+@@ -186,20 +237,68 @@ async function liveShare(
+   const share = await ctx.db
+     .query("shares")
+     .withIndex("by_token", (q) => q.eq("token", token))
+     .unique();
+   if (share === null || share.revokedAt !== undefined) {
+     return null;
+   }
+   return share;
+ }
+ 
++/**
++ * Count this read against the link's window, and say whether to serve it.
++ *
++ * Fails **open** on contention: two reads landing in the same instant may cost
++ * one increment between them, and that is the right way for this to be wrong.
++ * A guard against a loop that occasionally undercounts still stops the loop; a
++ * guard that refused a real reader because two of them arrived together would
++ * be a worse product and a worse promise.
++ *
++ * Nothing is written once the ceiling is reached, which is deliberate — under
++ * the attack this exists for, the cheapest possible response is a read and a
++ * refusal, not a write.
++ */
++async function admitRead(
++  ctx: MutationCtx,
++  shareId: Id<"shares">,
++): Promise<boolean> {
++  const now = Date.now();
++  const shard = Math.floor(Math.random() * RATE_SHARDS);
++  const window = await ctx.db
++    .query("shareRateWindows")
++    .withIndex("by_share_and_shard", (q) =>
++      q.eq("shareId", shareId).eq("shard", shard),
++    )
++    .unique();
++
++  if (window === null) {
++    await ctx.db.insert("shareRateWindows", {
++      shareId,
++      shard,
++      windowStart: now,
++      count: 1,
++    });
++    return true;
++  }
++  // Rolled over: the previous window is overwritten rather than kept, so no
++  // history of how busy this link has ever been accumulates anywhere.
++  if (now - window.windowStart >= READ_WINDOW_MS) {
++    await ctx.db.patch(window._id, { windowStart: now, count: 1 });
++    return true;
++  }
++  if (window.count >= MAX_READS_PER_SHARD) {
++    return false;
++  }
++  await ctx.db.patch(window._id, { count: window.count + 1 });
++  return true;
++}
++
+ /** The lab's name, for the one line of provenance a public page carries. */
+ async function labNameOf(ctx: QueryCtx, labId: Id<"labs">): Promise<string> {
+   return (await ctx.db.get(labId))?.name ?? "A research lab";
+ }
+ 
+ /* -------------------------------------------------------------------------
+  * The public read — a paper and its margin
+  * ---------------------------------------------------------------------- */
+ 
+ /**
+@@ -237,45 +336,74 @@ export type PublicNote = {
+   pageIndex: number;
+   createdAt: number;
+   status?: Doc<"annotations">["status"];
+   redacted: boolean;
+   replies: PublicReply[];
+ };
+ 
+ /** A top-level note and whether the consent gates left anything of it. */
+ type Thread = { root: Doc<"annotations">; redacted: boolean };
+ 
++/** A card on the public page: a surviving thread, or a promoted orphan reply. */
++type Card = {
++  root: Doc<"annotations">;
++  redacted: boolean;
++  replies: Doc<"annotations">[];
++  /** What the card sorts by — see the redaction rule about `createdAt`. */
++  createdAt: number;
++};
++
+ /**
+  * The paper's margin, as much of it as consent allows.
+  *
+  * Three gates, applied in this order, all of them on every read:
+  *
+  * 1. **The index.** Only `visibility: "lab"` rows are fetched. A private note
+  *    is not filtered out here — it is never read, so there is no code path
+  *    along which one could survive a careless edit.
+  * 2. **Withdrawal.** `isStillShared` is the same predicate the briefs, the
+  *    write-ups and the scout apply to their citations, asked here about the
+  *    note itself.
+  * 3. **The author's own consent.** Lab-visible is a decision about the lab.
+  *    Public is a second decision, and it belongs to the author.
+  *
+- * Then the one structural exception, and the only place a redaction sentence
+- * appears: a thread whose top-level note fails those gates and whose replies
+- * do not. The whole-item rule from `lib/citations/redaction.ts` is what
+- * decides it — a thread rests on its parent, and an item whose citation has
+- * stopped being shared loses its text outright rather than being dropped,
+- * which is exactly the remedy this case needs.
++ * A thread whose top-level note fails while its replies pass is the awkward
++ * case, and *why* the root failed decides what happens to it. The two reasons
++ * are not the same kind of fact and must not produce the same page.
++ *
++ * **Missing consent — the root is dropped whole, and its consented replies are
++ * promoted to cards of their own.** Nothing is left where it stood: no marker,
++ * no id, no page number, no timestamp. Its author never agreed to appear here,
++ * and a placeholder would still say *somebody in this lab wrote a note on this
++ * passage, and here is when* — which is a disclosure about a person who
++ * declined to make one. Their colleagues' replies are their colleagues' own
++ * writing and survive on their own feet.
++ *
++ * **Withdrawal — the root keeps a redaction marker.** Here the note *was*
++ * public, somebody may already have read it, and the all-or-nothing rule from
++ * `lib/citations/redaction.ts` is exactly right: the item loses its text
++ * outright rather than vanishing, because the replies underneath are answers
++ * to something and a page that silently reparented them would misattribute a
++ * conversation. The marker carries the sentence, the page it sat on, and
++ * nothing else — in particular not `createdAt`, which is taken from the first
++ * surviving reply instead. The minute a note was written is not part of its
++ * redaction sentence, and a withdrawn note's exact timestamp is a fact about
++ * the author's working day that survives nothing else about it.
++ *
++ * Consent is checked *before* withdrawal for the root, so a note that fails
++ * both fails as a consent case and leaves nothing behind. The stricter
++ * disclosure rule wins.
+  */
+ export async function paperMargin(
+   ctx: QueryCtx,
+   paper: Doc<"papers">,
+-): Promise<{ notes: PublicNote[]; truncated: boolean }> {
++): Promise<{ notes: PublicNote[] }> {
+   const shared = await ctx.db
+     .query("annotations")
+     .withIndex("by_paper_and_visibility", (q) =>
+       q.eq("paperId", paper._id).eq("visibility", "lab"),
+     )
+     .take(MAX_ANNOTATIONS_PER_PAPER);
+   const optedIn = await optedInAuthors(ctx, paper._id);
+ 
+   /** Lab-visible, still standing, and its author has said yes to strangers. */
+   const shareable = (annotation: Doc<"annotations">): boolean =>
+@@ -301,74 +429,121 @@ export async function paperMargin(
+       continue;
+     }
+     const existing = repliesByParent.get(row.parentId);
+     if (existing === undefined) {
+       repliesByParent.set(row.parentId, [row]);
+     } else {
+       existing.push(row);
+     }
+   }
+ 
+-  // Threads worth drawing: the parent may be shown, or something underneath it
+-  // may. Anything else never reaches the redaction rule below, because there
+-  // is nothing there for a redaction to protect.
++  const consented = (annotation: Doc<"annotations">): boolean =>
++    optedIn.has(annotation.memberId);
++
++  const rootsById = new Map(
++    shared.filter((row) => row.parentId === undefined).map((row) => [row._id, row]),
++  );
++
++  // Threads whose root's author consented. Only these can reach the redaction
++  // rule below, because a redaction marker is a statement about a note that was
++  // once public and a non-consenting author's note never was.
+   const threads: Thread[] = shared
+     .filter(
+       (row) =>
+         row.parentId === undefined &&
++        consented(row) &&
+         (shareable(row) || (repliesByParent.get(row._id)?.length ?? 0) > 0),
+     )
+-    .sort((a, b) => a._creationTime - b._creationTime)
+     .map((root) => ({ root, redacted: false }));
+ 
+   const { items: gated } = redactWhenAnyWithdrawn<Id<"annotations">, Thread>(
+     threads,
+     new Set(
+       threads.filter(({ root }) => shareable(root)).map(({ root }) => root._id),
+     ),
+     ({ root }) => [root._id],
+     (thread) => ({ ...thread, redacted: true }),
+   );
+ 
+-  const notes: PublicNote[] = [];
+-  for (const { root, redacted } of gated) {
++  const cards: Card[] = gated.map(({ root, redacted }) => {
+     const replies = (repliesByParent.get(root._id) ?? []).sort(
+       (a, b) => a._creationTime - b._creationTime,
+     );
++    return {
++      root,
++      redacted,
++      replies,
++      // A redacted card borrows the first surviving reply's time rather than
++      // carrying its own. Sorting by it keeps the conversation in order without
++      // the position of the card itself disclosing when the withdrawn note was
++      // written. Zero when nothing survives — which cannot happen, since a
++      // thread with no surviving replies and a withdrawn root never got here.
++      createdAt: redacted
++        ? (replies[0]?._creationTime ?? 0)
++        : root._creationTime,
++    };
++  });
++
++  // Replies orphaned by the consent rule: their thread's root belongs to
++  // somebody who never opted in, so the root is gone with nothing left in its
++  // place, and these stand on their own. They are their authors' writing and
++  // their authors said yes.
++  //
++  // Replies to a root that is *absent* from `shared` — a private parent — are
++  // deliberately not promoted. That root was never part of this margin as far
++  // as a public read is concerned, and lifting its replies out would be this
++  // function inventing a thread nobody wrote.
++  for (const row of shared) {
++    if (row.parentId === undefined || !shareable(row)) continue;
++    const root = rootsById.get(row.parentId);
++    if (root === undefined || consented(root)) continue;
++    cards.push({
++      root: row,
++      redacted: false,
++      replies: [],
++      createdAt: row._creationTime,
++    });
++  }
++
++  cards.sort((a, b) => a.createdAt - b.createdAt);
++
++  const notes: PublicNote[] = [];
++  for (const { root, redacted, replies, createdAt } of cards) {
+     notes.push({
+       _id: root._id,
+-      // What a redacted thread is left with: the sentence, and the two
+-      // identifiers needed to draw it in order. No body, no quote, no author,
+-      // no type, no status — nothing its author or the lab wrote.
++      // What a redacted thread is left with: the sentence, the page it sat on,
++      // and a borrowed timestamp. No body, no quote, no author, no type, no
++      // status — nothing its author or the lab wrote, and not the minute they
++      // wrote it in.
+       authorName: redacted ? "" : await nameOf(root.memberId),
+       type: redacted ? "note" : root.type,
+       body: redacted ? REDACTED_NOTE_TEXT : root.body,
+       quote: redacted ? "" : root.anchor.quote,
+       // Kept even when redacted: it places the card against the right sheet
+       // and says nothing anybody wrote.
+       pageIndex: root.anchor.pageIndex,
+-      createdAt: root._creationTime,
++      createdAt,
+       ...(redacted || root.status === undefined ? {} : { status: root.status }),
+       redacted,
+       replies: await Promise.all(
+         replies.map(async (reply) => ({
+           _id: reply._id,
+           authorName: await nameOf(reply.memberId),
+           type: reply.type,
+           body: reply.body,
+           createdAt: reply._creationTime,
+         })),
+       ),
+     });
+   }
+ 
+-  return { notes, truncated: shared.length >= MAX_ANNOTATIONS_PER_PAPER };
++  return { notes };
+ }
+ 
+ /**
+  * Whether the approved write-up on this session may still be published.
+  *
+  * Sign-off is the consent, so it fails in two ways: nobody has signed off, and
+  * the signature no longer covers what it was given for. The second is the same
+  * computation the authed surface runs to raise its "read this through again"
+  * banner — `countWithdrawn` over the approval snapshot — and the *outcome*
+  * here is stricter, because the remedies are different.
+@@ -388,77 +563,108 @@ export async function approvedWriteUp(
+ ): Promise<{ text: string; approvedAt: number } | null> {
+   const { synthesis, synthesisApprovedAt } = session;
+   if (synthesis === undefined || synthesisApprovedAt === undefined) {
+     return null;
+   }
+ 
+   // The snapshot and nothing else: it is the list the copy was checked against
+   // at the moment somebody signed it, which is exactly the scope of the
+   // signature. The draft's own citations are re-checked where the draft is
+   // read; this link does not carry the draft.
+-  const snapshot = session.synthesisCitedAnnotationIds ?? [];
++  //
++  // An *absent* snapshot is not an empty one, and reading it as `?? []` was a
++  // hole: a record approved before the field existed, or written by a path
++  // that never set it, would be treated as citing nothing and would therefore
++  // pass a withdrawal check it was never actually subjected to. What the field
++  // says when it is missing is "nobody knows what this was checked against",
++  // and the only safe reading of that on a public surface is no. An empty
++  // array still means what it says — a copy deliberately signed against no
++  // citations — and still publishes.
++  const snapshot = session.synthesisCitedAnnotationIds;
++  if (snapshot === undefined) {
++    return null;
++  }
+   const stillShared = new Set<Id<"annotations">>();
+   for (const annotationId of new Set(snapshot)) {
+     if (isStillShared(await ctx.db.get(annotationId), session.labId)) {
+       stillShared.add(annotationId);
+     }
+   }
+   if (countWithdrawn(snapshot, stillShared) > 0) {
+     return null;
+   }
+   return { text: synthesis, approvedAt: synthesisApprovedAt };
+ }
+ 
+ /**
+- * What is at the end of a share link — the one query in this backend with no
+- * `requireUserId` anywhere in it.
++ * What is at the end of a share link — the one function in this backend with
++ * no `requireUserId` anywhere in it.
++ *
++ * A mutation rather than a query, which is worth explaining because it looks
++ * wrong. It reads; it changes nothing anybody can see. What it writes is the
++ * rate window in `admitRead`, and a Convex query cannot write at all — so a
++ * throttle on this surface is either a mutation or it is nothing. Leaving it a
++ * query and throttling only the HTTP route would have been the worse trade: a
++ * public query is callable directly over the Convex client by anyone who reads
++ * the bundle, so the guard would have protected the door somebody knocks on
++ * and left the window open.
++ *
++ * It stays idempotent in every sense a caller cares about: same answer for the
++ * same token, nothing recorded about the reader, nothing a second call
++ * changes.
+  *
+  * It returns a view model rather than rows, and not for tidiness: a row handed
+  * to an anonymous client is a row whose every field is published, and the
+  * fields this backend keeps on an annotation include its author's id, its lab,
+  * the session it was written in and the character offsets of the passage it
+  * sits on. What a stranger gets is a name, a type, a sentence, a quote and a
+  * page number — assembled here, checked here, and never a `Doc`.
+  *
+  * `null` for every way a link can be dead: not a token at all, no such token,
+  * revoked, artifact deleted, signature gone. The caller renders the same 404
+  * for all of them, so probing distinguishes nothing.
+  */
+-export const view = query({
++export const view = mutation({
+   args: { token: v.string() },
+-  returns: v.union(v.null(), publicPaperView, publicSynthesisView),
++  returns: v.union(v.null(), busyView, publicPaperView, publicSynthesisView),
+   handler: async (ctx, args) => {
+     const share = await liveShare(ctx, args.token);
+     if (share === null) {
+       return null;
+     }
++    // After the lookup and before the work. A token that names nothing is
++    // refused by the index for free and writes nothing here, which is what
++    // keeps a prober from filling `shareRateWindows` with rows for links that
++    // do not exist.
++    if (!(await admitRead(ctx, share._id))) {
++      return { busy: true as const };
++    }
+ 
+     if (share.kind === "paper") {
+       const paper = await ctx.db.get(share.paperId);
+       // The share names a lab, and the row it points at has to still agree
+       // with it: a paper deleted under a live link, or one that somehow moved.
+       if (paper === null || paper.labId !== share.labId) {
+         return null;
+       }
+-      const { notes, truncated } = await paperMargin(ctx, paper);
++      const { notes } = await paperMargin(ctx, paper);
+       return {
+         kind: "paper" as const,
+         labName: await labNameOf(ctx, share.labId),
+         title: paper.title,
+         ...(paper.authors === undefined ? {} : { authors: paper.authors }),
+         ...(paper.year === undefined ? {} : { year: paper.year }),
+         ...(paper.venue === undefined ? {} : { venue: paper.venue }),
+         ...(paper.doi === undefined ? {} : { doi: paper.doi }),
+         ...(paper.pageCount === undefined ? {} : { pageCount: paper.pageCount }),
+         hasPdf: paper.storageId !== undefined,
+         notes,
+-        truncated,
+       };
+     }
+ 
+     const session = await ctx.db.get(share.sessionId);
+     if (session === null || session.labId !== share.labId) {
+       return null;
+     }
+     const approved = await approvedWriteUp(ctx, session);
+     if (approved === null) {
+       return null;
+@@ -477,20 +683,39 @@ export const view = query({
+ 
+ /**
+  * The PDF behind a paper share, for the HTTP route that delivers it.
+  *
+  * `internalQuery`, so the only way to reach it is through `convex/http.ts` —
+  * which hands it a token and nothing else. The authed route's
+  * `papers.pdfForDelivery` next door is untouched and still demands a bearer
+  * header; this is a second door with its own key rather than a hole in the
+  * first one.
+  */
++/**
++ * The PDF route's half of the throttle.
++ *
++ * Separate from the lookup beside it so the cheap refusals stay cheap: a token
++ * that names nothing is answered by `pdfForShare` without ever reaching this,
++ * and therefore without writing a row.
++ */
++export const admitShare = internalMutation({
++  args: { token: v.string() },
++  returns: v.boolean(),
++  handler: async (ctx, args) => {
++    const share = await liveShare(ctx, args.token);
++    if (share === null) {
++      return false;
++    }
++    return await admitRead(ctx, share._id);
++  },
++});
++
+ export const pdfForShare = internalQuery({
+   args: { token: v.string() },
+   returns: v.union(
+     v.null(),
+     v.object({ storageId: v.id("_storage"), title: v.string() }),
+   ),
+   handler: async (ctx, args) => {
+     const share = await liveShare(ctx, args.token);
+     if (share === null || share.kind !== "paper") {
+       return null;
+@@ -564,24 +789,50 @@ async function describeShare(
+   }
+   const creator = await ctx.db.get(share.createdBy);
+   return {
+     _id: share._id,
+     token: share.token,
+     createdAt: share.createdAt,
+     // The email fallback is right here and wrong on the public page: inside a
+     // lab it is how you tell two people with the same name apart, and this
+     // string never leaves a membership check. See `publicName`.
+     createdByName: creator?.name ?? creator?.email ?? "A lab member",
+-    canRevoke: share.createdBy === membership.userId || membership.role === "pi",
++    canRevoke: mayRevoke(share, membership),
+   };
+ }
+ 
++/**
++ * Who may take a link down.
++ *
++ * Asymmetric on purpose, and in the direction that favours taking things back.
++ *
++ * A **paper** share may be revoked by any current member of the lab, because
++ * any current member could have created it — the mint is unrestricted, and a
++ * control anyone can press but only one person can un-press is a control whose
++ * failure mode is a link nobody present can stop. The margin on the other end
++ * is written by the whole lab; the whole lab can close it.
++ *
++ * A **write-up** share stays with its creator or the PI, because minting one
++ * required `canApprove` in the first place. Widening revocation past the set
++ * that can publish would be the only asymmetry worth avoiding here, and it
++ * points the other way: everyone who can mint can revoke.
++ */
++function mayRevoke(
++  share: Doc<"shares">,
++  membership: Doc<"memberships">,
++): boolean {
++  if (share.kind === "paper") {
++    return true;
++  }
++  return share.createdBy === membership.userId || membership.role === "pi";
++}
++
+ /**
+  * What the paper's share panel draws: the link, if there is one, and — always
+  * — this member's own answer about their own notes.
+  *
+  * Every member sees the share, not only whoever made it. A link only its
+  * creator can see is a link the rest of the lab cannot police, and the people
+  * whose writing is at the other end of it are exactly the ones owed the
+  * knowledge that it exists.
+  */
+ export const forPaper = query({
+@@ -624,21 +875,25 @@ export const forSession = query({
+     if (session === null) {
+       throw new ConvexError("That session is no longer there.");
+     }
+     const membership = await requireMembership(ctx, session.labId);
+     return {
+       share: await describeShare(
+         ctx,
+         await liveShareForSession(ctx, session._id),
+         membership,
+       ),
+-      approved: session.synthesis !== undefined,
++      // Signed, not merely drafted. `synthesis` is the text; `synthesisApprovedAt`
++      // is somebody's signature on it, and the signature is what the public read
++      // requires — so a panel that offered a link on the strength of the text
++      // alone would offer a link to a 404.
++      approved: session.synthesisApprovedAt !== undefined,
+       canShare: canApprove(session, membership),
+     };
+   },
+ });
+ 
+ /**
+  * Give this paper a public address, and put the sharer's own notes at it.
+  *
+  * The two halves are one act on purpose. Sharing a margin you have written in
+  * and *not* consenting to your own notes appearing would produce a link to an
+@@ -708,21 +963,27 @@ export const shareSynthesis = mutation({
+     const session = await ctx.db.get(args.sessionId);
+     if (session === null) {
+       throw new ConvexError("That session is no longer there.");
+     }
+     const membership = await requireMembership(ctx, session.labId);
+     if (!canApprove(session, membership)) {
+       throw new ConvexError(
+         "Only the presenter or the lab's PI can publish the write-up.",
+       );
+     }
+-    if (session.synthesis === undefined) {
++    // The same fact `approvedWriteUp` checks, asked at the same strength. A
++    // cleared signature used to still mint a token here — and ledger it —
++    // producing a live row whose page had never been publishable.
++    if (
++      session.synthesis === undefined ||
++      session.synthesisApprovedAt === undefined
++    ) {
+       throw new ConvexError(
+         "There is no approved write-up to share yet. Sign one off first — the signature is what makes it publishable.",
+       );
+     }
+ 
+     const existing = await liveShareForSession(ctx, session._id);
+     if (existing !== null) {
+       return { token: existing.token };
+     }
+ 
+@@ -750,44 +1011,55 @@ export const shareSynthesis = mutation({
+ 
+ /**
+  * Take the link down.
+  *
+  * Stamped rather than deleted, so the lab keeps the record that the artifact
+  * was public and when it stopped being — and so the ledger's two rows have
+  * something that still exists to point at. Every read path treats a stamped
+  * row as missing, so the link is dead on the next request; there is no cache
+  * in front of it and nothing to wait for.
+  *
+- * The creator or the PI. The same shape as deleting a collection somebody else
+- * made: the person who did it, and the person who answers for the lab.
++ * Who may press it is `mayRevoke`: any member for a paper's link, the creator
++ * or the PI for a write-up's. The rule is that everyone who could have made a
++ * link can unmake it.
+  */
+ export const revoke = mutation({
+   args: { shareId: v.id("shares") },
+   returns: v.null(),
+   handler: async (ctx, args) => {
+     const share = await ctx.db.get(args.shareId);
+     if (share === null) {
+       throw new ConvexError("That link is already gone.");
+     }
+     const membership = await requireMembership(ctx, share.labId);
+-    if (share.createdBy !== membership.userId && membership.role !== "pi") {
++    if (!mayRevoke(share, membership)) {
+       throw new ConvexError(
+         "Only whoever made this link, or the lab's PI, can take it down.",
+       );
+     }
+     if (share.revokedAt !== undefined) {
+       // Already down. Not an error: two people pressing the same button about
+       // the same link both meant the same thing, and both got it.
+       return null;
+     }
+     await ctx.db.patch(share._id, { revokedAt: Date.now() });
+ 
++    // The rate window goes with it. Nothing reads it once the share is dead,
++    // and leaving it would be keeping a count of how busy something used to be
++    // after the thing itself was taken back.
++    for (const window of await ctx.db
++      .query("shareRateWindows")
++      .withIndex("by_share_and_shard", (q) => q.eq("shareId", share._id))
++      .collect()) {
++      await ctx.db.delete(window._id);
++    }
++
+     // The paper rides along even for a write-up's link, resolved through the
+     // session, so a paper's own history (`by_paper_and_at`) shows the link
+     // going down as well as going up. A record with only the first half of
+     // that pair is a record that says the artifact is still public.
+     const paperId =
+       share.kind === "paper"
+         ? share.paperId
+         : (await ctx.db.get(share.sessionId))?.paperId;
+     await recordEvent(ctx, {
+       type: "share.revoked",

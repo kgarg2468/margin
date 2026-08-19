@@ -68,12 +68,26 @@ const MAX_ANNOTATIONS_PER_PAPER = 1_000;
 const MAX_OPT_INS_PER_PAPER = 500;
 
 /**
- * The abuse guard on the one surface that does not ask who you are.
+ * The abuse guard on the PDF route, and on nothing else.
  *
- * A public read is not free: it walks up to `MAX_ANNOTATIONS_PER_PAPER` rows
- * and resolves a name per author, and the PDF route streams the whole file
- * with `no-store`, which means every request pays for it again. Neither is a
- * problem until somebody points a loop at one link.
+ * Scoped deliberately, because the first version of this was not. Throttling
+ * the *page* meant making its read a mutation, and that was wrong three ways
+ * at once: a thousand-row annotation scan moved inside a write transaction, so
+ * every stranger loading the page joined the conflict set of every member
+ * annotating that paper; a refused request still cost a full serialized
+ * transaction, which is strictly more than the query it replaced; and a
+ * mutation fired during a Server Component render runs on prefetches and
+ * abandoned renders that never reach a reader.
+ *
+ * The page needs no guard, because Convex already gives it one for free:
+ * query results are cached per function and arguments until the data under
+ * them changes, so a loop pointed at one live link is answered from cache and
+ * costs almost nothing. The *mutation* was the expense. Removing it removed
+ * the problem it was added to solve.
+ *
+ * What is genuinely expensive is this: the PDF route streams the whole file
+ * with `no-store`, so every request pays for the bytes again. That is worth a
+ * ceiling.
  *
  * **Keyed by the share, and by nothing else.** Not by IP, not by session, not
  * by any fingerprint of the reader — the privacy constitution's ban on read
@@ -83,25 +97,31 @@ const MAX_OPT_INS_PER_PAPER = 500;
  *
  * The ceiling is deliberately generous. A paper that gets posted somewhere
  * busy must survive being popular; the guard exists for the loop, not for the
- * crowd. Ten reads a second, sustained, on a single link is already far past
+ * crowd. Ten fetches a second, sustained, on a single link is already far past
  * anything a lab sharing a paper produces.
  */
 const READ_WINDOW_MS = 60_000;
 const MAX_READS_PER_WINDOW = 600;
 
 /**
- * How many counters one link's ceiling is split across.
+ * How many rows one link's counter is spread across.
  *
- * Contention, not precision, is what decides this number. Every reader of a
- * link has to write the counter, and a single document that hundreds of
- * concurrent readers all write is a document Convex refuses with write
- * conflicts — which would turn the guard meant to let a popular link survive
- * into the thing that broke it, and 500s are what a reader would see. Spread
- * across a few rows, each holding its share of the ceiling, the conflicts go
- * away and the guard stays coarse in the direction it was already coarse.
+ * Write contention is the whole reason. A single document that every concurrent
+ * fetcher patches is a document Convex refuses with write conflicts, and the
+ * guard meant to let a popular link survive would be the thing breaking it.
+ * Spreading the increments across a few rows spreads the writes.
+ *
+ * It does not make the transaction conflict-free, and it is worth being plain
+ * about why: the ceiling is checked as a *sum*, so every admission reads all of
+ * this link's rows and the read set covers what its neighbours write. Under a
+ * real flood some of these transactions will still collide. That is survivable
+ * only because the caller treats an exhausted retry as the same 429 the counter
+ * itself returns — the link is in fact being hammered, and saying so is the
+ * correct answer. Summing is not negotiable: per-row ceilings with randomly
+ * chosen rows saturate well below the stated limit, which would make the
+ * documented number a fiction.
  */
 const RATE_SHARDS = 8;
-const MAX_READS_PER_SHARD = MAX_READS_PER_WINDOW / RATE_SHARDS;
 
 /* -------------------------------------------------------------------------
  * The public view model
@@ -187,18 +207,6 @@ const publicPaperView = v.object({
   notes: v.array(publicNote),
 });
 
-/**
- * The link is fine; the moment is not.
- *
- * Deliberately its own shape rather than a `null`. `null` means *dead* — no
- * such link, or revoked — and the page turns it into a 404 that a reader is
- * meant to believe. Answering a rate-limited read the same way would tell
- * somebody holding a perfectly good link that it had been taken down, which is
- * both false and unrecoverable: they would stop trying. This is a slow path,
- * and it says so.
- */
-const busyView = v.object({ busy: v.literal(true) });
-
 const publicSynthesisView = v.object({
   kind: v.literal("synthesis"),
   labName: v.string(),
@@ -245,12 +253,19 @@ async function liveShare(
 }
 
 /**
- * Count this read against the link's window, and say whether to serve it.
+ * Count this fetch against the link's window, and say whether to serve it.
  *
- * Fails **open** on contention: two reads landing in the same instant may cost
- * one increment between them, and that is the right way for this to be wrong.
- * A guard against a loop that occasionally undercounts still stops the loop; a
- * guard that refused a real reader because two of them arrived together would
+ * Windows are aligned to wall-clock minutes rather than started wherever the
+ * first request happened to land. Per-row windows drifting independently, with
+ * the row chosen at random, meant a link's rows each held their own stale
+ * fraction of the ceiling and the effective limit came out well under the
+ * documented one. One boundary shared by every row makes the sum mean what it
+ * says.
+ *
+ * Fails **open** on contention: two fetches landing in the same instant may
+ * cost one increment between them, and that is the right way for this to be
+ * wrong. A guard against a loop that occasionally undercounts still stops the
+ * loop; a guard that refused a real reader because two arrived together would
  * be a worse product and a worse promise.
  *
  * Nothing is written once the ceiling is reached, which is deliberate — under
@@ -261,34 +276,48 @@ async function admitRead(
   ctx: MutationCtx,
   shareId: Id<"shares">,
 ): Promise<boolean> {
-  const now = Date.now();
-  const shard = Math.floor(Math.random() * RATE_SHARDS);
-  const window = await ctx.db
+  const windowStart =
+    Math.floor(Date.now() / READ_WINDOW_MS) * READ_WINDOW_MS;
+  // At most `RATE_SHARDS` rows, plus whatever a finished window left behind.
+  const rows = await ctx.db
     .query("shareRateWindows")
-    .withIndex("by_share_and_shard", (q) =>
-      q.eq("shareId", shareId).eq("shard", shard),
-    )
-    .unique();
+    .withIndex("by_share_and_shard", (q) => q.eq("shareId", shareId))
+    .collect();
 
-  if (window === null) {
+  let taken = 0;
+  for (const row of rows) {
+    if (row.windowStart === windowStart) {
+      taken += row.count;
+    }
+  }
+  if (taken >= MAX_READS_PER_WINDOW) {
+    return false;
+  }
+
+  // Rows from a window that has ended are deleted rather than rewritten. A
+  // count of a minute that is over answers no question anyone may ask, and
+  // leaving it in place would keep a timestamp at rest saying when this link
+  // was last pulled — which is the read receipt none of this is allowed to be.
+  for (const row of rows) {
+    if (row.windowStart !== windowStart) {
+      await ctx.db.delete(row._id);
+    }
+  }
+
+  const shard = Math.floor(Math.random() * RATE_SHARDS);
+  const mine = rows.find(
+    (row) => row.shard === shard && row.windowStart === windowStart,
+  );
+  if (mine === undefined) {
     await ctx.db.insert("shareRateWindows", {
       shareId,
       shard,
-      windowStart: now,
+      windowStart,
       count: 1,
     });
-    return true;
+  } else {
+    await ctx.db.patch(mine._id, { count: mine.count + 1 });
   }
-  // Rolled over: the previous window is overwritten rather than kept, so no
-  // history of how busy this link has ever been accumulates anywhere.
-  if (now - window.windowStart >= READ_WINDOW_MS) {
-    await ctx.db.patch(window._id, { windowStart: now, count: 1 });
-    return true;
-  }
-  if (window.count >= MAX_READS_PER_SHARD) {
-    return false;
-  }
-  await ctx.db.patch(window._id, { count: window.count + 1 });
   return true;
 }
 
@@ -599,18 +628,23 @@ export async function approvedWriteUp(
  * What is at the end of a share link — the one function in this backend with
  * no `requireUserId` anywhere in it.
  *
- * A mutation rather than a query, which is worth explaining because it looks
- * wrong. It reads; it changes nothing anybody can see. What it writes is the
- * rate window in `admitRead`, and a Convex query cannot write at all — so a
- * throttle on this surface is either a mutation or it is nothing. Leaving it a
- * query and throttling only the HTTP route would have been the worse trade: a
- * public query is callable directly over the Convex client by anyone who reads
- * the bundle, so the guard would have protected the door somebody knocks on
- * and left the window open.
+ * A query, and it must stay one. It was briefly a mutation so a rate counter
+ * could be written on the way through, and that was a mistake worth leaving a
+ * note about: it put this function's thousand-row annotation scan inside a
+ * write transaction, which meant every anonymous page load sat in the conflict
+ * set of every member annotating that paper — a lab writing in the margin
+ * while its own link was being read would have seen its writes fail. It also
+ * made a *refused* request cost a full serialized transaction, more than the
+ * read it was protecting, and it fired a write during Server Component render,
+ * where prefetches and abandoned renders spend it on pages nobody receives.
  *
- * It stays idempotent in every sense a caller cares about: same answer for the
- * same token, nothing recorded about the reader, nothing a second call
- * changes.
+ * The throttle it wanted is unnecessary here. Convex caches a query's result
+ * per function and arguments until the data beneath it changes, so a flood
+ * against one live link is served from cache; the expensive thing on this
+ * surface is the PDF route, and that is where the counter lives now.
+ *
+ * Nothing is written, nothing is recorded about the reader, and the same token
+ * gets the same answer every time.
  *
  * It returns a view model rather than rows, and not for tidiness: a row handed
  * to an anonymous client is a row whose every field is published, and the
@@ -623,20 +657,13 @@ export async function approvedWriteUp(
  * revoked, artifact deleted, signature gone. The caller renders the same 404
  * for all of them, so probing distinguishes nothing.
  */
-export const view = mutation({
+export const view = query({
   args: { token: v.string() },
-  returns: v.union(v.null(), busyView, publicPaperView, publicSynthesisView),
+  returns: v.union(v.null(), publicPaperView, publicSynthesisView),
   handler: async (ctx, args) => {
     const share = await liveShare(ctx, args.token);
     if (share === null) {
       return null;
-    }
-    // After the lookup and before the work. A token that names nothing is
-    // refused by the index for free and writes nothing here, which is what
-    // keeps a prober from filling `shareRateWindows` with rows for links that
-    // do not exist.
-    if (!(await admitRead(ctx, share._id))) {
-      return { busy: true as const };
     }
 
     if (share.kind === "paper") {
@@ -811,10 +838,15 @@ async function describeShare(
  * failure mode is a link nobody present can stop. The margin on the other end
  * is written by the whole lab; the whole lab can close it.
  *
- * A **write-up** share stays with its creator or the PI, because minting one
- * required `canApprove` in the first place. Widening revocation past the set
- * that can publish would be the only asymmetry worth avoiding here, and it
- * points the other way: everyone who can mint can revoke.
+ * A **write-up** share stays with **its creator, or the PI** — not with
+ * `canApprove`, which is the set that may mint. The two sets are close but not
+ * equal, and the difference is a presenter: a presenter may publish the
+ * write-up for their own session, and a presenter who did not create *this*
+ * link cannot take it down. That is deliberate. A signed-off write-up is the
+ * lab's account of itself, and unpublishing it is a decision for whoever
+ * published it or for whoever answers for the lab, rather than for anyone who
+ * happens to be running a meeting that week. The PI is always in the set, so
+ * there is no link the lab cannot close.
  */
 function mayRevoke(
   share: Doc<"shares">,
@@ -970,13 +1002,14 @@ export const shareSynthesis = mutation({
         "Only the presenter or the lab's PI can publish the write-up.",
       );
     }
-    // The same fact `approvedWriteUp` checks, asked at the same strength. A
-    // cleared signature used to still mint a token here — and ledger it —
-    // producing a live row whose page had never been publishable.
-    if (
-      session.synthesis === undefined ||
-      session.synthesisApprovedAt === undefined
-    ) {
+    // `approvedWriteUp` itself, rather than a restatement of some of what it
+    // checks. The restatement drifted immediately: it asked for text and a
+    // signature and skipped the citation snapshot, so a session whose snapshot
+    // was missing or whose citations had been withdrawn minted a token — and
+    // ledgered it — for a page the reader would be 404'd from on arrival. A
+    // link that is dead the moment it is born is worse than a refusal, because
+    // the member walks away believing they published something.
+    if ((await approvedWriteUp(ctx, session)) === null) {
       throw new ConvexError(
         "There is no approved write-up to share yet. Sign one off first — the signature is what makes it publishable.",
       );

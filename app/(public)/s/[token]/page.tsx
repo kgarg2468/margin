@@ -1,4 +1,4 @@
-import { fetchMutation } from "convex/nextjs";
+import { fetchQuery } from "convex/nextjs";
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { api } from "@/convex/_generated/api";
@@ -44,69 +44,21 @@ export default async function SharePage({
   // deleted under it, and a sign-off withdrawn since. `notFound()` for all of
   // them, so what a prober learns from a dead link is nothing.
   //
-  // A mutation, because the read is rate-limited and a Convex query cannot
-  // write the counter — see `shares.view`. Nothing about the reader is
-  // recorded; what it writes is a per-link window.
-  const shared = await read(token);
+  // A plain query, with nothing caught around it. It was briefly a mutation so
+  // a rate counter could be written here, and a render is the wrong place for
+  // a write: Next may restart, abandon or prefetch this render, and each of
+  // those would have spent the counter on a page nobody received. Convex
+  // caches this query's answer until the data under it changes, which is the
+  // guard the page actually needed. A genuine failure now surfaces as one
+  // rather than being dressed up as "come back later" forever.
+  const shared = await fetchQuery(api.shares.view, { token });
   if (shared === null) {
     notFound();
-  }
-  if ("busy" in shared) {
-    return <Busy />;
   }
 
   return shared.kind === "paper" ? (
     <SharedPaper token={token} shared={shared} />
   ) : (
     <SharedSynthesis shared={shared} />
-  );
-}
-
-/**
- * The read, with the one failure it is worth absorbing.
- *
- * The rate window is a document every reader of a link writes, and under
- * enough simultaneous readers Convex answers a contested write with a
- * conflict. That is the guard's own load showing up as an error, and serving a
- * 500 to somebody whose link is perfectly good would be the guard breaking the
- * thing it exists to protect. Retried once, because most conflicts are a
- * collision rather than a queue; then treated as what it actually is —
- * this link is busy — rather than as a broken page.
- *
- * Deliberately not failing open. Failing open would mean serving the page
- * without counting the read, and the moment worth counting is exactly this
- * one.
- */
-async function read(token: string) {
-  try {
-    return await fetchMutation(api.shares.view, { token });
-  } catch {
-    try {
-      return await fetchMutation(api.shares.view, { token });
-    } catch {
-      return { busy: true as const };
-    }
-  }
-}
-
-/**
- * The link is good and the moment is not.
- *
- * Deliberately not a 404. A reader whose link is fine should not be told it
- * has been taken down — they would believe it and stop, and there would be no
- * way back from a wrong answer given once. This says what is true: come back
- * in a moment.
- */
-function Busy() {
-  return (
-    <main className="mx-auto flex min-h-dvh max-w-prose flex-col justify-center gap-3 px-6">
-      <h1 className="font-serif text-xl text-ink-strong">
-        This link is busy right now.
-      </h1>
-      <p className="font-serif text-base leading-relaxed text-ink-muted">
-        A lot of people are reading it at once. Give it a minute and reload —
-        the link itself is fine.
-      </p>
-    </main>
   );
 }

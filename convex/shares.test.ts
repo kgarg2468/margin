@@ -10,6 +10,7 @@ import {
 } from "./delegations.fixtures";
 import {
   REDACTED_NOTE_TEXT,
+  admitShare,
   forPaper,
   forSession,
   pdfForShare,
@@ -19,7 +20,10 @@ import {
   shareSynthesis,
   view,
 } from "./shares";
-import { leaveLab as leaveLabMutation } from "./labs";
+import {
+  continueOptInSweep,
+  leaveLab as leaveLabMutation,
+} from "./labs";
 import schema from "./schema";
 
 vi.mock("@convex-dev/auth/server", async (importOriginal) => ({
@@ -67,7 +71,6 @@ function call<A, R>(registered: unknown): Handler<A, R> {
 const publicView = call<
   { token: string },
   | null
-  | { busy: true }
   | {
       kind: "paper";
       labName: string;
@@ -115,10 +118,14 @@ const sessionPanel = call<
   { share: { _id: Id<"shares">; token: string } | null; approved: boolean; canShare: boolean }
 >(forSession);
 const leaveLab = call<{ labId: Id<"labs"> }, null>(leaveLabMutation);
+const continueSweep = call<{ userId: Id<"users">; labId: Id<"labs"> }, null>(
+  continueOptInSweep,
+);
 const pdf = call<
   { token: string },
   { storageId: Id<"_storage">; title: string } | null
 >(pdfForShare);
+const admitPdf = call<{ token: string }, boolean>(admitShare);
 
 /** A lab, a paper, a session, and the PI signed in. */
 async function setup() {
@@ -148,11 +155,9 @@ function wireForm(validator: unknown): unknown {
 }
 
 function asPaper(answer: Awaited<ReturnType<typeof publicView>>) {
-  if (answer === null || "busy" in answer || answer.kind !== "paper") {
+  if (answer === null || answer.kind !== "paper") {
     throw new Error(
-      `expected a live paper share, got ${
-        answer === null ? "null" : "busy" in answer ? "busy" : answer.kind
-      }`,
+      `expected a live paper share, got ${answer === null ? "null" : answer.kind}`,
     );
   }
   return answer;
@@ -611,6 +616,46 @@ describe("a write-up share", () => {
     );
   });
 
+  it("will not mint a link the reader would be 404'd from on arrival", async () => {
+    const { ctx, sessionId } = await setup();
+    // Signed off, but with no record of what the copy was checked against —
+    // the shape `approvedWriteUp` deads on read.
+    await ctx.db.patch(sessionId, {
+      synthesis: "## What we worked out",
+      synthesisApprovedAt: 100,
+      synthesisCitedAnnotationIds: undefined,
+    });
+
+    // The mint used to ask a weaker question than the read: text plus a
+    // signature, skipping the snapshot. It handed back a token, ledgered it,
+    // and told the member they had published — for a page that had never once
+    // been readable.
+    await expect(shareWriteUp(ctx, { sessionId })).rejects.toThrow(ConvexError);
+    expect(ctx.db.all("shares")).toHaveLength(0);
+    expect(ctx.db.all("events").map((event) => event.type)).not.toContain(
+      "share.created",
+    );
+  });
+
+  it("will not mint while a note the copy cites has been withdrawn", async () => {
+    const { ctx, pi, labId, paperId, sessionId } = await setup();
+    const citedId = await seedAnnotation(
+      ctx,
+      { labId, paperId, memberId: pi },
+      { body: SECRET },
+    );
+    await ctx.db.patch(sessionId, {
+      synthesis: "## What we worked out",
+      synthesisApprovedAt: 100,
+      synthesisCitedAnnotationIds: [citedId],
+    });
+    await ctx.db.patch(citedId, { visibility: "private" });
+
+    // Same predicate as the read, so mint and read cannot drift apart again.
+    await expect(shareWriteUp(ctx, { sessionId })).rejects.toThrow(ConvexError);
+    expect(ctx.db.all("shares")).toHaveLength(0);
+  });
+
   it("does not offer the control while only a draft exists", async () => {
     const { ctx, sessionId } = await setup();
     await ctx.db.patch(sessionId, { synthesis: "## What we worked out" });
@@ -797,6 +842,53 @@ describe("leaving the lab", () => {
     );
   });
 
+  it("cannot be blocked by a member who opted in to too much", async () => {
+    const { ctx, member, labId } = await setup();
+    // Past one batch on purpose. An unbounded sweep would make this member's
+    // own removal a transaction too large to commit — and removal is the one
+    // operation that must never be refusable, since the reason for it may be
+    // that they should not be in this lab another minute.
+    for (let i = 0; i < 300; i++) {
+      const paperId = await ctx.db.insert("papers", {
+        labId,
+        title: `Paper ${i}`,
+        addedBy: member,
+        ingestStatus: "ready",
+      });
+      await ctx.db.insert("paperShareOptIns", {
+        labId,
+        paperId,
+        userId: member,
+        optedInAt: 1,
+      });
+    }
+
+    ctx.auth = { userId: member };
+    await leaveLab(ctx, { labId });
+
+    // The departure itself completed — the membership is gone regardless of
+    // how much consent is left to sweep.
+    expect(
+      ctx.db.all("memberships").filter((row) => row.userId === member),
+    ).toEqual([]);
+
+    const mine = () =>
+      ctx.db.all("paperShareOptIns").filter((row) => row.userId === member);
+    expect(mine()).toHaveLength(300 - 256);
+
+    // The rest is handed to a scheduled continuation rather than dropped.
+    const followUp = ctx.scheduled.filter((job) =>
+      job.name.includes("continueOptInSweep"),
+    );
+    expect(followUp).toHaveLength(1);
+
+    await continueSweep(
+      ctx,
+      followUp[0]!.args as { userId: Id<"users">; labId: Id<"labs"> },
+    );
+    expect(mine()).toEqual([]);
+  });
+
   it("says nothing about a lab the member has not left", async () => {
     const { ctx, member, labId, paperId } = await setup();
     const otherLab = await ctx.db.insert("labs", {
@@ -865,33 +957,67 @@ describe("taking a link down", () => {
 
 describe("the abuse guard", () => {
   /**
-   * Read until the guard says no.
+   * The guard lives on the PDF route, and only there.
    *
-   * Loops rather than counting to a fixed number because the ceiling is spread
-   * across shards a reader lands on at random — the exact read that trips it
-   * is not deterministic, and a test that assumed it was would be a test that
-   * failed one morning for no reason. What is being asserted is that a link
-   * being hammered stops answering, which is the promise.
+   * `shares.view` is a plain query and is deliberately unthrottled: making it
+   * a mutation so it could write a counter put a thousand-row annotation scan
+   * inside a write transaction, where every anonymous read collided with the
+   * lab's own writing, and spent a transaction on renders Next never
+   * delivered. Convex caches the query instead. What actually costs money is
+   * streaming the file with `no-store` on every request, and that is what is
+   * counted here.
    */
-  async function hammer(ctx: FakeCtx, token: string): Promise<unknown> {
-    for (let i = 0; i < 5_000; i++) {
-      const answer = await publicView(ctx, { token });
-      if (answer !== null && "busy" in answer) return answer;
-    }
-    throw new Error("the rate guard never refused a link under 5000 reads");
+  async function fetchPdf(ctx: FakeCtx, token: string): Promise<boolean> {
+    return await admitPdf(ctx, { token });
   }
 
-  it("serves a popular link and refuses a hammered one, differently from a dead one", async () => {
+  it("serves a popular link and refuses a hammered one", async () => {
     const { ctx, paperId } = await setup();
     const { token } = await share(ctx, { paperId });
 
-    const refused = await hammer(ctx, token);
+    // Well inside the ceiling: a link doing brisk traffic is not an attack.
+    for (let i = 0; i < 100; i++) {
+      expect(await fetchPdf(ctx, token)).toBe(true);
+    }
 
-    // Not `null`. A reader holding a good link must never be told it is gone —
-    // they would believe it, and there is no way back from that answer.
-    expect(refused).not.toBeNull();
-    expect(refused).toEqual({ busy: true });
-    expect(await publicView(ctx, { token: "abcdefghijkmnpqrstuvwxyz23" })).toBeNull();
+    let refused = false;
+    for (let i = 0; i < 5_000 && !refused; i++) {
+      refused = !(await fetchPdf(ctx, token));
+    }
+    expect(refused, "the guard never refused a link under 5000 fetches").toBe(
+      true,
+    );
+
+    // The page is untouched by any of it. A reader holding a good link must
+    // still get the margin — the throttle guards bytes, not the story.
+    const still = await publicView(ctx, { token });
+    expect(still).not.toBeNull();
+    expect((still as { kind: string }).kind).toBe("paper");
+  });
+
+  it("holds the ceiling it documents, rather than a fraction of it", async () => {
+    vi.useFakeTimers();
+    try {
+      // Mid-minute on purpose: windows are aligned to the clock, not to
+      // whenever the first fetch happened to land, so starting here must not
+      // shorten the window or shrink what it admits.
+      vi.setSystemTime(new Date("2026-08-18T12:00:37Z"));
+      const { ctx, paperId } = await setup();
+      const { token } = await share(ctx, { paperId });
+
+      let served = 0;
+      for (let i = 0; i < 5_000; i++) {
+        if (!(await fetchPdf(ctx, token))) break;
+        served++;
+      }
+
+      // The bug this pins: per-row windows drifting apart, with the row picked
+      // at random, let the link saturate well below the stated limit. Summing
+      // across rows against one shared boundary makes 600 mean 600.
+      expect(served).toBe(600);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("lets the same link through again once the window rolls over", async () => {
@@ -900,23 +1026,23 @@ describe("the abuse guard", () => {
       vi.setSystemTime(new Date("2026-08-18T12:00:00Z"));
       const { ctx, paperId } = await setup();
       const { token } = await share(ctx, { paperId });
-      await hammer(ctx, token);
+      while (await fetchPdf(ctx, token)) {
+        /* up to the ceiling */
+      }
 
       vi.setSystemTime(new Date("2026-08-18T12:01:30Z"));
+      expect(await fetchPdf(ctx, token)).toBe(true);
 
-      // Every shard rolls over on its own next read, so a link that was
-      // refusing answers again — and carries no memory of having refused.
-      const answers = await Promise.all(
-        Array.from({ length: 50 }, () => publicView(ctx, { token })),
-      );
-      expect(answers.some((answer) => answer !== null && !("busy" in answer))).toBe(
-        true,
-      );
+      // And it kept no memory of the minute that refused. Rows from a window
+      // that has ended are deleted rather than rewritten, so nothing at rest
+      // says when this link was last pulled.
       const rows = ctx.db.all("shareRateWindows");
       expect(rows.length).toBeLessThanOrEqual(8);
-      expect(rows.every((row) => row.windowStart >= Date.now() - 60_000)).toBe(
-        true,
-      );
+      expect(
+        rows.every(
+          (row) => row.windowStart === Date.parse("2026-08-18T12:01:00Z"),
+        ),
+      ).toBe(true);
     } finally {
       vi.useRealTimers();
     }
@@ -931,6 +1057,7 @@ describe("the abuse guard", () => {
       "not-a-token",
     ]) {
       expect(await publicView(ctx, { token: guess })).toBeNull();
+      expect(await fetchPdf(ctx, guess)).toBe(false);
     }
 
     // A row per guessed token would be a storage denial-of-service wearing the
@@ -938,10 +1065,24 @@ describe("the abuse guard", () => {
     expect(ctx.db.all("shareRateWindows")).toEqual([]);
   });
 
+  it("writes nothing at all when the page is read", async () => {
+    const { ctx, paperId } = await setup();
+    const { token } = await share(ctx, { paperId });
+
+    for (let i = 0; i < 20; i++) {
+      expect(await publicView(ctx, { token })).not.toBeNull();
+    }
+
+    // The whole point of reverting the mutation. A public page read touches
+    // no document, so it cannot conflict with a member annotating the paper
+    // and cannot be spent by a render nobody receives.
+    expect(ctx.db.all("shareRateWindows")).toEqual([]);
+  });
+
   it("forgets the count when the link is taken down", async () => {
     const { ctx, paperId } = await setup();
     const { token } = await share(ctx, { paperId });
-    await publicView(ctx, { token });
+    await fetchPdf(ctx, token);
     expect(ctx.db.all("shareRateWindows")).toHaveLength(1);
 
     const live = (await panel(ctx, { paperId })).share;
