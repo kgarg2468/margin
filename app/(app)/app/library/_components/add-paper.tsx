@@ -28,6 +28,7 @@ import { ReferenceImport } from "./reference-import";
 import type { PanelHold } from "./upload-flow";
 import {
   cancelOffer,
+  destinationAfterUpload,
   isCancellation,
   lookupHold,
   percentSent,
@@ -275,6 +276,7 @@ function DoiTab({
 }) {
   const createFromDoi = useAction(api.papers.createFromDoi);
   const textLayer = useTextLayer();
+  const router = useRouter();
   const [doi, setDoi] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -359,8 +361,26 @@ function DoiTab({
             // to be told that, or go and find the button: the reader is right
             // here, so do it now and say so. The promise on this panel is that
             // an open-access paper "arrives ready to read".
+            //
+            // And when it does read, go there. Both halves of the promise have
+            // now been kept — there is a file and there is a text layer — so the
+            // sentence below has nothing left to report and the outcome panel's
+            // "Read it now" is a button whose only purpose is to be pressed. The
+            // two cases it does *not* cover keep exactly what they had: a lookup
+            // that found no open-access copy, and an extraction that failed, both
+            // of which have a real gap for the record page to explain.
+            //
+            // Guarded on this lookup still being the live one. `read` resolves
+            // long after the submit does — a whole PDF is fetched and run
+            // through pdf.js in between — and by then the member may have pressed
+            // "Stop waiting" or pasted a second DOI. Both bump `attempt`, and
+            // neither is somebody asking to be taken to this paper.
             if (!outcome.alreadyInLibrary && outcome.hasPdf) {
-              void textLayer.read(outcome.paperId);
+              void textLayer.read(outcome.paperId).then((extracted) => {
+                if (extracted && attempt.current === mine) {
+                  router.push(`/app/library/${outcome.paperId}/read`);
+                }
+              });
             }
           } catch (caught) {
             if (attempt.current !== mine) {
@@ -690,7 +710,10 @@ function UploadTab({
       if (attempt.current !== mine) {
         return;
       }
-      router.push(`/app/library/${paperId}`);
+      // Into the reader rather than onto the record — see
+      // `destinationAfterUpload`, which owns the one case that still stops at
+      // the record and is testable where a rule inside JSX would not be.
+      router.push(destinationAfterUpload(paperId, extraction.pages));
     } catch (caught) {
       // The blob goes first, above the staleness guard. An abandoned run whose
       // `createFromUpload` rejects later still owns bytes nothing points at,

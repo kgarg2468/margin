@@ -204,3 +204,31 @@ export function stageAnnouncement(stage: UploadStage): string {
       return stage satisfies never;
   }
 }
+
+/**
+ * Where an upload lands once it is saved.
+ *
+ * The reader, not the record — because by this point the text layer has already
+ * been read, in this browser, before a byte was sent. The record page's whole
+ * job is to explain what is missing and offer the control that fixes it, and
+ * for a PDF that has just been read there is nothing missing; stopping there
+ * asked the member to confirm an outcome they had watched happen and then press
+ * one more link to get where they were going.
+ *
+ * The exception is the file that came back with no text in it at all. That is a
+ * scan, `papers.createFromUpload` stores it `pending` rather than `ready` on the
+ * same test, and nothing can anchor to it — so its one useful destination is
+ * still the record, where the panel says why and offers a replacement. The
+ * server draws this line in `ingestStateFor`; the rule is restated here rather
+ * than imported because a client bundle has no business importing a Convex
+ * module, and the two agreeing is what this function's test is for.
+ */
+export function destinationAfterUpload(
+  paperId: string,
+  pages: readonly string[],
+): string {
+  const readable = pages.some((page) => page.trim().length > 0);
+  return readable
+    ? `/app/library/${paperId}/read`
+    : `/app/library/${paperId}`;
+}

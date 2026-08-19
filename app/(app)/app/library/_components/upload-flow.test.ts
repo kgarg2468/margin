@@ -3,6 +3,7 @@ import type { PanelHold, UploadStage } from "./upload-flow";
 import {
   bytesProgress,
   cancelOffer,
+  destinationAfterUpload,
   formatBytes,
   importHold,
   isCancellation,
@@ -226,5 +227,50 @@ describe("stageAnnouncement", () => {
     );
     expect(stageAnnouncement({ kind: "filing" })).toBe("Adding the paper.");
     expect(stageAnnouncement({ kind: "read" })).toBe("");
+  });
+});
+
+/**
+ * Where a saved upload goes.
+ *
+ * The rule is one line and the reason it is a function is the whole point: this
+ * used to be a `router.push` inside a submit handler, which is a rule with no
+ * test in a harness with no DOM. It also has to keep agreeing with the server —
+ * `papers.ingestStateFor` decides `ready` versus `pending` on exactly the same
+ * question — and two copies of one rule is precisely the shape that drifts.
+ */
+describe("where a saved upload lands", () => {
+  it("opens the reader for a PDF that has text in it", () => {
+    expect(
+      destinationAfterUpload("p1", ["Published research findings", "are"]),
+    ).toBe("/app/library/p1/read");
+  });
+
+  it("stops at the record for a scan, which has nothing to anchor to", () => {
+    // Every page extracted, every one of them empty. The server stores this
+    // `pending`, the margins cannot open, and the record is where the panel
+    // explains why and offers a replacement.
+    expect(destinationAfterUpload("p1", ["", "", ""])).toBe("/app/library/p1");
+  });
+
+  it("reads whitespace as empty, the way the server does", () => {
+    // `ingestStateFor` tests `page.trim().length > 0`. A page of spaces is a
+    // page with no text on it, and a reader opened on one is a reader with
+    // nothing to select.
+    expect(destinationAfterUpload("p1", ["   ", "\n\t "])).toBe(
+      "/app/library/p1",
+    );
+  });
+
+  it("opens the reader when only some pages came out empty", () => {
+    // Common and fine: a figure page, a blank verso. One page of text is
+    // enough for an annotation to anchor to.
+    expect(destinationAfterUpload("p1", ["", "real text", ""])).toBe(
+      "/app/library/p1/read",
+    );
+  });
+
+  it("stops at the record for a PDF with no pages at all", () => {
+    expect(destinationAfterUpload("p1", [])).toBe("/app/library/p1");
   });
 });

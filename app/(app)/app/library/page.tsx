@@ -33,9 +33,9 @@ import { ShortcutHint } from "./_components/shortcuts";
 export default function LibraryPage({
   searchParams,
 }: {
-  searchParams: Promise<{ collection?: string }>;
+  searchParams: Promise<{ collection?: string; add?: string }>;
 }) {
-  const { collection } = use(searchParams);
+  const { collection, add } = use(searchParams);
   const { labs, currentLab } = useLabs();
 
   if (labs === undefined) {
@@ -73,6 +73,14 @@ export default function LibraryPage({
           ? null
           : collection
       }
+      // `?add=1` is how a door elsewhere asks for the panel — today the sign-up
+      // that has just provisioned this library. A URL rather than something
+      // stored, because "open the form" is a fact about this arrival and not
+      // about the library: it must not survive a reload, must not follow the
+      // reader to their second visit, and must be as easy to drop as pressing
+      // Done. A flag on a row would be all three of those things wrong, and
+      // would need clearing by a write nobody would remember to make.
+      startAdding={add === "1"}
     />
   );
 }
@@ -80,9 +88,11 @@ export default function LibraryPage({
 function Library({
   lab,
   collectionId,
+  startAdding,
 }: {
   lab: LabSummary;
   collectionId: string | null;
+  startAdding: boolean;
 }) {
   const papers = useQuery(api.papers.listPapers, { labId: lab._id });
   const collections = useQuery(api.collections.listCollections, {
@@ -95,7 +105,7 @@ function Library({
     collectionId,
   });
   const [text, setText] = useState("");
-  const [adding, setAdding] = useState(false);
+  const [adding, setAdding] = useState(startAdding);
   /**
    * Whether the add panel has work in flight, reported up by the panel itself.
    *
