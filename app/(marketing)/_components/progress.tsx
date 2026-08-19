@@ -1,6 +1,7 @@
 "use client";
 
-import { motion, useReducedMotion, useScroll, useSpring } from "motion/react";
+import { motion, useScroll, useSpring } from "motion/react";
+import { useSettledReducedMotion } from "./reduced-motion";
 
 /**
  * A pen line across the top of the viewport that draws at reading pace —
@@ -8,7 +9,7 @@ import { motion, useReducedMotion, useScroll, useSpring } from "motion/react";
  * scrollbar still exists.
  */
 export function ReadingProgress() {
-  const reduce = useReducedMotion();
+  const reduce = useSettledReducedMotion();
   const { scrollYProgress } = useScroll();
   const scaleX = useSpring(scrollYProgress, { stiffness: 140, damping: 28 });
 
