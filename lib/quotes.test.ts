@@ -109,6 +109,13 @@ describe("cleanQuote", () => {
       "a three- to five-year follow-up",
     );
   });
+  it("spares a suspended compound the author set in capitals", () => {
+    // The widened letter classes reach all-caps headings, so the guard must
+    // recognize its four words there too.
+    expect(cleanQuote("PRE- AND POST-TEST SCORES", 100)).toBe(
+      "PRE- AND POST-TEST SCORES",
+    );
+  });
   it("leaves a dash between words alone", () => {
     expect(cleanQuote("the margin — a place to think — is blank", 100)).toBe(
       "the margin — a place to think — is blank",

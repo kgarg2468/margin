@@ -54,8 +54,13 @@ const SOFT_HYPHEN = /\u00ad\s*/g;
  * The tail is a lookahead rather than a capture so that the letter ending one
  * break can begin the next: consuming it left "x- y- z" repaired to "x-y- z",
  * one break short of done.
+ *
+ * The exemption is case-blind for the same reason the letter classes are: a
+ * heading suspends compounds too, and "PRE- AND POST-TEST" is the author's
+ * whitespace as surely as its lowercase twin.
  */
-const BROKEN_WORD = /(\p{L}[-\u2010\u2011])\s(?!(?:and|or|nor|to)\b)(?=\p{L})/gu;
+const BROKEN_WORD =
+  /(\p{L}[-\u2010\u2011])\s(?!(?:and|or|nor|to)\b)(?=\p{L})/giu;
 
 /**
  * The repair that is only about how the text layer broke the words: soft
