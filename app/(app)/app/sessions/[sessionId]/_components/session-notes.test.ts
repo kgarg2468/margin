@@ -78,6 +78,17 @@ describe("groupSessionNotes", () => {
     expect(notes.passages).toHaveLength(2);
   });
 
+  it("keeps two findings that differ only by their citation apart", () => {
+    // The marker is furniture on a card and evidence in a key: these are two
+    // different results at two different offsets, and merging them would put
+    // one of the two texts on a card standing for both.
+    const notes = groupSessionNotes(
+      [shared("a", "Result [12]"), shared("b", "Result [13]")],
+      SESSION,
+    );
+    expect(notes.passages).toHaveLength(2);
+  });
+
   it("keeps different sentences on different cards", () => {
     const notes = groupSessionNotes(
       [shared("a", "the assumption holds"), shared("b", "the result holds")],

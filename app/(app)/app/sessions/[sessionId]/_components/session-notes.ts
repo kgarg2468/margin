@@ -1,5 +1,5 @@
 import type { Id } from "@/convex/_generated/dataModel";
-import { healQuote } from "@/lib/quotes";
+import { keyQuote } from "@/lib/quotes";
 import type { AnnotationType } from "../../../library/[paperId]/read/_components/ontology";
 import { ANNOTATION_TYPES } from "../../../library/[paperId]/read/_components/ontology";
 import type { AnnotationView } from "../../../library/[paperId]/read/_components/types";
@@ -54,20 +54,31 @@ export type SessionNotes = {
  * than by its numbers — the identity rule `lib/digest/engine.ts` also uses when
  * it decides whether two annotations collided.
  *
- * Keyed on the *healed* text, because the board shows the healed text: two
- * copies of one sentence that differ only in where a text layer put a soft
- * hyphen would otherwise open two cards that read identically, which is a
- * duplicate the room can see and nobody can explain. `healQuote` is the same
- * pass `PassageCard` renders through, so what groups and what is drawn cannot
- * disagree.
+ * Keyed through `keyQuote`, not `healQuote`, and the difference is the whole
+ * point: identity and display want different things from a quote.
  *
- * This is where the rule parts company with `engine.ts`, which normalizes
- * whitespace and case only. Nothing forces them to agree — one groups cards on
- * a board, the other decides whether two people collided — but the divergence
- * is worth knowing about if that one ever grows a hyphenation case too.
+ * Both mend how the text layer broke the words, so two copies of one sentence
+ * that differ only in where a soft hyphen fell meet on one card instead of
+ * opening two that read identically — a duplicate the room can see and nobody
+ * can explain.
+ *
+ * They part company at the citation markers. `healQuote` drops `[12]` because
+ * beside a passage it is furniture. A key must keep it, because there it is
+ * evidence: "Result [12]" and "Result [13]" are two different findings at two
+ * different offsets, and stripping both would collapse them into one group
+ * whose card then shows whichever of the two happened to arrive first — the
+ * board quietly asserting the room marked one thing when it marked two.
+ *
+ * The page index leads the key for the same reason: one sentence repeated on
+ * two pages is two passages, and only the number says so.
+ *
+ * All of which parts company with `engine.ts`, which normalizes whitespace and
+ * case only. Nothing forces them to agree — one groups cards on a board, the
+ * other decides whether two people collided — but the divergence is worth
+ * knowing about if that one ever grows a hyphenation case too.
  */
 function passageKey(annotation: AnnotationView): string {
-  const quote = healQuote(annotation.anchor.quote).toLowerCase();
+  const quote = keyQuote(annotation.anchor.quote).toLowerCase();
   return `${annotation.anchor.pageIndex}:${quote}`;
 }
 

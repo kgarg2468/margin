@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cleanQuote } from "./quotes";
+import { cleanQuote, healQuote, keyQuote } from "./quotes";
 
 describe("cleanQuote", () => {
   it("collapses whitespace", () => {
@@ -141,6 +141,25 @@ describe("cleanQuote", () => {
     // "Dr." at position 3 is not a resting place worth cutting to.
     expect(cleanQuote("Dr. Vaswani proposed attention mechanisms", 30)).toBe(
       "Dr. Vaswani proposed…",
+    );
+  });
+});
+
+describe("keyQuote", () => {
+  it("keeps the citation marker healQuote drops", () => {
+    // Furniture on a card, evidence in a key.
+    expect(healQuote("Result [12] held")).toBe("Result held");
+    expect(keyQuote("Result [12] held")).toBe("Result [12] held");
+  });
+  it("tells two findings on one page apart", () => {
+    expect(keyQuote("Result [12]")).not.toBe(keyQuote("Result [13]"));
+  });
+  it("still mends the breaks, so one passage meets itself", () => {
+    expect(keyQuote("the assump\u00ad tion holds [12]")).toBe(
+      "the assumption holds [12]",
+    );
+    expect(keyQuote("the  assumption\nholds [12]")).toBe(
+      "the assumption holds [12]",
     );
   });
 });

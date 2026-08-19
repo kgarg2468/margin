@@ -58,19 +58,44 @@ const SOFT_HYPHEN = /\u00ad\s*/g;
 const BROKEN_WORD = /(\p{L}[-\u2010\u2011])\s(?!(?:and|or|nor|to)\b)(?=\p{L})/gu;
 
 /**
- * A quote with the extraction plumbing taken off, at whatever length it is.
- *
- * `cleanQuote` is this plus a cap. The session board also keys its passage
- * groups by it, so two notes on one sentence land on one card however the text
- * layer happened to break it.
+ * The repair that is only about how the text layer broke the words: soft
+ * hyphens, whitespace, and the space inside a split word. Nothing in here is a
+ * judgement about what belongs on a card, which is why the display pass and
+ * the identity pass below can share it.
  */
-export function healQuote(raw: string): string {
-  return raw
-    .replace(SOFT_HYPHEN, "")
-    .replace(DEBRIS, "")
+function mendBreaks(text: string): string {
+  return text
     .replace(/\s+/g, " ")
     .trim()
     .replace(BROKEN_WORD, "$1");
+}
+
+/**
+ * A quote with the extraction plumbing taken off, for display, at whatever
+ * length it is. `cleanQuote` is this plus a cap.
+ */
+export function healQuote(raw: string): string {
+  return mendBreaks(raw.replace(SOFT_HYPHEN, "").replace(DEBRIS, ""));
+}
+
+/**
+ * The same quote as an identity: what decides whether two anchors are the same
+ * passage.
+ *
+ * Identity and display want different things from a quote, and the citation
+ * markers are where they part company. On a card `[12]` is furniture — it
+ * means something in the bibliography and nothing beside a passage — so
+ * `healQuote` drops it. As identity it is *evidence*: "Result [12]" and
+ * "Result [13]" are two different findings, and a key that strips both
+ * collapses them into one group whose card then shows whichever anchor
+ * happened to arrive first.
+ *
+ * So this mends the breaks and keeps the markers. Two members who selected one
+ * sentence still meet however the text layer hyphenated it; two members who
+ * selected different citations stay apart.
+ */
+export function keyQuote(raw: string): string {
+  return mendBreaks(raw.replace(SOFT_HYPHEN, ""));
 }
 
 export function cleanQuote(raw: string, max: number): string {
