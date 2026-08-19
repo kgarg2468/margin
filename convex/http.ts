@@ -3,6 +3,7 @@ import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { httpAction } from "./_generated/server";
 import { auth } from "./auth";
+import { decideSharedPdf } from "../lib/shares/pdf-order";
 
 /**
  * Convex Auth's HTTP endpoints (token exchange, OAuth callbacks, sign-out)
@@ -88,6 +89,21 @@ function refuse(status: number, message: string): Response {
     status,
     headers: { ...CORS_HEADERS, "Content-Type": "text/plain; charset=utf-8" },
   });
+}
+
+/**
+ * Is this the counter losing a race, or something actually broken?
+ *
+ * Convex signals write contention by name rather than by type, so the name is
+ * what there is to match on. Matching narrowly is the point: the previous
+ * version caught everything and called it "busy", which would have hidden a
+ * genuine backend fault behind a message telling the reader to come back —
+ * and they would have, forever.
+ */
+function isWriteConflict(error: unknown): boolean {
+  const text =
+    error instanceof Error ? `${error.name} ${error.message}` : String(error);
+  return /OptimisticConcurrencyControlFailure|write conflict/i.test(text);
 }
 
 /** The same, minus the credential header the share routes do not accept. */
@@ -227,53 +243,49 @@ http.route({
   method: "GET",
   handler: httpAction(async (ctx, request) => {
     const token = new URL(request.url).searchParams.get("token");
-    if (token === null) {
+
+    // The order is `decideSharedPdf`'s, not this handler's — see that module
+    // for why each question is where it is. The short version: nothing that
+    // was going to fail anyway is ever counted against the link's ceiling, and
+    // a revocation landing mid-request is a 404 rather than a "try later".
+    const outcome = await decideSharedPdf(token, {
+      lookup: (t) => ctx.runQuery(internal.shares.pdfForShare, { token: t }),
+      blob: (delivery) => ctx.storage.get(delivery.storageId),
+      admit: async (t) => {
+        try {
+          return await ctx.runMutation(internal.shares.admitShare, { token: t });
+        } catch (error) {
+          // Only the one failure this route knows how to answer. Convex
+          // exhausting its retries on the counter means the link is genuinely
+          // being hammered, and "busy" is the true thing to say. Every other
+          // error is a fault, and dressing a fault up as "come back later" is
+          // exactly what this branch deleted from the page path — the reader
+          // would keep coming back to something that was never going to work.
+          if (isWriteConflict(error)) {
+            return "busy";
+          }
+          throw error;
+        }
+      },
+    });
+
+    if (outcome.status === 400) {
       return refuseShared(400, "Ask for a paper.");
     }
-
-    // One refusal for a token that was never minted, a link that has been
-    // taken down, a share of a write-up rather than a paper, and a paper with
-    // no file on it. A prober must not be able to tell them apart.
-    const delivery = await ctx.runQuery(internal.shares.pdfForShare, { token });
-    if (delivery === null) {
+    if (outcome.status === 404) {
       return refuseShared(404, "No such paper.");
     }
-
-    // Between the lookup and the bytes. A dead token never gets here, so a
-    // prober cannot make this write; a loop on a live link gets a plain 429
-    // rather than the file, which is the whole expense of this route.
-    //
-    // The throttle lives here and only here. The page beside it is a query
-    // Convex caches, so a flood against one live link is mostly cache hits and
-    // costs nothing worth guarding; fetching megabytes of PDF is the real bill,
-    // and this is where it arrives.
-    //
-    // The throw is caught rather than allowed to surface. Under a genuine
-    // flood the counter is contended enough that Convex may exhaust its
-    // retries, and the honest answer to "your writes kept colliding because
-    // this link is being hammered" is the same 429 the counter itself gives —
-    // never a 500, which would blame the reader's request for the crowd.
-    let admitted: boolean;
-    try {
-      admitted = await ctx.runMutation(internal.shares.admitShare, { token });
-    } catch {
-      admitted = false;
-    }
-    if (!admitted) {
+    if (outcome.status === 429) {
       return refuseShared(429, "This link is busy. Try again shortly.");
     }
-
-    const blob = await ctx.storage.get(delivery.storageId);
-    if (blob === null) {
-      return refuseShared(404, "No such paper.");
-    }
+    const { blob, title } = outcome;
 
     return new Response(blob, {
       status: 200,
       headers: {
         ...SHARED_CORS_HEADERS,
         "Content-Type": "application/pdf",
-        "Content-Disposition": `inline; filename="${headerFilename(delivery.title)}"`,
+        "Content-Disposition": `inline; filename="${headerFilename(title)}"`,
         // `no-store` for the reason the authed route gives — the check on
         // every request is what protects the file, so a copy of the bytes in a
         // shared cache under this URL would outlive the revocation.

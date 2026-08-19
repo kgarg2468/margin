@@ -1,0 +1,106 @@
+import { describe, expect, it, vi } from "vitest";
+import { decideSharedPdf } from "./pdf-order";
+
+/**
+ * The order the shared-PDF route asks its questions in.
+ *
+ * Tested here rather than through `admitShare` because the ordering is the
+ * property, and driving the counter directly proves nothing about *when* the
+ * route reaches it. Each test below is a state the live route can genuinely be
+ * in — a file missing from storage, a revocation landing mid-request — and
+ * asserts both what the stranger receives and whether the link paid for it.
+ */
+
+type Delivery = { storageId: string; title: string };
+
+function steps(overrides: {
+  delivery?: Delivery | null;
+  blob?: string | null;
+  admit?: "ok" | "busy" | "dead";
+}) {
+  const calls: string[] = [];
+  const decide = {
+    lookup: async (token: string) => {
+      calls.push(`lookup:${token}`);
+      return overrides.delivery === undefined
+        ? { storageId: "st1", title: "A paper" }
+        : overrides.delivery;
+    },
+    blob: async () => {
+      calls.push("blob");
+      return overrides.blob === undefined ? "bytes" : overrides.blob;
+    },
+    admit: async () => {
+      calls.push("admit");
+      return overrides.admit ?? ("ok" as const);
+    },
+  };
+  return { decide, calls };
+}
+
+describe("what a stranger gets from the shared PDF route", () => {
+  it("serves the bytes when every gate passes", async () => {
+    const { decide, calls } = steps({});
+    const outcome = await decideSharedPdf("tok", decide);
+
+    expect(outcome).toEqual({ status: 200, blob: "bytes", title: "A paper" });
+    expect(calls).toEqual(["lookup:tok", "blob", "admit"]);
+  });
+
+  it("asks for a token before anything else", async () => {
+    const { decide, calls } = steps({});
+    expect(await decideSharedPdf(null, decide)).toEqual({ status: 400 });
+    // A request with no token is malformed, not a missing paper, and it must
+    // not reach a database at all.
+    expect(calls).toEqual([]);
+  });
+
+  it("gives one answer to every way a link can be dead", async () => {
+    const { decide, calls } = steps({ delivery: null });
+    expect(await decideSharedPdf("tok", decide)).toEqual({ status: 404 });
+    // Never minted, revoked, a write-up rather than a paper, a paper with no
+    // file: a prober must not be able to tell them apart, and none of them
+    // costs the link any of its ceiling.
+    expect(calls).toEqual(["lookup:tok"]);
+  });
+
+  it("does not spend the ceiling on a file that is not there", async () => {
+    const { decide, calls } = steps({ blob: null });
+    expect(await decideSharedPdf("tok", decide)).toEqual({ status: 404 });
+
+    // The bug this pins: admitting first meant a paper whose stored file had
+    // gone missing took an increment and then 404'd anyway — a request that
+    // charged the link for nothing.
+    expect(calls).toEqual(["lookup:tok", "blob"]);
+    expect(calls).not.toContain("admit");
+  });
+
+  it("answers a revocation that lands mid-request with 404, not 429", async () => {
+    const { decide } = steps({ admit: "dead" });
+
+    // The race: the lookup found a live link, and it was taken down before
+    // admission. "Busy" would tell that reader to come back to something that
+    // is gone — and it would distinguish "revoked a moment ago" from "never
+    // existed", which is the oracle the single 404 exists to close.
+    expect(await decideSharedPdf("tok", decide)).toEqual({ status: 404 });
+  });
+
+  it("says busy only when the link is actually being hammered", async () => {
+    const { decide, calls } = steps({ admit: "busy" });
+    expect(await decideSharedPdf("tok", decide)).toEqual({ status: 429 });
+    expect(calls).toEqual(["lookup:tok", "blob", "admit"]);
+  });
+
+  it("lets a real fault out rather than dressing it as busy", async () => {
+    const boom = new Error("storage is on fire");
+    await expect(
+      decideSharedPdf("tok", {
+        lookup: async () => ({ storageId: "st1", title: "A paper" }),
+        blob: async () => {
+          throw boom;
+        },
+        admit: vi.fn(),
+      }),
+    ).rejects.toThrow(boom);
+  });
+});
