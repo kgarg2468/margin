@@ -89,6 +89,7 @@ type Constraint =
   | { kind: "eq"; field: string; value: unknown }
   | { kind: "gt"; field: string; value: unknown }
   | { kind: "gte"; field: string; value: unknown }
+  | { kind: "lt"; field: string; value: unknown }
   | { kind: "lte"; field: string; value: unknown }
   | { kind: "search"; field: string; text: string };
 
@@ -102,6 +103,8 @@ function matches(row: Row, constraints: readonly Constraint[]): boolean {
         return (actual as number) > (constraint.value as number);
       case "gte":
         return (actual as number) >= (constraint.value as number);
+      case "lt":
+        return (actual as number) < (constraint.value as number);
       case "lte":
         return (actual as number) <= (constraint.value as number);
       case "search":
@@ -239,6 +242,10 @@ class ConstraintBuilder {
   }
   gte(field: string, value: unknown): ConstraintBuilder {
     this.constraints.push({ kind: "gte", field, value });
+    return this;
+  }
+  lt(field: string, value: unknown): ConstraintBuilder {
+    this.constraints.push({ kind: "lt", field, value });
     return this;
   }
   lte(field: string, value: unknown): ConstraintBuilder {
