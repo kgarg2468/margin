@@ -2857,7 +2857,17 @@ export default defineSchema({
    */
   shareRateWindows: defineTable({
     shareId: v.id("shares"),
+    /**
+     * Which of the fixed set of counters this row is.
+     *
+     * A single row per share is the obvious design and it is the wrong one: it
+     * makes one document that every reader of a popular link has to write,
+     * and Convex answers that with write conflicts — so the guard meant to let
+     * a viral link survive would be the thing breaking it. Readers spread
+     * across a few counters instead, each holding its share of the ceiling.
+     */
+    shard: v.number(),
     windowStart: v.number(),
     count: v.number(),
-  }).index("by_share", ["shareId"]),
+  }).index("by_share_and_shard", ["shareId", "shard"]),
 });

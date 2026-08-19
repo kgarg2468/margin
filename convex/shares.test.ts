@@ -864,19 +864,28 @@ describe("taking a link down", () => {
 });
 
 describe("the abuse guard", () => {
-  /** One read past the ceiling, so the next one is the one being tested. */
-  async function exhaust(ctx: FakeCtx, token: string) {
-    for (let i = 0; i < 600; i++) {
-      await publicView(ctx, { token });
+  /**
+   * Read until the guard says no.
+   *
+   * Loops rather than counting to a fixed number because the ceiling is spread
+   * across shards a reader lands on at random — the exact read that trips it
+   * is not deterministic, and a test that assumed it was would be a test that
+   * failed one morning for no reason. What is being asserted is that a link
+   * being hammered stops answering, which is the promise.
+   */
+  async function hammer(ctx: FakeCtx, token: string): Promise<unknown> {
+    for (let i = 0; i < 5_000; i++) {
+      const answer = await publicView(ctx, { token });
+      if (answer !== null && "busy" in answer) return answer;
     }
+    throw new Error("the rate guard never refused a link under 5000 reads");
   }
 
   it("serves a popular link and refuses a hammered one, differently from a dead one", async () => {
     const { ctx, paperId } = await setup();
     const { token } = await share(ctx, { paperId });
 
-    await exhaust(ctx, token);
-    const refused = await publicView(ctx, { token });
+    const refused = await hammer(ctx, token);
 
     // Not `null`. A reader holding a good link must never be told it is gone —
     // they would believe it, and there is no way back from that answer.
@@ -891,16 +900,23 @@ describe("the abuse guard", () => {
       vi.setSystemTime(new Date("2026-08-18T12:00:00Z"));
       const { ctx, paperId } = await setup();
       const { token } = await share(ctx, { paperId });
-      await exhaust(ctx, token);
-      expect(await publicView(ctx, { token })).toEqual({ busy: true });
+      await hammer(ctx, token);
 
       vi.setSystemTime(new Date("2026-08-18T12:01:30Z"));
 
-      expect(await publicView(ctx, { token })).not.toEqual({ busy: true });
-      // Rolled over in place: one row per link, and no record of how busy it
-      // used to be.
-      expect(ctx.db.all("shareRateWindows")).toHaveLength(1);
-      expect(rowAt(ctx.db.all("shareRateWindows")).count).toBe(1);
+      // Every shard rolls over on its own next read, so a link that was
+      // refusing answers again — and carries no memory of having refused.
+      const answers = await Promise.all(
+        Array.from({ length: 50 }, () => publicView(ctx, { token })),
+      );
+      expect(answers.some((answer) => answer !== null && !("busy" in answer))).toBe(
+        true,
+      );
+      const rows = ctx.db.all("shareRateWindows");
+      expect(rows.length).toBeLessThanOrEqual(8);
+      expect(rows.every((row) => row.windowStart >= Date.now() - 60_000)).toBe(
+        true,
+      );
     } finally {
       vi.useRealTimers();
     }
@@ -946,7 +962,7 @@ describe("the abuse guard", () => {
     // The whole assertion. There is no user, no session, no address, no
     // fingerprint and no per-read row — so the question "who read this" has no
     // answer here, structurally, rather than by anybody's restraint.
-    expect(fields).toEqual(["count", "shareId", "windowStart"]);
+    expect(fields).toEqual(["count", "shard", "shareId", "windowStart"]);
   });
 });
 

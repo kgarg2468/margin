@@ -47,7 +47,7 @@ export default async function SharePage({
   // A mutation, because the read is rate-limited and a Convex query cannot
   // write the counter — see `shares.view`. Nothing about the reader is
   // recorded; what it writes is a per-link window.
-  const shared = await fetchMutation(api.shares.view, { token });
+  const shared = await read(token);
   if (shared === null) {
     notFound();
   }
@@ -60,6 +60,33 @@ export default async function SharePage({
   ) : (
     <SharedSynthesis shared={shared} />
   );
+}
+
+/**
+ * The read, with the one failure it is worth absorbing.
+ *
+ * The rate window is a document every reader of a link writes, and under
+ * enough simultaneous readers Convex answers a contested write with a
+ * conflict. That is the guard's own load showing up as an error, and serving a
+ * 500 to somebody whose link is perfectly good would be the guard breaking the
+ * thing it exists to protect. Retried once, because most conflicts are a
+ * collision rather than a queue; then treated as what it actually is —
+ * this link is busy — rather than as a broken page.
+ *
+ * Deliberately not failing open. Failing open would mean serving the page
+ * without counting the read, and the moment worth counting is exactly this
+ * one.
+ */
+async function read(token: string) {
+  try {
+    return await fetchMutation(api.shares.view, { token });
+  } catch {
+    try {
+      return await fetchMutation(api.shares.view, { token });
+    } catch {
+      return { busy: true as const };
+    }
+  }
 }
 
 /**

@@ -89,6 +89,20 @@ const MAX_OPT_INS_PER_PAPER = 500;
 const READ_WINDOW_MS = 60_000;
 const MAX_READS_PER_WINDOW = 600;
 
+/**
+ * How many counters one link's ceiling is split across.
+ *
+ * Contention, not precision, is what decides this number. Every reader of a
+ * link has to write the counter, and a single document that hundreds of
+ * concurrent readers all write is a document Convex refuses with write
+ * conflicts — which would turn the guard meant to let a popular link survive
+ * into the thing that broke it, and 500s are what a reader would see. Spread
+ * across a few rows, each holding its share of the ceiling, the conflicts go
+ * away and the guard stays coarse in the direction it was already coarse.
+ */
+const RATE_SHARDS = 8;
+const MAX_READS_PER_SHARD = MAX_READS_PER_WINDOW / RATE_SHARDS;
+
 /* -------------------------------------------------------------------------
  * The public view model
  * ---------------------------------------------------------------------- */
@@ -248,14 +262,18 @@ async function admitRead(
   shareId: Id<"shares">,
 ): Promise<boolean> {
   const now = Date.now();
+  const shard = Math.floor(Math.random() * RATE_SHARDS);
   const window = await ctx.db
     .query("shareRateWindows")
-    .withIndex("by_share", (q) => q.eq("shareId", shareId))
+    .withIndex("by_share_and_shard", (q) =>
+      q.eq("shareId", shareId).eq("shard", shard),
+    )
     .unique();
 
   if (window === null) {
     await ctx.db.insert("shareRateWindows", {
       shareId,
+      shard,
       windowStart: now,
       count: 1,
     });
@@ -267,7 +285,7 @@ async function admitRead(
     await ctx.db.patch(window._id, { windowStart: now, count: 1 });
     return true;
   }
-  if (window.count >= MAX_READS_PER_WINDOW) {
+  if (window.count >= MAX_READS_PER_SHARD) {
     return false;
   }
   await ctx.db.patch(window._id, { count: window.count + 1 });
@@ -1028,11 +1046,10 @@ export const revoke = mutation({
     // The rate window goes with it. Nothing reads it once the share is dead,
     // and leaving it would be keeping a count of how busy something used to be
     // after the thing itself was taken back.
-    const window = await ctx.db
+    for (const window of await ctx.db
       .query("shareRateWindows")
-      .withIndex("by_share", (q) => q.eq("shareId", share._id))
-      .unique();
-    if (window !== null) {
+      .withIndex("by_share_and_shard", (q) => q.eq("shareId", share._id))
+      .collect()) {
       await ctx.db.delete(window._id);
     }
 
