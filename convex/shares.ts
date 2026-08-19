@@ -656,8 +656,34 @@ async function describeShare(
     // lab it is how you tell two people with the same name apart, and this
     // string never leaves a membership check. See `publicName`.
     createdByName: creator?.name ?? creator?.email ?? "A lab member",
-    canRevoke: share.createdBy === membership.userId || membership.role === "pi",
+    canRevoke: mayRevoke(share, membership),
   };
+}
+
+/**
+ * Who may take a link down.
+ *
+ * Asymmetric on purpose, and in the direction that favours taking things back.
+ *
+ * A **paper** share may be revoked by any current member of the lab, because
+ * any current member could have created it — the mint is unrestricted, and a
+ * control anyone can press but only one person can un-press is a control whose
+ * failure mode is a link nobody present can stop. The margin on the other end
+ * is written by the whole lab; the whole lab can close it.
+ *
+ * A **write-up** share stays with its creator or the PI, because minting one
+ * required `canApprove` in the first place. Widening revocation past the set
+ * that can publish would be the only asymmetry worth avoiding here, and it
+ * points the other way: everyone who can mint can revoke.
+ */
+function mayRevoke(
+  share: Doc<"shares">,
+  membership: Doc<"memberships">,
+): boolean {
+  if (share.kind === "paper") {
+    return true;
+  }
+  return share.createdBy === membership.userId || membership.role === "pi";
 }
 
 /**
@@ -852,8 +878,9 @@ export const shareSynthesis = mutation({
  * row as missing, so the link is dead on the next request; there is no cache
  * in front of it and nothing to wait for.
  *
- * The creator or the PI. The same shape as deleting a collection somebody else
- * made: the person who did it, and the person who answers for the lab.
+ * Who may press it is `mayRevoke`: any member for a paper's link, the creator
+ * or the PI for a write-up's. The rule is that everyone who could have made a
+ * link can unmake it.
  */
 export const revoke = mutation({
   args: { shareId: v.id("shares") },
@@ -864,7 +891,7 @@ export const revoke = mutation({
       throw new ConvexError("That link is already gone.");
     }
     const membership = await requireMembership(ctx, share.labId);
-    if (share.createdBy !== membership.userId && membership.role !== "pi") {
+    if (!mayRevoke(share, membership)) {
       throw new ConvexError(
         "Only whoever made this link, or the lab's PI, can take it down.",
       );

@@ -19,6 +19,7 @@ import {
   shareSynthesis,
   view,
 } from "./shares";
+import { leaveLab as leaveLabMutation } from "./labs";
 import schema from "./schema";
 
 vi.mock("@convex-dev/auth/server", async (importOriginal) => ({
@@ -113,6 +114,7 @@ const sessionPanel = call<
   { sessionId: Id<"sessions"> },
   { share: { _id: Id<"shares">; token: string } | null; approved: boolean; canShare: boolean }
 >(forSession);
+const leaveLab = call<{ labId: Id<"labs"> }, null>(leaveLabMutation);
 const pdf = call<
   { token: string },
   { storageId: Id<"_storage">; title: string } | null
@@ -763,6 +765,97 @@ describe("the authed side", () => {
     expect(seen.share).not.toBeNull();
     expect(seen.optedIn).toBe(false);
     expect(seen.optedInCount).toBe(1);
+  });
+});
+
+describe("leaving the lab", () => {
+  it("withdraws the departing member's consent, because they can no longer reach it", async () => {
+    const { ctx, pi, member, labId, paperId } = await setup();
+    await seedAnnotation(ctx, { labId, paperId, memberId: member }, {
+      body: SECRET,
+    });
+    ctx.auth = { userId: member };
+    await optIn(ctx, { paperId, included: true });
+    ctx.auth = { userId: pi };
+    const { token } = await share(ctx, { paperId });
+    expect(JSON.stringify(await publicView(ctx, { token }))).toContain(SECRET);
+
+    ctx.auth = { userId: member };
+    await leaveLab(ctx, { labId });
+
+    // Their writing stops being published in the same act that takes away
+    // their ability to stop it.
+    expect(JSON.stringify(await publicView(ctx, { token }))).not.toContain(
+      SECRET,
+    );
+    expect(ctx.db.all("paperShareOptIns").map((row) => row.userId)).not.toContain(
+      member,
+    );
+  });
+
+  it("says nothing about a lab the member has not left", async () => {
+    const { ctx, member, labId, paperId } = await setup();
+    const otherLab = await ctx.db.insert("labs", {
+      name: "Second Lab",
+      createdBy: member,
+      memberCount: 1,
+    });
+    await ctx.db.insert("memberships", {
+      labId: otherLab,
+      userId: member,
+      role: "member",
+      joinedAt: 1,
+    });
+    const otherPaper = await ctx.db.insert("papers", {
+      labId: otherLab,
+      title: "Another paper",
+      addedBy: member,
+      ingestStatus: "ready",
+    });
+    ctx.auth = { userId: member };
+    await optIn(ctx, { paperId, included: true });
+    await optIn(ctx, { paperId: otherPaper, included: true });
+
+    await leaveLab(ctx, { labId });
+
+    const remaining = ctx.db
+      .all("paperShareOptIns")
+      .filter((row) => row.userId === member);
+    expect(remaining.map((row) => row.paperId)).toEqual([otherPaper]);
+  });
+});
+
+describe("taking a link down", () => {
+  it("lets any member close a paper link, whoever opened it", async () => {
+    const { ctx, member, paperId } = await setup();
+    // The PI mints it; an ordinary member takes it down.
+    await share(ctx, { paperId });
+
+    ctx.auth = { userId: member };
+    const seen = await panel(ctx, { paperId });
+    expect(seen.share?.canRevoke).toBe(true);
+    await expect(
+      takeDown(ctx, { shareId: seen.share!._id }),
+    ).resolves.toBeNull();
+
+    expect(await publicView(ctx, { token: seen.share!.token })).toBeNull();
+  });
+
+  it("keeps a write-up link with the people who could have published it", async () => {
+    const { ctx, member, sessionId } = await setup();
+    await ctx.db.patch(sessionId, {
+      synthesis: "## What we worked out",
+      synthesisApprovedAt: 100,
+      synthesisCitedAnnotationIds: [],
+    });
+    const created = await shareWriteUp(ctx, { sessionId });
+    expect(created.token).toBeTypeOf("string");
+
+    ctx.auth = { userId: member };
+    const seen = await sessionPanel(ctx, { sessionId });
+    await expect(
+      takeDown(ctx, { shareId: seen.share!._id }),
+    ).rejects.toThrow(ConvexError);
   });
 });
 

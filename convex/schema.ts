@@ -2823,5 +2823,15 @@ export default defineSchema({
     /** The read path: whose notes may be shown on this paper. */
     .index("by_paper", ["paperId"])
     /** One member's own answer, for the toggle and for the write. */
-    .index("by_paper_and_user", ["paperId", "userId"]),
+    .index("by_paper_and_user", ["paperId", "userId"])
+    /**
+     * Every paper one member has opened up in one lab.
+     *
+     * Read by `endMembership`. Consent to be published has to be withdrawable
+     * by the person who gave it, and somebody who has left the lab can no
+     * longer reach the toggle that would withdraw it — so leaving withdraws
+     * all of it. Scoped by lab as well as user because a member of two labs
+     * leaving one of them has said nothing about the other.
+     */
+    .index("by_user_and_lab", ["userId", "labId"]),
 });

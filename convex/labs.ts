@@ -232,6 +232,25 @@ async function endMembership(
 ): Promise<void> {
   await ctx.db.delete(membership._id);
 
+  // Consent to be read by strangers has to stay withdrawable by the person who
+  // gave it, and somebody who has left cannot reach the toggle that would
+  // withdraw it — `setPaperOptIn` requires a membership, so it would answer
+  // them with a refusal. Leaving the rows in place would make their notes go
+  // on publishing with no way back, which is the one state this consent model
+  // must not be able to reach. So leaving is the withdrawal.
+  //
+  // Not ledgered per paper. The departure is the fact, and it is already
+  // recorded below; a row per paper would bury it in its own consequences.
+  const optIns = await ctx.db
+    .query("paperShareOptIns")
+    .withIndex("by_user_and_lab", (q) =>
+      q.eq("userId", membership.userId).eq("labId", membership.labId),
+    )
+    .collect();
+  for (const optIn of optIns) {
+    await ctx.db.delete(optIn._id);
+  }
+
   const lab = await ctx.db.get(membership.labId);
   if (lab !== null) {
     await ctx.db.patch(lab._id, {
