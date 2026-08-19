@@ -81,3 +81,30 @@ export async function decideSharedPdf<
 
   return { status: 200, blob, title: delivery.title };
 }
+
+/**
+ * Is this the counter losing a race, or something actually broken?
+ *
+ * Narrow on purpose. An earlier version of the route caught *everything* from
+ * the counter and answered 429, which would have hidden a genuine backend
+ * fault behind a message telling the reader to come back — and they would
+ * have, forever, to something that was never going to work. Only contention
+ * gets that answer; everything else is a fault and should look like one.
+ *
+ * Matched on the message rather than on a class, because Convex signals this
+ * by text: there is no exported error type to `instanceof`, and the thrown
+ * value arrives at an `httpAction` as a plain `Error`. The strings below are
+ * the two stable parts of that text — the documented error code in the link it
+ * carries, and the phrase describing the retries running out. The test beside
+ * this holds the verbatim message a deployment produced, because a matcher
+ * for a string nobody checked is a matcher that quietly stops matching.
+ */
+export function isWriteConflict(error: unknown): boolean {
+  const text =
+    error instanceof Error ? `${error.name} ${error.message}` : String(error);
+  return (
+    /docs\.convex\.dev\/error#1\b/.test(text) ||
+    /on every subsequent retry/i.test(text) ||
+    /OptimisticConcurrencyControlFailure/i.test(text)
+  );
+}

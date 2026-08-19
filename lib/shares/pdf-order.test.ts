@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { decideSharedPdf } from "./pdf-order";
+import { decideSharedPdf, isWriteConflict } from "./pdf-order";
 
 /**
  * The order the shared-PDF route asks its questions in.
@@ -102,5 +102,37 @@ describe("what a stranger gets from the shared PDF route", () => {
         admit: vi.fn(),
       }),
     ).rejects.toThrow(boom);
+  });
+});
+
+describe("telling contention apart from a fault", () => {
+  /**
+   * Verbatim from a deployment under load, and that is the point of pasting it
+   * here. The first matcher this route shipped looked for
+   * "OptimisticConcurrencyControlFailure" and "write conflict" — neither of
+   * which appears below — so a load test that should have produced 429s
+   * produced 239 HTTP 500s instead. A matcher for a string nobody checked is a
+   * matcher that does not match.
+   */
+  const OCC_MESSAGE =
+    'Documents read from or written to the "shareRateWindows" table changed ' +
+    "while this mutation was being run and on every subsequent retry. Another " +
+    'call to this mutation changed the document with ID "pd71m50r1". ' +
+    "See https://docs.convex.dev/error#1";
+
+  it("recognises the message a real deployment throws", () => {
+    expect(isWriteConflict(new Error(OCC_MESSAGE))).toBe(true);
+  });
+
+  it("leaves every other failure alone", () => {
+    for (const other of [
+      new Error("storage is on fire"),
+      new Error("Server Error"),
+      new Error("Uncaught ConvexError: That link is already gone."),
+      "a string nobody wrapped",
+      null,
+    ]) {
+      expect(isWriteConflict(other), String(other)).toBe(false);
+    }
   });
 });

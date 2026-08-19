@@ -3,7 +3,7 @@ import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { httpAction } from "./_generated/server";
 import { auth } from "./auth";
-import { decideSharedPdf } from "../lib/shares/pdf-order";
+import { decideSharedPdf, isWriteConflict } from "../lib/shares/pdf-order";
 
 /**
  * Convex Auth's HTTP endpoints (token exchange, OAuth callbacks, sign-out)
@@ -89,21 +89,6 @@ function refuse(status: number, message: string): Response {
     status,
     headers: { ...CORS_HEADERS, "Content-Type": "text/plain; charset=utf-8" },
   });
-}
-
-/**
- * Is this the counter losing a race, or something actually broken?
- *
- * Convex signals write contention by name rather than by type, so the name is
- * what there is to match on. Matching narrowly is the point: the previous
- * version caught everything and called it "busy", which would have hidden a
- * genuine backend fault behind a message telling the reader to come back —
- * and they would have, forever.
- */
-function isWriteConflict(error: unknown): boolean {
-  const text =
-    error instanceof Error ? `${error.name} ${error.message}` : String(error);
-  return /OptimisticConcurrencyControlFailure|write conflict/i.test(text);
 }
 
 /** The same, minus the credential header the share routes do not accept. */
