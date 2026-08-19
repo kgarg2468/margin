@@ -235,16 +235,40 @@ const OPT_IN_SWEEP_BATCH = 256;
 /**
  * Withdraw a departing member's public-sharing consent, a batch at a time.
  *
+ * **Bounded by when the departure happened, not by whether they are back.**
+ *
+ * The obvious protection — abort if the member has rejoined — is wrong in the
+ * direction that matters. It leaves the *pre-departure* rows in place, and
+ * those rows come back to life the moment the membership does: `optedInAuthors`
+ * asks for a row and a membership, and after a rejoin both are true again. A
+ * member who left and was later re-invited would find notes they had opened up
+ * a year ago republished to strangers, having consented to nothing since.
+ *
+ * A cutoff gets both cases right at once. Every row stamped before the moment
+ * they left is consent given before the departure, and the departure withdrew
+ * it — so it goes, rejoined or not. Every row stamped after the cutoff can only
+ * have been written after they came back, which makes it a fresh decision by a
+ * current member, and it stays. No branch on membership at all.
+ *
+ * The comparison is inclusive, so a row stamped in the very millisecond of the
+ * departure is withdrawn rather than kept. The boundary has to fall somewhere
+ * and it falls on the side of taking consent back, because the cost of being
+ * wrong the other way is somebody's writing staying public after they left.
+ *
+ * The stamp compared is `optedInAt`, the row's own record of when the consent
+ * was given, rather than the system `_creationTime` beside it. Same fact, and
+ * it belongs to the schema: a rule this load-bearing should rest on a field
+ * this codebase writes and can reason about, not on metadata whose semantics
+ * are the platform's to change.
+ *
  * The membership row is already gone by the time this runs, so the sweep is
- * catching up to a departure that has happened rather than gating it. A
- * continuation that failed would leave rows behind for a member who no longer
- * exists in the lab — worth knowing about, and still preferable to a member
- * nobody can remove.
+ * catching up to a departure that has happened rather than gating it.
  */
 async function sweepOptIns(
   ctx: MutationCtx,
   userId: Id<"users">,
   labId: Id<"labs">,
+  departedAt: number,
 ): Promise<void> {
   const optIns = await ctx.db
     .query("paperShareOptIns")
@@ -252,16 +276,26 @@ async function sweepOptIns(
       q.eq("userId", userId).eq("labId", labId),
     )
     .take(OPT_IN_SWEEP_BATCH);
+
+  let stale = 0;
   for (const optIn of optIns) {
-    await ctx.db.delete(optIn._id);
+    if (optIn.optedInAt <= departedAt) {
+      await ctx.db.delete(optIn._id);
+      stale++;
+    }
   }
-  // A full batch means there may be more. An exactly-full last batch costs one
-  // extra scheduled mutation that finds nothing, which is the cheap way to be
-  // wrong here.
-  if (optIns.length === OPT_IN_SWEEP_BATCH) {
+
+  // A full batch means there may be more. Counted on rows *seen* rather than
+  // rows deleted: a batch that was entirely post-rejoin rows deletes nothing
+  // and would otherwise stop the sweep with stale rows still behind them.
+  //
+  // An exactly-full last batch costs one extra scheduled mutation that finds
+  // nothing, which is the cheap way to be wrong here.
+  if (optIns.length === OPT_IN_SWEEP_BATCH && stale > 0) {
     await ctx.scheduler.runAfter(0, internal.labs.continueOptInSweep, {
       userId,
       labId,
+      departedAt,
     });
   }
 }
@@ -269,24 +303,23 @@ async function sweepOptIns(
 /**
  * The scheduled continuation of `sweepOptIns`. Internal: no caller outside.
  *
- * Re-asks the question its arguments only answered when they were written. A
- * job carries a decision across time, and in that time the member may have
- * been re-invited and opted things back in — deleting *those* rows would be
- * this sweep reaching past the departure it was cleaning up and destroying a
- * current member's stored choice, silently and with no toggle flipped.
+ * Carries the departure time rather than re-deriving it, because the thing it
+ * must not do is treat a decision made after the rejoin as one made before it,
+ * and the only way to tell those apart is the moment the member left.
  *
  * Nothing depends on this finishing. `shares.optedInAuthors` asks for current
  * membership on every public read, so a member who left has already stopped
  * being published whether or not the rest of their rows are gone.
  */
 export const continueOptInSweep = internalMutation({
-  args: { userId: v.id("users"), labId: v.id("labs") },
+  args: {
+    userId: v.id("users"),
+    labId: v.id("labs"),
+    departedAt: v.number(),
+  },
   returns: v.null(),
   handler: async (ctx, args) => {
-    if ((await getMembership(ctx, args.labId, args.userId)) !== null) {
-      return null;
-    }
-    await sweepOptIns(ctx, args.userId, args.labId);
+    await sweepOptIns(ctx, args.userId, args.labId, args.departedAt);
     return null;
   },
 });
@@ -313,7 +346,11 @@ async function endMembership(
   //
   // Not ledgered per paper. The departure is the fact, and it is already
   // recorded below; a row per paper would bury it in its own consequences.
-  await sweepOptIns(ctx, membership.userId, membership.labId);
+  //
+  // The stamp travels with the sweep because it is what separates consent
+  // given before this moment from consent given after a future rejoin — see
+  // `sweepOptIns` for why "has the member come back?" is the wrong question.
+  await sweepOptIns(ctx, membership.userId, membership.labId, Date.now());
 
   const lab = await ctx.db.get(membership.labId);
   if (lab !== null) {
