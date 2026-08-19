@@ -87,6 +87,7 @@ type Row = Record<string, unknown> & { _id: string; _creationTime: number };
 
 type Constraint =
   | { kind: "eq"; field: string; value: unknown }
+  | { kind: "gt"; field: string; value: unknown }
   | { kind: "gte"; field: string; value: unknown }
   | { kind: "lte"; field: string; value: unknown }
   | { kind: "search"; field: string; text: string };
@@ -97,6 +98,8 @@ function matches(row: Row, constraints: readonly Constraint[]): boolean {
     switch (constraint.kind) {
       case "eq":
         return actual === constraint.value;
+      case "gt":
+        return (actual as number) > (constraint.value as number);
       case "gte":
         return (actual as number) >= (constraint.value as number);
       case "lte":
@@ -228,6 +231,10 @@ class ConstraintBuilder {
   constructor(readonly constraints: Constraint[]) {}
   eq(field: string, value: unknown): ConstraintBuilder {
     this.constraints.push({ kind: "eq", field, value });
+    return this;
+  }
+  gt(field: string, value: unknown): ConstraintBuilder {
+    this.constraints.push({ kind: "gt", field, value });
     return this;
   }
   gte(field: string, value: unknown): ConstraintBuilder {

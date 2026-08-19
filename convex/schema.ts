@@ -2071,6 +2071,22 @@ export default defineSchema({
       v.literal("session-start"),
       v.literal("since-away"),
     ),
+    /**
+     * This arrival was assembled from the reader's own older notes rather than
+     * from a colleague's writing — the one-member lab's recall, built by
+     * `digests.catchUp` when the lab has exactly one member.
+     *
+     * Stored rather than inferred from the lab's size when the card is drawn,
+     * because the row outlives the fact that produced it. A second member
+     * joining would re-caption an unread solo digest with colleague words; the
+     * second member leaving again would claim an ordinary digest as the
+     * reader's own writing. Both are the product lying about where a line came
+     * from, in the one place whose whole claim is honest provenance.
+     *
+     * Optional, and absent on every row written before it existed. Absent reads
+     * as "assembled from the lab", which is what all of them were.
+     */
+    recall: v.optional(v.boolean()),
     generatedAt: v.number(),
     deliveredAt: v.optional(v.number()),
     acknowledgedAt: v.optional(v.number()),
