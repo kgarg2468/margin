@@ -15,8 +15,9 @@ type Delivery = { storageId: string; title: string };
 
 function steps(overrides: {
   delivery?: Delivery | null;
-  blob?: string | null;
+  exists?: boolean;
   admit?: "ok" | "busy" | "dead";
+  blob?: string | null;
 }) {
   const calls: string[] = [];
   const decide = {
@@ -26,13 +27,17 @@ function steps(overrides: {
         ? { storageId: "st1", title: "A paper" }
         : overrides.delivery;
     },
-    blob: async () => {
-      calls.push("blob");
-      return overrides.blob === undefined ? "bytes" : overrides.blob;
+    exists: async () => {
+      calls.push("exists");
+      return overrides.exists ?? true;
     },
     admit: async () => {
       calls.push("admit");
       return overrides.admit ?? ("ok" as const);
+    },
+    download: async () => {
+      calls.push("download");
+      return overrides.blob === undefined ? "bytes" : overrides.blob;
     },
   };
   return { decide, calls };
@@ -44,7 +49,7 @@ describe("what a stranger gets from the shared PDF route", () => {
     const outcome = await decideSharedPdf("tok", decide);
 
     expect(outcome).toEqual({ status: 200, blob: "bytes", title: "A paper" });
-    expect(calls).toEqual(["lookup:tok", "blob", "admit"]);
+    expect(calls).toEqual(["lookup:tok", "exists", "admit", "download"]);
   });
 
   it("asks for a token before anything else", async () => {
@@ -65,14 +70,31 @@ describe("what a stranger gets from the shared PDF route", () => {
   });
 
   it("does not spend the ceiling on a file that is not there", async () => {
-    const { decide, calls } = steps({ blob: null });
+    const { decide, calls } = steps({ exists: false });
     expect(await decideSharedPdf("tok", decide)).toEqual({ status: 404 });
 
-    // The bug this pins: admitting first meant a paper whose stored file had
-    // gone missing took an increment and then 404'd anyway — a request that
-    // charged the link for nothing.
-    expect(calls).toEqual(["lookup:tok", "blob"]);
+    // The existence question is asked before admission so a paper whose stored
+    // file has gone missing 404s without taking an increment — and it is asked
+    // of metadata, so asking is cheap.
+    expect(calls).toEqual(["lookup:tok", "exists"]);
     expect(calls).not.toContain("admit");
+    expect(calls).not.toContain("download");
+  });
+
+  it("never moves bytes for a request it is going to refuse", async () => {
+    // The finding, as an assertion. Existence and download used to be one
+    // step, so a throttled request had already pulled the whole PDF down
+    // before anything asked whether to serve it: 244 refusals in a live load
+    // test were 244 full downloads, and the guard spent exactly the bandwidth
+    // it exists to protect.
+    for (const admit of ["busy", "dead"] as const) {
+      const { decide, calls } = steps({ admit });
+      const outcome = await decideSharedPdf("tok", decide);
+
+      expect(outcome.status).toBe(admit === "busy" ? 429 : 404);
+      expect(calls).toEqual(["lookup:tok", "exists", "admit"]);
+      expect(calls, `${admit} must not download`).not.toContain("download");
+    }
   });
 
   it("answers a revocation that lands mid-request with 404, not 429", async () => {
@@ -85,10 +107,10 @@ describe("what a stranger gets from the shared PDF route", () => {
     expect(await decideSharedPdf("tok", decide)).toEqual({ status: 404 });
   });
 
-  it("says busy only when the link is actually being hammered", async () => {
-    const { decide, calls } = steps({ admit: "busy" });
-    expect(await decideSharedPdf("tok", decide)).toEqual({ status: 429 });
-    expect(calls).toEqual(["lookup:tok", "blob", "admit"]);
+  it("404s rather than crashing if storage loses the file after admission", async () => {
+    const { decide, calls } = steps({ blob: null });
+    expect(await decideSharedPdf("tok", decide)).toEqual({ status: 404 });
+    expect(calls).toEqual(["lookup:tok", "exists", "admit", "download"]);
   });
 
   it("lets a real fault out rather than dressing it as busy", async () => {
@@ -96,10 +118,11 @@ describe("what a stranger gets from the shared PDF route", () => {
     await expect(
       decideSharedPdf("tok", {
         lookup: async () => ({ storageId: "st1", title: "A paper" }),
-        blob: async () => {
+        exists: async () => {
           throw boom;
         },
         admit: vi.fn(),
+        download: vi.fn(),
       }),
     ).rejects.toThrow(boom);
   });

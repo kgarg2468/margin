@@ -235,7 +235,13 @@ http.route({
     // a revocation landing mid-request is a 404 rather than a "try later".
     const outcome = await decideSharedPdf(token, {
       lookup: (t) => ctx.runQuery(internal.shares.pdfForShare, { token: t }),
-      blob: (delivery) => ctx.storage.get(delivery.storageId),
+      // Metadata, not bytes. `storage.get` here would mean every refused
+      // request downloaded the whole PDF before being told no, which is the
+      // exact cost the ceiling exists to stop it from spending.
+      exists: async (delivery) =>
+        (await ctx.runQuery(internal.shares.storedFileExists, {
+          storageId: delivery.storageId,
+        })) === true,
       admit: async (t) => {
         try {
           return await ctx.runMutation(internal.shares.admitShare, { token: t });
@@ -252,6 +258,7 @@ http.route({
           throw error;
         }
       },
+      download: (delivery) => ctx.storage.get(delivery.storageId),
     });
 
     if (outcome.status === 400) {

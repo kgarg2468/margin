@@ -16,12 +16,17 @@
  * 2. **The link and its artifact.** One 404 for a token never minted, a link
  *    revoked, a share of a write-up rather than a paper, and a paper with no
  *    file — a prober must not be able to tell those apart.
- * 3. **The bytes exist.** Before admission, deliberately. Admitting first meant
- *    a paper whose stored file had gone missing spent a counter increment and
- *    then 404'd anyway: a request that costs the link part of its ceiling and
- *    delivers nothing.
- * 4. **Admission, last.** The gate immediately before serving, so nothing that
- *    was going to fail anyway is ever counted against the link.
+ * 3. **The bytes exist — metadata only.** Before admission, deliberately.
+ *    Admitting first meant a paper whose stored file had gone missing spent a
+ *    counter increment and then 404'd anyway: a request that costs the link
+ *    part of its ceiling and delivers nothing. Asking costs a metadata read;
+ *    no bytes move.
+ * 4. **Admission.** The last gate, so nothing that was going to fail anyway is
+ *    ever counted against the link.
+ * 5. **The download, after admission.** The split between 3 and 5 is the whole
+ *    point of the guard. Fetching the file before deciding whether to serve it
+ *    meant a refused request cost exactly as much bandwidth as a served one —
+ *    a throttle that spent the resource it was protecting.
  *
  * And the answer admission gives has three values rather than two. A link
  * revoked between step 2 and step 4 is *dead*, not busy, and the route must
@@ -44,10 +49,23 @@ export type SharedPdfOutcome<Blob> =
 export type SharedPdfSteps<Delivery extends { title: string }, Blob> = {
   /** The share, its paper, and its stored file — or null for all of them. */
   lookup: (token: string) => Promise<Delivery | null>;
-  /** The stored bytes. Null when the file is gone from storage. */
-  blob: (delivery: Delivery) => Promise<Blob | null>;
+  /**
+   * Does the stored file exist? Metadata only — **no bytes move here.**
+   *
+   * Separate from `download` because collapsing the two is what made the
+   * throttle pay for the thing it exists to prevent: a refused request had
+   * already pulled the whole PDF down before anybody asked whether to serve
+   * it, so every 429 cost exactly the bandwidth a 200 costs. The existence
+   * question still has to be asked before admission — a file missing from
+   * storage must 404 without spending the link's ceiling — so it is asked the
+   * cheap way, and the expensive way happens only once for a request that is
+   * actually going to be answered.
+   */
+  exists: (delivery: Delivery) => Promise<boolean>;
   /** The counter, which is also the last liveness check. */
   admit: (token: string) => Promise<Admission>;
+  /** The bytes. Reached only by a request that has already been admitted. */
+  download: (delivery: Delivery) => Promise<Blob | null>;
 };
 
 export async function decideSharedPdf<
@@ -66,8 +84,7 @@ export async function decideSharedPdf<
     return { status: 404 };
   }
 
-  const blob = await steps.blob(delivery);
-  if (blob === null) {
+  if (!(await steps.exists(delivery))) {
     return { status: 404 };
   }
 
@@ -77,6 +94,14 @@ export async function decideSharedPdf<
   }
   if (admission === "busy") {
     return { status: 429 };
+  }
+
+  const blob = await steps.download(delivery);
+  // Storage lost the file between the metadata read and the fetch. Vanishingly
+  // rare, and still a 404 rather than a crash — the increment it cost is the
+  // price of having asked in the right order.
+  if (blob === null) {
+    return { status: 404 };
   }
 
   return { status: 200, blob, title: delivery.title };
