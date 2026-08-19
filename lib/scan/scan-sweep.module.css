@@ -1,0 +1,196 @@
+/*
+ * The same scan, at the scale of one row.
+ *
+ * The masthead's field is WebGL because it is terrain. A shelf row is not
+ * terrain — it is a rectangle, and a rectangle crossed by a light is a
+ * gradient behind a moving mask. Browsers cap the number of live WebGL
+ * contexts somewhere around sixteen, so a canvas per row is not a heavy
+ * choice, it is a broken one: the seventeenth paper on the shelf would take
+ * the first one's renderer away. This file is the reason no canvas is needed.
+ *
+ * The whole animation is two transforms and one opacity, which is the entire
+ * point. Margin's motion budget (see `app/globals.css`) says the press
+ * renders at the display's refresh rate whatever the main thread is doing,
+ * and that promise is only kept by animating properties the compositor owns.
+ * Nothing here animates a mask position, a background position, a filter or a
+ * width — every one of those repaints on the main thread every frame, and any
+ * of them would put a decoration in front of the press.
+ *
+ * Which forces the one trick worth explaining. The band moves; the ruling it
+ * reveals must not, or the grid slides along with the light and reads as a
+ * scanline artefact rather than as ground being lit. So the ruling is a child
+ * of the band translated by exactly the opposite amount, in its own units:
+ * the band is 40% of the row and the ruling is 250% of the band, which makes
+ * the ruling exactly one row wide, so a percentage of the ruling's width and
+ * a percentage of the row are the same distance. Band -105% of itself is -42%
+ * of the row; ruling +42% of itself cancels it. The two keyframe sets share a
+ * timing function for the same reason — the cancellation has to hold at every
+ * instant, not just at both ends.
+ */
+
+.row {
+  /* The only thing asked of the row itself. Deliberately not `overflow:
+     hidden`: the filing panel opens inside this element and clipping the row
+     to hide a decoration would clip that too. The sweep clips itself. */
+  position: relative;
+}
+
+.sweep {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  /* Decoration, and nothing else. The row's press feel is the existing
+     `pressable` grammar on the controls inside it and activation is still
+     their own `onClick`; this layer must never be in the way of either. */
+  pointer-events: none;
+  /* The taper across the row's height, applied once here rather than on each
+     band: it never moves, so it costs one paint and it is what keeps the
+     light from having a top and a bottom edge — which is the difference
+     between a lamp passing over the row and a rectangle sliding along it. */
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent,
+    #000 20%,
+    #000 80%,
+    transparent
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent,
+    #000 20%,
+    #000 80%,
+    transparent
+  );
+}
+
+.band,
+.hover {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 40%;
+  opacity: 0;
+  /* Bright at the leading edge and trailing off behind it — the row's version
+     of the field's rim and wash. The band travels left to right, so the front
+     is the right-hand end. The gradient supplies the light and the mask
+     supplies its shape, including the last few percent: without that final
+     fade the front is a razor-straight edge on a box, which is exactly what
+     it looked like before it was there. */
+  background: linear-gradient(
+    to right,
+    transparent,
+    color-mix(in oklab, var(--accent) 20%, transparent)
+  );
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent,
+    rgba(0, 0, 0, 0.25) 45%,
+    rgba(0, 0, 0, 0.95) 90%,
+    #000 96%,
+    transparent
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    rgba(0, 0, 0, 0.25) 45%,
+    rgba(0, 0, 0, 0.95) 90%,
+    #000 96%,
+    transparent
+  );
+  transform: translate3d(-105%, 0, 0);
+}
+
+.ruling {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 250%;
+  /* Taken from `--accent` rather than written out, so both halves of the
+     theme grammar — the system branch and a `.light` / `.dark` ancestor —
+     are answered by the token that already answers them everywhere else. */
+  background-image:
+    linear-gradient(
+      to right,
+      color-mix(in oklab, var(--accent) 55%, transparent) 1px,
+      transparent 1px
+    ),
+    linear-gradient(
+      to bottom,
+      color-mix(in oklab, var(--accent) 55%, transparent) 1px,
+      transparent 1px
+    );
+  background-size: 22px 22px;
+  transform: translate3d(42%, 0, 0);
+}
+
+@keyframes scan-band {
+  from {
+    transform: translate3d(-105%, 0, 0);
+    opacity: 0;
+  }
+  14% {
+    opacity: 1;
+  }
+  to {
+    transform: translate3d(250%, 0, 0);
+    opacity: 0;
+  }
+}
+
+@keyframes scan-ruling {
+  from {
+    transform: translate3d(42%, 0, 0);
+  }
+  to {
+    transform: translate3d(-100%, 0, 0);
+  }
+}
+
+/*
+ * One pass as the shelf arrives, staggered down the list so the rows are lit
+ * in the order they are read rather than all at once. The index is capped by
+ * the component; a hundred-paper library must not spend seven seconds
+ * finishing its entrance.
+ */
+.band {
+  animation: scan-band 1.15s cubic-bezier(0.32, 0, 0.35, 1)
+    var(--scan-delay, 0ms) both;
+}
+
+.band .ruling {
+  animation: scan-ruling 1.15s cubic-bezier(0.32, 0, 0.35, 1)
+    var(--scan-delay, 0ms) both;
+}
+
+/*
+ * And one pass under the pointer. A second element rather than a restart of
+ * the first: re-running a finished animation means taking its name away and
+ * giving it back, which is a trick, whereas two elements is just what is
+ * true — the arrival and the attention are different events.
+ */
+.row:hover .hover {
+  animation: scan-band 0.9s cubic-bezier(0.32, 0, 0.35, 1) both;
+}
+
+.row:hover .hover .ruling {
+  animation: scan-ruling 0.9s cubic-bezier(0.32, 0, 0.35, 1) both;
+}
+
+/*
+ * Non-negotiable, and it takes nothing with it: no sweep, and no static ghost
+ * of one either. A reader who asked for less motion is not asking for a faint
+ * grid over every row instead.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .band,
+  .hover,
+  .row:hover .hover,
+  .ruling,
+  .band .ruling,
+  .row:hover .hover .ruling {
+    animation: none;
+    opacity: 0;
+  }
+}
