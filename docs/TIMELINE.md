@@ -69,7 +69,7 @@ The ladder: see it without an account → useful alone in three actions → seco
 - [ ] **P6 — Projected-board polish.** Rides Track A (A2 shipped #73); the weekly 10-person demo is the 39% discovery channel. No new box — fold future board work here.
 - [ ] **P7 — Share-link → signup → annotate continuity.** Closes rung 0 into rung 1. After P2.
 
-Ordering: **P1+P4 first (one PR), P3 alongside (own PR), then P2 → P5/P7.** Monetization stays out of the product entirely (standing rule); nothing in Track P adds pricing surfaces.
+Ordering: **P3 and P2 are shipped (#81, #86); P1+P4 are built and gated on the founder's attribution call (#82); P5/P7 are next, after #82 merges** — P5 rewrites the same signup/onboarding surfaces P1 touched, so it does not start against a moving base. Monetization stays out of the product entirely (standing rule); nothing in Track P adds pricing surfaces.
 
 ## 3c. Track V — Signature visual layer (founder direction 2026-08-18)
 
@@ -108,7 +108,7 @@ Non-engineering, founder-owned, runs alongside everything: recruit 5–10 design
 - **Wave 2:** A2 ∥ B3 ∥ C2 ∥ B4 — shipped
 - **Wave 3:** A3 ∥ C3 ∥ B5 — shipped
 - **Wave 4:** A4 ∥ C4+C5 → design-partner launch gate (C2 results) → Track D decision — shipped; gate still shut (C2 n=0)
-- **Wave 5 (now):** P1+P4 ∥ P3 ∥ V1 → founder review of V1 → P2 → P5/P7 ∥ V2
+- **Wave 5 (now):** ~~P1+P4 ∥ P3 ∥ V1~~ → founder review (V1 verdicts + #82 attribution call, where the wave stands) → ~~P2~~ → P5/P7 ∥ V2
 
 ## 6. Done (context for agents — don't rebuild these)
 
