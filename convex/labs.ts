@@ -1,7 +1,8 @@
 import { ConvexError, v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
-import { mutation, query } from "./_generated/server";
+import { internalMutation, mutation, query } from "./_generated/server";
+import { internal } from "./_generated/api";
 import {
   getMembership,
   requireMembership,
@@ -220,6 +221,62 @@ async function isSolePi(
 }
 
 /**
+ * How many opt-in rows one transaction will withdraw before handing the rest
+ * to the next one.
+ *
+ * The bound exists because the alternative is a departure that cannot happen.
+ * A member who opted a few thousand papers in would have made their own
+ * removal a transaction too large to commit — and removal is the one operation
+ * that must never be blocked, since the whole reason to remove somebody may be
+ * that they should not be in the lab another minute.
+ */
+const OPT_IN_SWEEP_BATCH = 256;
+
+/**
+ * Withdraw a departing member's public-sharing consent, a batch at a time.
+ *
+ * The membership row is already gone by the time this runs, so the sweep is
+ * catching up to a departure that has happened rather than gating it. A
+ * continuation that failed would leave rows behind for a member who no longer
+ * exists in the lab — worth knowing about, and still preferable to a member
+ * nobody can remove.
+ */
+async function sweepOptIns(
+  ctx: MutationCtx,
+  userId: Id<"users">,
+  labId: Id<"labs">,
+): Promise<void> {
+  const optIns = await ctx.db
+    .query("paperShareOptIns")
+    .withIndex("by_user_and_lab", (q) =>
+      q.eq("userId", userId).eq("labId", labId),
+    )
+    .take(OPT_IN_SWEEP_BATCH);
+  for (const optIn of optIns) {
+    await ctx.db.delete(optIn._id);
+  }
+  // A full batch means there may be more. An exactly-full last batch costs one
+  // extra scheduled mutation that finds nothing, which is the cheap way to be
+  // wrong here.
+  if (optIns.length === OPT_IN_SWEEP_BATCH) {
+    await ctx.scheduler.runAfter(0, internal.labs.continueOptInSweep, {
+      userId,
+      labId,
+    });
+  }
+}
+
+/** The scheduled continuation of `sweepOptIns`. Internal: no caller outside. */
+export const continueOptInSweep = internalMutation({
+  args: { userId: v.id("users"), labId: v.id("labs") },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    await sweepOptIns(ctx, args.userId, args.labId);
+    return null;
+  },
+});
+
+/**
  * The one way a membership ends. Deleting the row, moving the denormalized
  * count, and writing the `member.left` fact happen in a single mutation, so
  * the roster, the counter, and the ledger can never disagree.
@@ -241,15 +298,7 @@ async function endMembership(
   //
   // Not ledgered per paper. The departure is the fact, and it is already
   // recorded below; a row per paper would bury it in its own consequences.
-  const optIns = await ctx.db
-    .query("paperShareOptIns")
-    .withIndex("by_user_and_lab", (q) =>
-      q.eq("userId", membership.userId).eq("labId", membership.labId),
-    )
-    .collect();
-  for (const optIn of optIns) {
-    await ctx.db.delete(optIn._id);
-  }
+  await sweepOptIns(ctx, membership.userId, membership.labId);
 
   const lab = await ctx.db.get(membership.labId);
   if (lab !== null) {
