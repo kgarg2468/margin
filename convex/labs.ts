@@ -10,6 +10,7 @@ import {
 } from "./lib/authz";
 import { recordEvent } from "./lib/ledger";
 import { membershipRole } from "./schema";
+import { seedDemoPaper } from "./seedDemo";
 
 const MAX_LAB_NAME_LENGTH = 120;
 
@@ -71,6 +72,106 @@ export const createLab = mutation({
 });
 
 /**
+ * What a personal library is called, given whatever the account came in with.
+ *
+ * Nobody is asked for this and nobody should have to be: naming a container for
+ * your own reading is a decision with one sensible answer, and asking for it is
+ * the first of the eight steps this whole change exists to delete. The
+ * possessive is built rather than looked up because `users.name` is already the
+ * byline on every note the person writes — if it is good enough to sign a
+ * margin it is good enough to label a shelf.
+ *
+ * Falls back to a name with no owner in it rather than to an empty possessive:
+ * an account created by a sign-in link has an address and, for the instant
+ * before `afterUserCreatedOrUpdated` fills it in, no name at all.
+ */
+export function personalLibraryName(owner: string | undefined): string {
+  const trimmed = owner?.trim() ?? "";
+  if (trimmed.length === 0) {
+    return "My library";
+  }
+  const possessive = trimmed.endsWith("s") ? `${trimmed}’` : `${trimmed}’s`;
+  return `${possessive} library`.slice(0, MAX_LAB_NAME_LENGTH);
+}
+
+/**
+ * Give an account its personal library, if it hasn't got one.
+ *
+ * The whole of P1's first half. A fresh account used to arrive at a screen
+ * offering "Start a lab" and "Join a lab", which asks somebody who wants to
+ * read a paper to first invent an institution and appoint themselves its
+ * principal investigator. This provisions the container silently instead: one
+ * lab, one member, no name to choose, no role to accept.
+ *
+ * It is an ordinary lab and that is the design. The model has always permitted
+ * a lab of one — no gate anywhere requires `memberCount > 1` — so a personal
+ * library needs no parallel implementation, no second authorization path, and
+ * no migration on the day its owner invites somebody into it. It simply becomes
+ * a lab with two people in it, which is what it always was.
+ *
+ * **Idempotent, and that is load-bearing.** The caller is an auth callback that
+ * fires on account creation *and* on profile updates, so this is asked far more
+ * often than it acts. `by_personal_for` answers in one indexed read, and the
+ * check and the insert share a transaction, so two sign-ins racing each other
+ * cannot mint two libraries.
+ *
+ * Returns the library either way — the one it made or the one already there —
+ * because the caller wants to know where this person lives, not whether today
+ * was the day it was created.
+ */
+export async function ensurePersonalLibrary(
+  ctx: MutationCtx,
+  userId: Id<"users">,
+): Promise<Id<"labs">> {
+  const existing = await ctx.db
+    .query("labs")
+    .withIndex("by_personal_for", (q) => q.eq("personalFor", userId))
+    .first();
+  if (existing !== null) {
+    return existing._id;
+  }
+
+  const owner = await ctx.db.get(userId);
+  const name = personalLibraryName(owner?.name ?? owner?.email);
+
+  const labId = await ctx.db.insert("labs", {
+    name,
+    createdBy: userId,
+    memberCount: 1,
+    personalFor: userId,
+  });
+  await ctx.db.insert("memberships", {
+    labId,
+    userId,
+    role: "pi",
+    joinedAt: Date.now(),
+  });
+
+  // The same two facts `createLab` files, because a library that exists is a
+  // lab that exists and the ledger is the record of that. What is deliberately
+  // *not* filed is anything about the demo paper below — see `seedDemo.ts`:
+  // no event naming that paper is what keeps it out of every catch-up digest.
+  await recordEvent(ctx, {
+    labId,
+    type: "lab.created",
+    actorId: userId,
+    name,
+  });
+  await recordEvent(ctx, {
+    labId,
+    type: "member.joined",
+    actorId: userId,
+    subjectUserId: userId,
+    role: "pi",
+    via: "founding",
+  });
+
+  await seedDemoPaper(ctx, labId, userId);
+
+  return labId;
+}
+
+/**
  * Every lab the caller belongs to, oldest membership first. Drives the sidebar
  * switcher, so it reads the denormalized `memberCount` rather than counting
  * memberships per lab — that was one extra query per lab on every render.
@@ -85,6 +186,14 @@ export const getMyLabs = query({
       role: membershipRole,
       memberCount: v.number(),
       joinedAt: v.number(),
+      /**
+       * This is the caller's own auto-provisioned library rather than a lab
+       * anybody founded. Answered per caller, not per lab: somebody else's
+       * personal library is not one of yours, and the only way to be in one is
+       * to have been invited into it — at which point it has stopped being
+       * personal for you and the shell should treat it as the lab it now is.
+       */
+      personal: v.boolean(),
     }),
   ),
   handler: async (ctx) => {
@@ -108,6 +217,7 @@ export const getMyLabs = query({
         role: membership.role,
         memberCount: lab.memberCount,
         joinedAt: membership.joinedAt,
+        personal: lab.personalFor === userId,
       });
     }
 

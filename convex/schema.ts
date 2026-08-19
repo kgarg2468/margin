@@ -1120,7 +1120,30 @@ export default defineSchema({
         statusCode: v.optional(v.number()),
       }),
     ),
-  }).index("by_creator", ["createdBy"]),
+    /**
+     * The one member this lab was provisioned *for*, on a personal library and
+     * nowhere else.
+     *
+     * A personal library is an ordinary lab — one member, who is its PI — and
+     * every gate in the product already reads it as one. What this field adds
+     * is the two things a name could not carry honestly. It is the idempotency
+     * key: `by_personal_for` answers "has this account already been given one?"
+     * in a single indexed read, so a provisioning hook that fires more than
+     * once cannot mint a second. And it is what lets the shell know there is no
+     * roster worth drawing here, without inferring that from `memberCount`,
+     * which is a real lab of one on the day it is founded and a personal
+     * library forever.
+     *
+     * Absent on every lab a person actually created, which is the majority and
+     * the default. Nothing authorizes off this field — membership does, as
+     * everywhere else — so a lab that lost it would be a lab with a slightly
+     * wrong page on it, not an open door.
+     */
+    personalFor: v.optional(v.id("users")),
+  })
+    .index("by_creator", ["createdBy"])
+    /** "Does this account already have a personal library?" — asked once per sign-in. */
+    .index("by_personal_for", ["personalFor"]),
 
   /** Join table between users and labs; the single source of truth for authorization. */
   memberships: defineTable({
@@ -2621,4 +2644,39 @@ export default defineSchema({
     .index("by_annotation", ["annotationId"])
     /** And back the other way, so a finding's rows go when it does. */
     .index("by_finding", ["findingId"]),
+
+  /**
+   * The deployment's one stored copy of the demo paper.
+   *
+   * Every personal library is provisioned with the same openly-licensed paper
+   * on its shelf, and the alternative to this table is uploading that file
+   * again per signup — the same quarter-megabyte, once per account, forever.
+   * So the blob is stored once by `seedDemo.seedCanonicalPdf` and every
+   * provisioned copy points at it.
+   *
+   * At most one row, read with `.first()`. It is not an index of demo papers
+   * and must not become one: a provisioned copy is an ordinary `papers` row
+   * with no tie back to here, which is what makes it ordinary. The row records
+   * the blob and when it was laid down, and nothing else.
+   *
+   * ## What sharing the blob costs, and where it is owed
+   *
+   * A blob two labs point at cannot be deleted on one lab's say-so.
+   * `papers.discardUpload` already asks `by_pdf_storage` before deleting and so
+   * is safe by construction. `papers.attachPdf` is not: replacing a paper's
+   * file deletes the old blob unconditionally, so a member who swaps the PDF on
+   * their demo paper would take every other library's copy with it. That guard
+   * is not written yet — see the note in `convex/seedDemo.ts` and the PR that
+   * introduced this table.
+   *
+   * `revision` is the asset's own version, not a schema version. Replacing the
+   * demo paper means storing a new blob under a higher revision; libraries
+   * provisioned before the bump keep the file they were given, because a paper
+   * somebody has annotated is not a thing to swap underneath them.
+   */
+  demoSeeds: defineTable({
+    storageId: v.id("_storage"),
+    revision: v.number(),
+    seededAt: v.number(),
+  }).index("by_revision", ["revision"]),
 });
