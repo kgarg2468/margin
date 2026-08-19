@@ -1,4 +1,5 @@
 import { ConvexError, v } from "convex/values";
+import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import {
@@ -281,6 +282,9 @@ async function admitRead(
   return true;
 }
 
+/** How many stale counters one transaction clears before handing on the rest. */
+const RATE_SWEEP_BATCH = 500;
+
 /**
  * Delete counters for links nobody has come back to.
  *
@@ -289,8 +293,15 @@ async function admitRead(
  * number and a minute sitting in the database forever, and the table's promise
  * about what survives at rest would be bounded by nothing.
  *
+ * Batched and continued, on the same discipline as the opt-in sweep and for a
+ * sharper reason. A single bounded pass with nothing behind it makes the
+ * retention promise false exactly when it matters most: a deployment busy
+ * enough to strand more than a batch of stale windows per interval accumulates
+ * a backlog, and rows outlive the interval the schema comment advertises. The
+ * continuation is what makes that comment a bound rather than a hope.
+ *
  * Cheap when there is nothing to do — one index scan for windows that ended,
- * and on a quiet deployment it finds none.
+ * and on a quiet deployment it finds none and schedules nothing.
  */
 export const sweepRateWindows = internalMutation({
   args: {},
@@ -300,9 +311,14 @@ export const sweepRateWindows = internalMutation({
     const stale = await ctx.db
       .query("shareRateWindows")
       .withIndex("by_window_start", (q) => q.lt("windowStart", cutoff))
-      .take(500);
+      .take(RATE_SWEEP_BATCH);
     for (const row of stale) {
       await ctx.db.delete(row._id);
+    }
+    // A full batch means there may be more. An exactly-full last batch costs
+    // one scheduled run that finds nothing, which is the cheap way to be wrong.
+    if (stale.length === RATE_SWEEP_BATCH) {
+      await ctx.scheduler.runAfter(0, internal.shares.sweepRateWindows, {});
     }
     return null;
   },
@@ -755,6 +771,24 @@ export const admitShare = internalMutation({
       return "dead" as const;
     }
     return (await admitRead(ctx, share._id)) ? ("ok" as const) : ("busy" as const);
+  },
+});
+
+/**
+ * Is there a file behind this storage id, without fetching it?
+ *
+ * `_storage` is a system table, so its metadata row can be read the way any
+ * row is read — which is the cheap half of a question the route used to only
+ * know how to ask expensively. It has to ask *before* admission, so a paper
+ * whose file has gone missing 404s without spending the link's ceiling; and it
+ * must not move bytes doing so, or every throttled request would pay the
+ * bandwidth the throttle exists to save.
+ */
+export const storedFileExists = internalQuery({
+  args: { storageId: v.id("_storage") },
+  returns: v.boolean(),
+  handler: async (ctx, args) => {
+    return (await ctx.db.system.get(args.storageId)) !== null;
   },
 });
 

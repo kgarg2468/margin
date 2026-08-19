@@ -73,6 +73,14 @@ export function SynthesisShare({
     );
   }
 
+  // The one predicate again, and the fourth surface to use it. `stale` is the
+  // page's own narrower guess — it knows about withdrawn citations and not
+  // about, say, a legacy record with no citation snapshot, which the backend
+  // deads just as thoroughly. Branching on it meant a link that could not open
+  // was described as live and offered for copying, which is the worst of the
+  // three things this panel can do: it sends somebody to hand out a dead URL.
+  const openable = state.approved;
+
   const url =
     typeof window === "undefined"
       ? sharePath(share.token)
@@ -84,18 +92,20 @@ export function SynthesisShare({
         <code className="min-w-0 flex-1 truncate rounded-sm border border-rule bg-surface-sunken px-2.5 py-1.5 font-mono text-xs text-ink-muted">
           {url}
         </code>
-        <button
-          type="button"
-          className={linkButtonClass}
-          onClick={() => {
-            void navigator.clipboard
-              .writeText(url)
-              .then(() => setCopied(true))
-              .catch(() => setCopied(false));
-          }}
-        >
-          {copied ? "Copied" : "Copy"}
-        </button>
+        {openable && (
+          <button
+            type="button"
+            className={linkButtonClass}
+            onClick={() => {
+              void navigator.clipboard
+                .writeText(url)
+                .then(() => setCopied(true))
+                .catch(() => setCopied(false));
+            }}
+          >
+            {copied ? "Copied" : "Copy"}
+          </button>
+        )}
         {share.canRevoke && (
           <ConfirmAction
             label="Revoke"
@@ -110,8 +120,10 @@ export function SynthesisShare({
       </div>
 
       <p className="max-w-prose font-sans text-xs leading-relaxed text-ink-faint">
-        {stale
-          ? "This link is not opening for anyone while a note the write-up was checked against is withdrawn. Approve the copy again and it works from that moment."
+        {!openable
+          ? stale
+            ? "This link is not opening for anyone while a note the write-up was checked against is withdrawn. Approve the copy again and it works from that moment."
+            : "This link is not opening for anyone: the approved copy is no longer publishable. Sign the write-up off again and it works from that moment."
           : "Unlisted and not indexed. It shows this copy — never the draft — and stops the moment it is revoked or the approval is withdrawn."}
       </p>
     </div>

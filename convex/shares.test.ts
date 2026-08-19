@@ -119,9 +119,10 @@ const sessionPanel = call<
   { share: { _id: Id<"shares">; token: string } | null; approved: boolean; canShare: boolean }
 >(forSession);
 const leaveLab = call<{ labId: Id<"labs"> }, null>(leaveLabMutation);
-const continueSweep = call<{ userId: Id<"users">; labId: Id<"labs"> }, null>(
-  continueOptInSweep,
-);
+const continueSweep = call<
+  { userId: Id<"users">; labId: Id<"labs">; departedAt: number },
+  null
+>(continueOptInSweep);
 const pdf = call<
   { token: string },
   { storageId: Id<"_storage">; title: string } | null
@@ -963,7 +964,11 @@ describe("leaving the lab", () => {
       ctx.scheduled.length = 0;
       await continueSweep(
         ctx,
-        next.args as { userId: Id<"users">; labId: Id<"labs"> },
+        next.args as {
+          userId: Id<"users">;
+          labId: Id<"labs">;
+          departedAt: number;
+        },
       );
       pending = ctx.scheduled.filter((job) =>
         job.name.includes("continueOptInSweep"),
@@ -976,8 +981,14 @@ describe("leaving the lab", () => {
     expect(rounds).toBe(2);
   });
 
-  it("does not delete the choices of a member who came back", async () => {
+  it("buries pre-departure consent even when the member comes back", async () => {
+    vi.useFakeTimers();
+    try {
+    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
     const { ctx, member, labId, paperId } = await setup();
+    // Consent given before leaving, on a paper they will not re-open later.
+    ctx.auth = { userId: member };
+    await optIn(ctx, { paperId, included: true });
     for (let i = 0; i < 300; i++) {
       const other = await ctx.db.insert("papers", {
         labId,
@@ -992,35 +1003,75 @@ describe("leaving the lab", () => {
         optedInAt: 1,
       });
     }
-    ctx.auth = { userId: member };
+    // A month later, they leave.
+    vi.setSystemTime(new Date("2026-02-01T00:00:00Z"));
     await leaveLab(ctx, { labId });
 
     const followUp = ctx.scheduled.filter((job) =>
       job.name.includes("continueOptInSweep"),
     )[0]!;
 
-    // Re-invited, and they opt something in again — a fresh, current decision.
+    // A month after that, re-invited before the continuation runs, and they open one paper up
+    // again — a fresh decision, made as a current member.
+    // A month after that, they are re-invited.
+    vi.setSystemTime(new Date("2026-03-01T00:00:00Z"));
     await ctx.db.insert("memberships", {
       labId,
       userId: member,
       role: "member",
       joinedAt: 2,
     });
+    const freshPaper = await ctx.db.insert("papers", {
+      labId,
+      title: "Read after coming back",
+      addedBy: member,
+      ingestStatus: "ready",
+    });
+    await optIn(ctx, { paperId: freshPaper, included: true });
+
+    // Drain the sweep the way the scheduler would.
+    let pending = [followUp];
+    for (let round = 0; pending.length > 0 && round < 10; round++) {
+      const next = pending[pending.length - 1]!;
+      ctx.scheduled.length = 0;
+      await continueSweep(
+        ctx,
+        next.args as {
+          userId: Id<"users">;
+          labId: Id<"labs">;
+          departedAt: number;
+        },
+      );
+      pending = ctx.scheduled.filter((job) =>
+        job.name.includes("continueOptInSweep"),
+      );
+    }
+
+    const mine = ctx.db
+      .all("paperShareOptIns")
+      .filter((row) => row.userId === member);
+
+    // The finding, both halves. Aborting on rejoin would have left every
+    // pre-departure row in place — and those rows come back to life the moment
+    // the membership does, republishing a year-old margin nobody re-consented
+    // to. And a cutoff that ignored the rejoin would have deleted the fresh
+    // choice they had just made. Only rows older than the departure die.
+    expect(mine.map((row) => row.paperId)).toEqual([freshPaper]);
+    expect(mine).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps nothing of an ex-member who never came back", async () => {
+    const { ctx, member, labId, paperId } = await setup();
+    ctx.auth = { userId: member };
     await optIn(ctx, { paperId, included: true });
+    await leaveLab(ctx, { labId });
 
-    await continueSweep(
-      ctx,
-      followUp.args as { userId: Id<"users">; labId: Id<"labs"> },
-    );
-
-    // A job carries a decision across time, and the world moved. Deleting here
-    // would reach past the departure it was cleaning up and silently undo a
-    // current member's stored choice with no toggle ever flipped.
     expect(
-      ctx.db
-        .all("paperShareOptIns")
-        .filter((row) => row.userId === member && row.paperId === paperId),
-    ).toHaveLength(1);
+      ctx.db.all("paperShareOptIns").filter((row) => row.userId === member),
+    ).toEqual([]);
   });
 
   it("says nothing about a lab the member has not left", async () => {
@@ -1194,6 +1245,47 @@ describe("the abuse guard", () => {
       await sweepWindows(ctx, {});
 
       expect(ctx.db.all("shareRateWindows")).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps sweeping until the backlog is gone", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-08-18T12:00:00Z"));
+      const { ctx, paperId } = await setup();
+      const { token } = await share(ctx, { paperId });
+      const shareRow = (await panel(ctx, { paperId })).share!;
+      // More stale windows than one batch clears. A single bounded pass with
+      // nothing behind it makes the retention promise false exactly when it
+      // matters: a busy deployment strands the remainder past the interval the
+      // schema comment advertises, and the backlog grows from there.
+      for (let i = 0; i < 512; i++) {
+        await ctx.db.insert("shareRateWindows", {
+          shareId: shareRow._id,
+          windowStart: Date.parse("2026-08-18T11:00:00Z"),
+          count: 1,
+        });
+      }
+      void token;
+
+      vi.setSystemTime(new Date("2026-08-18T12:40:00Z"));
+      let rounds = 0;
+      let pending = true;
+      while (pending) {
+        rounds++;
+        expect(rounds, "the sweep rescheduled itself forever").toBeLessThan(10);
+        ctx.scheduled.length = 0;
+        await sweepWindows(ctx, {});
+        pending = ctx.scheduled.some((job) =>
+          job.name.includes("sweepRateWindows"),
+        );
+      }
+
+      expect(ctx.db.all("shareRateWindows")).toEqual([]);
+      // 512 = 500 + 12, so the second round is the short one that stops it.
+      expect(rounds).toBe(2);
     } finally {
       vi.useRealTimers();
     }

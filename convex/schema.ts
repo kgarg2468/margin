@@ -2850,9 +2850,12 @@ export default defineSchema({
    * overwritten in place the next time anybody fetches, so a busy link never
    * accumulates history; the only case where it lingers is a link nobody
    * touches again, and the `shares.sweepRateWindows` cron deletes those. So the
-   * honest bound is: at most one stale minute per abandoned link, for at most
-   * one cron interval. Not "nothing", which is what an earlier version of this
-   * comment claimed while a row sat there holding a timestamp.
+   * honest bound is: at most one stale minute per abandoned link, until the
+   * next `shares.sweepRateWindows` run — which is every 30 minutes, and which
+   * reschedules itself while it is still finding rows, so a busy deployment
+   * cannot build a backlog that outlives the interval. Not "nothing", which is
+   * what an earlier version of this comment claimed while a row sat there
+   * holding a timestamp.
    *
    * One row rather than a set of shards. Sharding was tried and removed: the
    * ceiling is checked as a sum over the share's rows, so every admission
