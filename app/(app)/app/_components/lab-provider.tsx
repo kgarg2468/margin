@@ -40,6 +40,14 @@ type LabContextValue = {
   dismissInviteNotice: () => void;
   /** Present only while a failed-but-retryable invitation is on the notice. */
   retryInviteNotice: () => void;
+  /**
+   * Whether this arrival has finished asking for a personal library. False
+   * means "no labs yet" is not yet an answer about this account, only about
+   * this instant, and nothing should be drawn that depends on the difference.
+   */
+  libraryChecked: boolean;
+  /** Whether that ask is what brought the library into being, just now. */
+  libraryJustCreated: boolean;
 };
 
 const LabContext = createContext<LabContextValue | null>(null);
@@ -86,10 +94,31 @@ function clearInviteParam(code: string): void {
 export function LabProvider({ children }: { children: ReactNode }) {
   const labs = useQuery(api.labs.getMyLabs);
   const redeemInvite = useMutation(api.invites.redeemInvite);
+  const ensureMyLibrary = useMutation(api.labs.ensureMyLibrary);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [inviteNotice, setInviteNotice] = useState<InviteNoticeState | null>(
     null,
   );
+  /**
+   * Whether the library question has been put and answered, either way.
+   *
+   * The invite below waits on this, and the wait is the point: both writes are
+   * about the same empty account, and `ensureMyLibrary` only provisions for
+   * somebody who belongs to no lab at all. Redeeming first would make that false
+   * before it was asked, so whether a newcomer arriving on an invitation also
+   * got a personal library would come down to which round trip landed first.
+   * They get both, always, which is the decision this PR documents.
+   */
+  const [libraryChecked, setLibraryChecked] = useState(false);
+  /**
+   * Whether the library on the shelf was minted by *this* arrival.
+   *
+   * Reported rather than acted on. `/app` already owns the one redirect a solo
+   * library gets, and this only changes where that redirect points — a second
+   * `router.replace` racing the first is how `?add=1` would get dropped by the
+   * one navigation that is supposed to carry it.
+   */
+  const [libraryJustCreated, setLibraryJustCreated] = useState(false);
 
   useEffect(() => {
     setSelectedId(window.localStorage.getItem(STORAGE_KEY));
@@ -153,6 +182,46 @@ export function LabProvider({ children }: { children: ReactNode }) {
     [redeemInvite, selectLab],
   );
 
+  /**
+   * Ask, once, for somewhere to put a paper — and go there if it was just made.
+   *
+   * This is where a personal library is minted, rather than in the auth callback
+   * that created the account: requesting an emailed sign-in link creates the
+   * user row before the mail is sent, so provisioning from there ran for
+   * addresses nobody had proven they could read. `labs.ensureMyLibrary` needs a
+   * session, and this is the first render that has one.
+   *
+   * `created` is also the only trustworthy answer to "was this account new?".
+   * The sign-in form used to decide that from which tab was showing, which is a
+   * fact about the UI and not about the account — wrong for every first-time
+   * Google and sign-in-link user, who never see that tab. The server knows; ask
+   * the server.
+   *
+   * Nothing here is retried and a failure is swallowed on purpose. The next
+   * navigation inside `/app` remounts nothing — this provider lives in the
+   * layout — but the next visit asks again, and until then the honest outcome is
+   * the onboarding screen `/app` already knows how to show.
+   */
+  const askedForLibrary = useRef(false);
+
+  useEffect(() => {
+    if (askedForLibrary.current) {
+      return;
+    }
+    askedForLibrary.current = true;
+    void ensureMyLibrary({})
+      .then((outcome) => {
+        if (outcome !== null && outcome.created) {
+          setLibraryJustCreated(true);
+        }
+      })
+      .catch(() => {
+        // Swallowed deliberately — see above. A newcomer with no library sees
+        // the onboarding screen, which is the truth about their account.
+      })
+      .finally(() => setLibraryChecked(true));
+  }, [ensureMyLibrary]);
+
   // One attempt per code per mount. Without this, StrictMode's double-invoke
   // in development fires two redemptions for the same code; the mutation is
   // idempotent per member so nothing breaks, but there is no reason to ask
@@ -160,6 +229,10 @@ export function LabProvider({ children }: { children: ReactNode }) {
   const attempted = useRef<string | null>(null);
 
   useEffect(() => {
+    // Ordering, not politeness. See `libraryChecked`.
+    if (!libraryChecked) {
+      return;
+    }
     // Read from the URL directly rather than through `useSearchParams`: this
     // runs once on mount and the hook would opt the whole shell out of static
     // rendering to answer a question we only ask in the browser anyway.
@@ -172,7 +245,7 @@ export function LabProvider({ children }: { children: ReactNode }) {
     }
     attempted.current = code;
     void attemptRedeem(code);
-  }, [attemptRedeem]);
+  }, [attemptRedeem, libraryChecked]);
 
   const retryCode = inviteNotice?.retryCode;
   const retryInviteNotice = useCallback(() => {
@@ -193,6 +266,8 @@ export function LabProvider({ children }: { children: ReactNode }) {
         inviteNotice,
         dismissInviteNotice,
         retryInviteNotice,
+        libraryChecked,
+        libraryJustCreated,
       }}
     >
       {children}

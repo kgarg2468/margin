@@ -40,17 +40,6 @@ const GOOGLE_ENABLED = process.env.NEXT_PUBLIC_AUTH_GOOGLE === "1";
 const EMAIL_ENABLED = process.env.NEXT_PUBLIC_AUTH_EMAIL === "1";
 
 /**
- * Where an account that did not exist a second ago is sent.
- *
- * The library rather than `/app`, and with the add panel already open. Signing
- * up is an errand — somebody has a paper they want to read — and the front page
- * of the app is an overview of a group that, for a brand-new personal library,
- * is one person. `?add=1` is a request the library honours once; see
- * `app/(app)/app/library/page.tsx` for why it is a URL and not a flag on a row.
- */
-const NEW_ACCOUNT_DESTINATION = "/app/library?add=1";
-
-/**
  * Which half of the world broke.
  *
  * A rejected credential is the only failure that comes back as an answer: the
@@ -163,16 +152,18 @@ export default function SignInPage() {
   // the app shell — this page only has to not lose it.
   const invite = inviteFromParam(searchParams.get("invite"));
   // An invitation outranks everything: the point of the click was a particular
-  // lab, and the redemption happens at `/app`. A new account with no invitation
-  // goes straight to its library with the add panel open — it already has a
-  // paper on the shelf to read and one thing worth doing next, and neither of
-  // those is on the app's front page. Everyone else lands where they always did.
-  const destination =
-    invite !== null
-      ? `/app?invite=${invite}`
-      : flow === "signUp"
-        ? NEW_ACCOUNT_DESTINATION
-        : "/app";
+  // lab, and the redemption happens at `/app`. Everyone else lands at `/app`,
+  // which then sends brand-new accounts on to their library with the add panel
+  // open.
+  //
+  // Note what this deliberately does *not* consult: `flow`. That is which tab of
+  // this form is showing, and an earlier version routed on it — which put a
+  // first-time Google or sign-in-link user, who never touches the sign-up tab,
+  // on the wrong path, and gave the new-account landing to an existing Google
+  // user who happened to press "Create account". Whether an account was just
+  // created is something only the server knows, and `labs.ensureMyLibrary` is
+  // where it says so.
+  const destination = invite !== null ? `/app?invite=${invite}` : "/app";
 
   // Arriving from the error boundary, this page is handed the very session it
   // was navigated here to escape: a failed `auth:signOut` never got its

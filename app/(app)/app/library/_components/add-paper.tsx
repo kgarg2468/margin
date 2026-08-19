@@ -289,6 +289,24 @@ function DoiTab({
    * moved on.
    */
   const attempt = useRef(0);
+  /**
+   * Whether this panel is still on screen.
+   *
+   * `attempt` says which lookup is current; this says whether *any* of them
+   * still has a right to speak. They are different questions and only the
+   * second one covers unmounting: extraction resolves long after the submit
+   * does, and a member who pressed "Done adding" or walked off to the reader
+   * has an attempt counter that still matches perfectly. Without this, that
+   * extraction finishing thirty seconds later yanks them into a paper they have
+   * stopped thinking about.
+   */
+  const live = useRef(true);
+  useEffect(
+    () => () => {
+      live.current = false;
+    },
+    [],
+  );
 
   const hold = lookupHold(pending);
 
@@ -370,14 +388,17 @@ function DoiTab({
             // that found no open-access copy, and an extraction that failed, both
             // of which have a real gap for the record page to explain.
             //
-            // Guarded on this lookup still being the live one. `read` resolves
-            // long after the submit does — a whole PDF is fetched and run
-            // through pdf.js in between — and by then the member may have pressed
-            // "Stop waiting" or pasted a second DOI. Both bump `attempt`, and
-            // neither is somebody asking to be taken to this paper.
+            // Guarded twice, on two different things. `read` resolves long after
+            // the submit does — a whole PDF is fetched and run through pdf.js in
+            // between — and by then the member may have pressed "Stop waiting"
+            // or pasted a second DOI, both of which bump `attempt`; or they may
+            // have closed the panel and gone somewhere else entirely, which
+            // bumps nothing at all. Neither is somebody asking to be taken to
+            // this paper, and a navigation is not a thing to perform on a page
+            // the member chose over this one.
             if (!outcome.alreadyInLibrary && outcome.hasPdf) {
               void textLayer.read(outcome.paperId).then((extracted) => {
-                if (extracted && attempt.current === mine) {
+                if (extracted && live.current && attempt.current === mine) {
                   router.push(`/app/library/${outcome.paperId}/read`);
                 }
               });
@@ -614,6 +635,20 @@ function UploadTab({
    * it would navigate away from a form the member had gone back to.
    */
   const attempt = useRef(0);
+  /**
+   * And whether the form is still there at all. The hold this tab reports keeps
+   * the *panel* from closing under a save, but it has no say over a member who
+   * takes the sidebar to Sessions mid-upload: that unmounts everything without
+   * touching `attempt`, and the save then resolves and pushes them into a reader
+   * they never asked for. Same discipline as `DoiTab`.
+   */
+  const live = useRef(true);
+  useEffect(
+    () => () => {
+      live.current = false;
+    },
+    [],
+  );
 
   // The same offer the control below is drawn from, so the panel can never be
   // held shut by a stage whose exit is not on screen.
@@ -707,7 +742,7 @@ function UploadTab({
         authors: authors.length > 0 ? authors : undefined,
         pages: extraction.pages,
       });
-      if (attempt.current !== mine) {
+      if (attempt.current !== mine || !live.current) {
         return;
       }
       // Into the reader rather than onto the record — see
