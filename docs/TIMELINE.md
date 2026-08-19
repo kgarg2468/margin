@@ -62,14 +62,14 @@ Gate: **C3/C4/C5 do not launch to design partners until C2 shows the scout beati
 The ladder: see it without an account → useful alone in three actions → second person costs one click → the ritual. Everything below is small-to-medium; P1/P3/P4 are independent of all other tracks.
 
 - [ ] **P1 — Solo entry.** Auto-provision a personal library at signup (an invisible one-member lab — the model already supports it); land new users in the library with the add-paper panel open, not on organizational setup; jump straight into the reader after ingest. Eight actions become three.
-- [ ] **P2 — Read-only share links.** Annotated paper + signed-off synthesis, opt-in per artifact, unlisted URLs, revocation-on-read, only lab-visible annotations ever render. The viral loop; the first public surface. Sequence after P1; touches auth/visibility surfaces — coordinate via the conflict map.
-- [ ] **P3 — Solo catch-up mode.** The digest currently excludes your own notes ("colleagues wrote things while you were away"); in a one-member lab, your past self is the colleague — "you flagged this same assay in March." The thesis delivered to a single user.
+- [x] **P2 — Read-only share links.** (#86) Annotated paper + signed-off synthesis, opt-in per artifact (row + current membership, asked on every read), unlisted 130-bit capability URLs, revocation-on-read with revoked ≡ nonexistent, only lab-visible annotations ever render; the PDF route throttled per-link without logging any reader. The viral loop; the first public surface — shipped through dual security review.
+- [x] **P3 — Solo catch-up mode.** (#81) In a one-member lab the digest surfaces your own notes older than both the arrival window and 14 days, and says so — recall provenance is stored on the digest, not inferred at read. The thesis delivered to a single user.
 - [ ] **P4 — Seeded demo paper.** Every new library opens containing one classic annotated paper so the first screen demonstrates the margin-conversation idea instead of showing a form.
 - [ ] **P5 — Quiet lab conversion + guest tier.** Invite-from-personal-library names/converts the lab; a viewer/guest state on shared artifacts (membership roles are exactly `pi|member` today — deliberate schema change, needs design). After P2.
 - [ ] **P6 — Projected-board polish.** Rides Track A (A2 shipped #73); the weekly 10-person demo is the 39% discovery channel. No new box — fold future board work here.
 - [ ] **P7 — Share-link → signup → annotate continuity.** Closes rung 0 into rung 1. After P2.
 
-Ordering: **P1+P4 first (one PR), P3 alongside (own PR), then P2 → P5/P7.** Monetization stays out of the product entirely (standing rule); nothing in Track P adds pricing surfaces.
+Ordering: **P3 and P2 are shipped (#81, #86); P1+P4 are built and gated on the founder's attribution call (#82); P5/P7 are next, after #82 merges** — P5 rewrites the same signup/onboarding surfaces P1 touched, so it does not start against a moving base. Monetization stays out of the product entirely (standing rule); nothing in Track P adds pricing surfaces.
 
 ## 3c. Track V — Signature visual layer (founder direction 2026-08-18)
 
@@ -108,7 +108,7 @@ Non-engineering, founder-owned, runs alongside everything: recruit 5–10 design
 - **Wave 2:** A2 ∥ B3 ∥ C2 ∥ B4 — shipped
 - **Wave 3:** A3 ∥ C3 ∥ B5 — shipped
 - **Wave 4:** A4 ∥ C4+C5 → design-partner launch gate (C2 results) → Track D decision — shipped; gate still shut (C2 n=0)
-- **Wave 5 (now):** P1+P4 ∥ P3 ∥ V1 → founder review of V1 → P2 → P5/P7 ∥ V2
+- **Wave 5 (now):** ~~P1+P4 ∥ P3 ∥ V1~~ → founder review (V1 verdicts + #82 attribution call, where the wave stands) → ~~P2~~ → P5/P7 ∥ V2
 
 ## 6. Done (context for agents — don't rebuild these)
 
