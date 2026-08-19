@@ -1180,7 +1180,16 @@ async function optIn(
       q.eq("paperId", paper._id).eq("userId", userId),
     )
     .unique();
+  // Re-affirming refreshes the stamp rather than doing nothing. The row is
+  // already there and the reader's answer does not change, so this looks like
+  // a no-op — but `labs.sweepOptIns` deletes by `optedInAt <= departure`, and
+  // a member who leaves, rejoins, and opts back in to a paper they had opted
+  // in to before would otherwise keep a pre-departure stamp on a decision they
+  // just made, and have it swept as though they had never re-affirmed it.
+  // The stamp is what makes the cutoff's rule true, so it has to mean the
+  // last time consent was given, not the first.
   if (existing !== null) {
+    await ctx.db.patch(existing._id, { optedInAt: Date.now() });
     return;
   }
   await ctx.db.insert("paperShareOptIns", {

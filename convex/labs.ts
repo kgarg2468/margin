@@ -263,6 +263,18 @@ const OPT_IN_SWEEP_BATCH = 256;
  *
  * The membership row is already gone by the time this runs, so the sweep is
  * catching up to a departure that has happened rather than gating it.
+ *
+ * **Accepted residual.** A member who leaves and rejoins before the sweep has
+ * finished has, for that window, rows that are both present and backed by a
+ * live membership — so an unswept pre-departure row is briefly readable again.
+ * The window is scheduler latency, not indefinite: the cutoff guarantees those
+ * rows die, and it does not care that the membership came back. What the
+ * member re-affirms in the meantime survives, because `shares.optIn` restamps
+ * on re-affirmation. So the exposure is bounded, and it is bounded to exactly
+ * the rows the member has not spoken about since returning. That is the price
+ * of sweeping lazily instead of holding a departure open until every row is
+ * accounted for, and it is worth paying: the alternative makes leaving a lab a
+ * transaction whose size is the member's whole history.
  */
 async function sweepOptIns(
   ctx: MutationCtx,

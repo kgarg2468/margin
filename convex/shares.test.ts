@@ -986,9 +986,12 @@ describe("leaving the lab", () => {
     try {
     vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
     const { ctx, member, labId, paperId } = await setup();
-    // Consent given before leaving, on a paper they will not re-open later.
     ctx.auth = { userId: member };
-    await optIn(ctx, { paperId, included: true });
+    // The siblings go in first so that `paperId`'s row falls past the first
+    // batch. That ordering is the whole point: the row the member re-affirms
+    // has to still be there when they re-affirm it, so the decision lands as a
+    // patch on an old row rather than a fresh insert — which is the case the
+    // early-return used to get wrong and a `freshPaper`-only test cannot see.
     for (let i = 0; i < 300; i++) {
       const other = await ctx.db.insert("papers", {
         labId,
@@ -1003,6 +1006,8 @@ describe("leaving the lab", () => {
         optedInAt: 1,
       });
     }
+    // Consent given before leaving, on the paper they will re-open later.
+    await optIn(ctx, { paperId, included: true });
     // A month later, they leave.
     vi.setSystemTime(new Date("2026-02-01T00:00:00Z"));
     await leaveLab(ctx, { labId });
@@ -1011,9 +1016,8 @@ describe("leaving the lab", () => {
       job.name.includes("continueOptInSweep"),
     )[0]!;
 
-    // A month after that, re-invited before the continuation runs, and they open one paper up
-    // again — a fresh decision, made as a current member.
-    // A month after that, they are re-invited.
+    // A month after that, they are re-invited — before the continuation has
+    // run, so the rest of their pre-departure rows are still sitting there.
     vi.setSystemTime(new Date("2026-03-01T00:00:00Z"));
     await ctx.db.insert("memberships", {
       labId,
@@ -1021,6 +1025,12 @@ describe("leaving the lab", () => {
       role: "member",
       joinedAt: 2,
     });
+    // They re-open the *same* paper they had opened before leaving. The row
+    // exists, so this re-affirmation is a patch, and the stamp it carries is
+    // the only thing standing between a decision made minutes ago and a sweep
+    // that deletes by a cutoff a month older.
+    await optIn(ctx, { paperId, included: true });
+    // And one they had never touched, which can only be a fresh insert.
     const freshPaper = await ctx.db.insert("papers", {
       labId,
       title: "Read after coming back",
@@ -1051,13 +1061,17 @@ describe("leaving the lab", () => {
       .all("paperShareOptIns")
       .filter((row) => row.userId === member);
 
-    // The finding, both halves. Aborting on rejoin would have left every
+    // The finding, all three halves. Aborting on rejoin would have left every
     // pre-departure row in place — and those rows come back to life the moment
     // the membership does, republishing a year-old margin nobody re-consented
-    // to. And a cutoff that ignored the rejoin would have deleted the fresh
-    // choice they had just made. Only rows older than the departure die.
-    expect(mine.map((row) => row.paperId)).toEqual([freshPaper]);
-    expect(mine).toHaveLength(1);
+    // to. A cutoff that ignored the rejoin would have deleted the fresh choice
+    // they had just made. And a re-affirmation that left the old stamp alone
+    // would have let the continuation delete `paperId` as pre-departure
+    // consent, when the member had said yes to it a month after leaving.
+    expect(mine.map((row) => row.paperId)).toEqual([paperId, freshPaper]);
+    expect(mine).toHaveLength(2);
+    // The surviving row is the original, restamped — not a replacement.
+    expect(mine[0]!.optedInAt).toBe(new Date("2026-03-01T00:00:00Z").getTime());
     } finally {
       vi.useRealTimers();
     }
