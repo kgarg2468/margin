@@ -1,7 +1,12 @@
 import { ConvexError, v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
-import { internalQuery, mutation, query } from "./_generated/server";
+import {
+  internalMutation,
+  internalQuery,
+  mutation,
+  query,
+} from "./_generated/server";
 import { requireMembership } from "./lib/authz";
 import { recordEvent } from "./lib/ledger";
 import { annotationType, epistemicStatus } from "./schema";
@@ -61,6 +66,28 @@ const MAX_ANNOTATIONS_PER_PAPER = 1_000;
 
 /** A lab is a research group; every member having opted in is the ceiling. */
 const MAX_OPT_INS_PER_PAPER = 500;
+
+/**
+ * The abuse guard on the one surface that does not ask who you are.
+ *
+ * A public read is not free: it walks up to `MAX_ANNOTATIONS_PER_PAPER` rows
+ * and resolves a name per author, and the PDF route streams the whole file
+ * with `no-store`, which means every request pays for it again. Neither is a
+ * problem until somebody points a loop at one link.
+ *
+ * **Keyed by the share, and by nothing else.** Not by IP, not by session, not
+ * by any fingerprint of the reader — the privacy constitution's ban on read
+ * tracking is not softened by the reader being a stranger, and a per-viewer
+ * counter is a read log whatever it is called. What this counts is how hard
+ * one *link* is being pulled, which is a fact about the link.
+ *
+ * The ceiling is deliberately generous. A paper that gets posted somewhere
+ * busy must survive being popular; the guard exists for the loop, not for the
+ * crowd. Ten reads a second, sustained, on a single link is already far past
+ * anything a lab sharing a paper produces.
+ */
+const READ_WINDOW_MS = 60_000;
+const MAX_READS_PER_WINDOW = 600;
 
 /* -------------------------------------------------------------------------
  * The public view model
@@ -146,6 +173,18 @@ const publicPaperView = v.object({
   notes: v.array(publicNote),
 });
 
+/**
+ * The link is fine; the moment is not.
+ *
+ * Deliberately its own shape rather than a `null`. `null` means *dead* — no
+ * such link, or revoked — and the page turns it into a 404 that a reader is
+ * meant to believe. Answering a rate-limited read the same way would tell
+ * somebody holding a perfectly good link that it had been taken down, which is
+ * both false and unrecoverable: they would stop trying. This is a slow path,
+ * and it says so.
+ */
+const busyView = v.object({ busy: v.literal(true) });
+
 const publicSynthesisView = v.object({
   kind: v.literal("synthesis"),
   labName: v.string(),
@@ -189,6 +228,50 @@ async function liveShare(
     return null;
   }
   return share;
+}
+
+/**
+ * Count this read against the link's window, and say whether to serve it.
+ *
+ * Fails **open** on contention: two reads landing in the same instant may cost
+ * one increment between them, and that is the right way for this to be wrong.
+ * A guard against a loop that occasionally undercounts still stops the loop; a
+ * guard that refused a real reader because two of them arrived together would
+ * be a worse product and a worse promise.
+ *
+ * Nothing is written once the ceiling is reached, which is deliberate — under
+ * the attack this exists for, the cheapest possible response is a read and a
+ * refusal, not a write.
+ */
+async function admitRead(
+  ctx: MutationCtx,
+  shareId: Id<"shares">,
+): Promise<boolean> {
+  const now = Date.now();
+  const window = await ctx.db
+    .query("shareRateWindows")
+    .withIndex("by_share", (q) => q.eq("shareId", shareId))
+    .unique();
+
+  if (window === null) {
+    await ctx.db.insert("shareRateWindows", {
+      shareId,
+      windowStart: now,
+      count: 1,
+    });
+    return true;
+  }
+  // Rolled over: the previous window is overwritten rather than kept, so no
+  // history of how busy this link has ever been accumulates anywhere.
+  if (now - window.windowStart >= READ_WINDOW_MS) {
+    await ctx.db.patch(window._id, { windowStart: now, count: 1 });
+    return true;
+  }
+  if (window.count >= MAX_READS_PER_WINDOW) {
+    return false;
+  }
+  await ctx.db.patch(window._id, { count: window.count + 1 });
+  return true;
 }
 
 /** The lab's name, for the one line of provenance a public page carries. */
@@ -495,8 +578,21 @@ export async function approvedWriteUp(
 }
 
 /**
- * What is at the end of a share link — the one query in this backend with no
- * `requireUserId` anywhere in it.
+ * What is at the end of a share link — the one function in this backend with
+ * no `requireUserId` anywhere in it.
+ *
+ * A mutation rather than a query, which is worth explaining because it looks
+ * wrong. It reads; it changes nothing anybody can see. What it writes is the
+ * rate window in `admitRead`, and a Convex query cannot write at all — so a
+ * throttle on this surface is either a mutation or it is nothing. Leaving it a
+ * query and throttling only the HTTP route would have been the worse trade: a
+ * public query is callable directly over the Convex client by anyone who reads
+ * the bundle, so the guard would have protected the door somebody knocks on
+ * and left the window open.
+ *
+ * It stays idempotent in every sense a caller cares about: same answer for the
+ * same token, nothing recorded about the reader, nothing a second call
+ * changes.
  *
  * It returns a view model rather than rows, and not for tidiness: a row handed
  * to an anonymous client is a row whose every field is published, and the
@@ -509,13 +605,20 @@ export async function approvedWriteUp(
  * revoked, artifact deleted, signature gone. The caller renders the same 404
  * for all of them, so probing distinguishes nothing.
  */
-export const view = query({
+export const view = mutation({
   args: { token: v.string() },
-  returns: v.union(v.null(), publicPaperView, publicSynthesisView),
+  returns: v.union(v.null(), busyView, publicPaperView, publicSynthesisView),
   handler: async (ctx, args) => {
     const share = await liveShare(ctx, args.token);
     if (share === null) {
       return null;
+    }
+    // After the lookup and before the work. A token that names nothing is
+    // refused by the index for free and writes nothing here, which is what
+    // keeps a prober from filling `shareRateWindows` with rows for links that
+    // do not exist.
+    if (!(await admitRead(ctx, share._id))) {
+      return { busy: true as const };
     }
 
     if (share.kind === "paper") {
@@ -569,6 +672,25 @@ export const view = query({
  * header; this is a second door with its own key rather than a hole in the
  * first one.
  */
+/**
+ * The PDF route's half of the throttle.
+ *
+ * Separate from the lookup beside it so the cheap refusals stay cheap: a token
+ * that names nothing is answered by `pdfForShare` without ever reaching this,
+ * and therefore without writing a row.
+ */
+export const admitShare = internalMutation({
+  args: { token: v.string() },
+  returns: v.boolean(),
+  handler: async (ctx, args) => {
+    const share = await liveShare(ctx, args.token);
+    if (share === null) {
+      return false;
+    }
+    return await admitRead(ctx, share._id);
+  },
+});
+
 export const pdfForShare = internalQuery({
   args: { token: v.string() },
   returns: v.union(
@@ -902,6 +1024,17 @@ export const revoke = mutation({
       return null;
     }
     await ctx.db.patch(share._id, { revokedAt: Date.now() });
+
+    // The rate window goes with it. Nothing reads it once the share is dead,
+    // and leaving it would be keeping a count of how busy something used to be
+    // after the thing itself was taken back.
+    const window = await ctx.db
+      .query("shareRateWindows")
+      .withIndex("by_share", (q) => q.eq("shareId", share._id))
+      .unique();
+    if (window !== null) {
+      await ctx.db.delete(window._id);
+    }
 
     // The paper rides along even for a write-up's link, resolved through the
     // session, so a paper's own history (`by_paper_and_at`) shows the link

@@ -126,11 +126,14 @@ function admitsText(fieldType: Json): boolean {
 /** Every place in `node` a credential could be hiding under a plausible name. */
 function credentialShaped(node: Json): string[] {
   return declaredFields(node)
-    .filter(
-      (field) =>
-        CREDENTIAL_ISH.test(field.path.split(".").at(-1) ?? field.path) &&
-        (field.fieldType === null || admitsText(field.fieldType)),
-    )
+    .filter((field) => {
+      const name = normalizeName(field.path.split(".").at(-1) ?? field.path);
+      return (
+        !IDENTIFIER_NAMES.has(name) &&
+        CREDENTIAL_ISH.test(name) &&
+        (field.fieldType === null || admitsText(field.fieldType))
+      );
+    })
     .map((field) => field.path);
 }
 
@@ -243,8 +246,36 @@ function eventVariant(typeName: string): Record<string, Json> {
  * that made the schema worse. Bare `zotero` would match the same item key for
  * the same non-reason. `apikey` matches `apiKey` and matches neither.
  */
+const normalizeName = (name: string): string =>
+  name.toLowerCase().replace(/[^a-z]/g, "");
+
+/**
+ * Names that are opaque identifiers rather than secrets.
+ *
+ * The pattern below matches `key` on its own, which is the only way to catch
+ * the spellings nobody thought of — `convexDeployKey`, `openaiKey`,
+ * `OPENAI_API_KEY` all walked past a list of specific compounds. Matching
+ * broadly means the burden inverts: a new `*Key` field is treated as a
+ * credential until it appears here with a reason, rather than being ignored
+ * until somebody adds its exact spelling.
+ *
+ * Each of these is a handle to something, not a permission to do anything.
+ * A Zotero item key names a record in a library the member has already been
+ * authorized for; `key` on a section is which section it is.
+ */
+const IDENTIFIER_NAMES = new Set([
+  "zoteroitemkey",
+  "collectionkey",
+  "key",
+]);
+
+/**
+ * Normalized before matching — lowercased with separators stripped — so
+ * `OPENAI_API_KEY`, `openaiApiKey` and `openai-api-key` are one name and the
+ * pattern cannot be evaded by a change of house style.
+ */
 const CREDENTIAL_ISH =
-  /webhook|hook|slack|deliver|destination|endpoint|channel|post|apikey|zoterokey|token|secret|credential/i;
+  /webhook|hook|slack|deliver|destination|endpoint|channel|post|key|token|secret|credential|password/;
 
 /**
  * The pattern, held to the names it claims to cover.
@@ -273,10 +304,15 @@ const PLAUSIBLE_NAMES = [
   "zoteroKey",
   "accessToken",
   "clientSecret",
+  // The three the second review found still walking past a pattern that
+  // listed compounds instead of matching `key`: a deploy key that would let
+  // its holder push functions, and two spellings of a model provider's key.
+  // `OPENAI_API_KEY` is here in its environment-variable casing on purpose —
+  // the underscores are what defeated `apikey`.
+  "convexDeployKey",
+  "openaiKey",
+  "OPENAI_API_KEY",
 ] as const;
-
-const normalizeName = (name: string): string =>
-  name.toLowerCase().replace(/[^a-z]/g, "");
 
 /* -------------------------------------------------------------------------
  * 1. No public function hands the credential to a browser
@@ -416,15 +452,31 @@ describe("no credential ever reaches a client", () => {
     // The scan below is only as good as this pattern. Checked directly, so the
     // day it stops matching one of these it fails here — loudly, with the name
     // in the message — rather than by returning an empty offender list.
-    const missed = PLAUSIBLE_NAMES.filter((name) => !CREDENTIAL_ISH.test(name));
+    const missed = PLAUSIBLE_NAMES.filter(
+      (name) => !CREDENTIAL_ISH.test(normalizeName(name)),
+    );
     expect(missed).toEqual([]);
+
+    // Named one at a time as well, because these three are the reason the
+    // pattern was widened and a regression on any of them is the regression
+    // that matters.
+    for (const name of ["convexDeployKey", "openaiKey", "OPENAI_API_KEY"]) {
+      expect(CREDENTIAL_ISH.test(normalizeName(name)), name).toBe(true);
+    }
     // And it is not simply matching everything, which would pass the line
     // above while flagging half the schema. The last three are the names this
     // widening came closest to eating: opaque identifiers, not secrets.
     expect(
-      ["title", "createdAt", "body", "quote", "zoteroItemKey", "collectionKey", "libraryId"]
-        .filter((n) => CREDENTIAL_ISH.test(n)),
+      ["title", "createdAt", "body", "quote", "libraryId"].filter((n) =>
+        CREDENTIAL_ISH.test(normalizeName(n)),
+      ),
     ).toEqual([]);
+    // The two opaque `*Key` identifiers are let through by name rather than by
+    // the pattern missing them, which is the part that has to stay deliberate.
+    for (const name of ["zoteroItemKey", "collectionKey"]) {
+      expect(CREDENTIAL_ISH.test(normalizeName(name)), name).toBe(true);
+      expect(IDENTIFIER_NAMES.has(normalizeName(name)), name).toBe(true);
+    }
   });
 
   /**
@@ -486,6 +538,45 @@ describe("no credential ever reaches a client", () => {
     const view = publicFunctions.find((fn) => fn.name === "shares.view");
     expect(view, "shares.view is the public read; it must exist").toBeDefined();
     expect(credentialShaped(view?.returns ?? null)).toEqual([]);
+  });
+
+  it("checks the membership gate itself, not just what the gate returns", () => {
+    // The assertion above says these four *may* carry a token. What made that
+    // safe was never checked: the exemption was a list of validator paths, so
+    // deleting `requireMembership` from any of these handlers left every test
+    // in this file green while the token went to anyone who asked.
+    //
+    // Read out of the source rather than the introspection because a
+    // membership check is a *call*, and Convex's registry describes shapes.
+    // Crude on purpose: it cannot be satisfied by a function that merely
+    // imports the helper, and it fails if a handler stops calling it.
+    const source = readFileSync(new URL("shares.ts", import.meta.url), "utf8");
+
+    const bodyOf = (name: string): string => {
+      const start = source.indexOf(`export const ${name} = `);
+      expect(start, `shares.${name} should exist`).toBeGreaterThan(-1);
+      const next = source.indexOf("\nexport const ", start + 1);
+      return source.slice(start, next === -1 ? source.length : next);
+    };
+
+    for (const name of [
+      "forPaper",
+      "forSession",
+      "sharePaper",
+      "shareSynthesis",
+      "revoke",
+      "setPaperOptIn",
+    ]) {
+      expect(
+        bodyOf(name),
+        `shares.${name} hands out or acts on a share and must check membership first`,
+      ).toContain("requireMembership(ctx,");
+    }
+
+    // And the inverse, so this is a fact about the module rather than about a
+    // string that happens to be everywhere in it: the public read does not
+    // check membership, because it cannot — there is nobody to check.
+    expect(bodyOf("view")).not.toContain("requireMembership(");
   });
 
   it("does put them in the internal queries that need them, so the check is real", () => {

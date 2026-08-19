@@ -43,6 +43,22 @@ auth.addHttpRoutes(http);
  * alternative, pinning to `SITE_URL`, buys no safety and breaks every preview
  * deployment and local origin that isn't the one configured.
  */
+/**
+ * The share routes' own block.
+ *
+ * Identical to the authed one except for what is missing: no
+ * `Access-Control-Allow-Headers: Authorization`. Reusing the block next door
+ * advertised a credential header on a route that accepts none, which is a
+ * small lie in a place where the whole argument is that this door has a
+ * different key — and an invitation to some future caller to try attaching a
+ * session to it.
+ */
+const SHARED_CORS_HEADERS: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, OPTIONS",
+  "Access-Control-Max-Age": "86400",
+};
+
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, OPTIONS",
@@ -71,6 +87,17 @@ function refuse(status: number, message: string): Response {
   return new Response(message, {
     status,
     headers: { ...CORS_HEADERS, "Content-Type": "text/plain; charset=utf-8" },
+  });
+}
+
+/** The same, minus the credential header the share routes do not accept. */
+function refuseShared(status: number, message: string): Response {
+  return new Response(message, {
+    status,
+    headers: {
+      ...SHARED_CORS_HEADERS,
+      "Content-Type": "text/plain; charset=utf-8",
+    },
   });
 }
 
@@ -125,7 +152,7 @@ http.route({
     return new Response(blob, {
       status: 200,
       headers: {
-        ...CORS_HEADERS,
+        ...SHARED_CORS_HEADERS,
         "Content-Type": "application/pdf",
         "Content-Disposition": `inline; filename="${headerFilename(delivery.title)}"`,
         // The URL is not a secret — the membership check on every request is
@@ -171,13 +198,27 @@ http.route({
  * terms — the page's `<meta name="robots">` protects the page and says nothing
  * about a file fetched from another origin.
  *
- * As above and for the same reason: nothing about this request is recorded.
+ * On what is and is not recorded, precisely — the loose version of this
+ * sentence was wrong. Margin writes nothing about this request: no row, no
+ * ledger entry, no counter that could say who came. What Margin does not
+ * control is the transport. The token travels as a query parameter, so it
+ * appears in Convex's own HTTP request logs and in any intermediary that logs
+ * URLs, and **revocation does not reach log storage** — taking the link down
+ * stops it working everywhere that matters and does not unwrite it from a log
+ * line. That is the cost of a capability in a URL, it is the same cost every
+ * unguessable link has, and it is why the token is scoped to one artifact and
+ * grants read only.
+ *
+ * The rate window in `shares.admitShare` is the one thing written on this
+ * path, and it is keyed by the share rather than the reader — see the table's
+ * own comment in `schema.ts`.
  */
 http.route({
   path: "/shared-pdf",
   method: "OPTIONS",
   handler: httpAction(
-    async () => new Response(null, { status: 204, headers: CORS_HEADERS }),
+    async () =>
+      new Response(null, { status: 204, headers: SHARED_CORS_HEADERS }),
   ),
 });
 
@@ -187,7 +228,7 @@ http.route({
   handler: httpAction(async (ctx, request) => {
     const token = new URL(request.url).searchParams.get("token");
     if (token === null) {
-      return refuse(400, "Ask for a paper.");
+      return refuseShared(400, "Ask for a paper.");
     }
 
     // One refusal for a token that was never minted, a link that has been
@@ -195,12 +236,19 @@ http.route({
     // no file on it. A prober must not be able to tell them apart.
     const delivery = await ctx.runQuery(internal.shares.pdfForShare, { token });
     if (delivery === null) {
-      return refuse(404, "No such paper.");
+      return refuseShared(404, "No such paper.");
+    }
+
+    // Between the lookup and the bytes. A dead token never gets here, so a
+    // prober cannot make this write; a loop on a live link gets a plain 429
+    // rather than the file, which is the whole expense of this route.
+    if (!(await ctx.runMutation(internal.shares.admitShare, { token }))) {
+      return refuseShared(429, "This link is busy. Try again shortly.");
     }
 
     const blob = await ctx.storage.get(delivery.storageId);
     if (blob === null) {
-      return refuse(404, "No such paper.");
+      return refuseShared(404, "No such paper.");
     }
 
     return new Response(blob, {

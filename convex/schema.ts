@@ -2834,4 +2834,30 @@ export default defineSchema({
      * leaving one of them has said nothing about the other.
      */
     .index("by_user_and_lab", ["userId", "labId"]),
+
+  /**
+   * A coarse rate window per live share. **Not a read log, and the difference
+   * is structural rather than a promise.**
+   *
+   * There is at most one row per share, it holds a start time and a running
+   * count, and the count resets in place when the window rolls over. It cannot
+   * answer who read anything, when any particular read happened, how many
+   * distinct people came, or whether a given person came at all — there is no
+   * identity in it, no per-read row, and no history, because the previous
+   * window is overwritten rather than kept. What it can answer is "is one link
+   * being hammered right now", which is the only question an abuse guard asks.
+   *
+   * Keyed by the share row rather than by the token string, for two reasons:
+   * it is the same 1:1 fact, and it keeps the capability from being copied
+   * into a second table where revocation does not reach.
+   *
+   * Rows are only ever created for a share that exists and is live, so probing
+   * cannot inflate this table, and `revoke` deletes the row — which is what
+   * keeps it bounded by the number of live shares rather than growing forever.
+   */
+  shareRateWindows: defineTable({
+    shareId: v.id("shares"),
+    windowStart: v.number(),
+    count: v.number(),
+  }).index("by_share", ["shareId"]),
 });

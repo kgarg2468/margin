@@ -67,12 +67,12 @@ function call<A, R>(registered: unknown): Handler<A, R> {
 const publicView = call<
   { token: string },
   | null
+  | { busy: true }
   | {
       kind: "paper";
       labName: string;
       title: string;
       hasPdf: boolean;
-      truncated: boolean;
       notes: {
         _id: Id<"annotations">;
         authorName: string;
@@ -148,9 +148,11 @@ function wireForm(validator: unknown): unknown {
 }
 
 function asPaper(answer: Awaited<ReturnType<typeof publicView>>) {
-  if (answer === null || answer.kind !== "paper") {
+  if (answer === null || "busy" in answer || answer.kind !== "paper") {
     throw new Error(
-      `expected a live paper share, got ${answer === null ? "null" : answer.kind}`,
+      `expected a live paper share, got ${
+        answer === null ? "null" : "busy" in answer ? "busy" : answer.kind
+      }`,
     );
   }
   return answer;
@@ -708,7 +710,9 @@ describe("a write-up share", () => {
     // The draft is a model's rearrangement that nobody signed. Only the copy a
     // person read, edited and put the lab's name on leaves the building.
     expect(JSON.stringify(answer)).not.toContain(SECRET);
-    expect(answer?.kind).toBe("synthesis");
+    expect(answer === null || "busy" in answer ? null : answer.kind).toBe(
+      "synthesis",
+    );
   });
 
   it("is not something an ordinary member may publish", async () => {
@@ -856,6 +860,93 @@ describe("taking a link down", () => {
     await expect(
       takeDown(ctx, { shareId: seen.share!._id }),
     ).rejects.toThrow(ConvexError);
+  });
+});
+
+describe("the abuse guard", () => {
+  /** One read past the ceiling, so the next one is the one being tested. */
+  async function exhaust(ctx: FakeCtx, token: string) {
+    for (let i = 0; i < 600; i++) {
+      await publicView(ctx, { token });
+    }
+  }
+
+  it("serves a popular link and refuses a hammered one, differently from a dead one", async () => {
+    const { ctx, paperId } = await setup();
+    const { token } = await share(ctx, { paperId });
+
+    await exhaust(ctx, token);
+    const refused = await publicView(ctx, { token });
+
+    // Not `null`. A reader holding a good link must never be told it is gone —
+    // they would believe it, and there is no way back from that answer.
+    expect(refused).not.toBeNull();
+    expect(refused).toEqual({ busy: true });
+    expect(await publicView(ctx, { token: "abcdefghijkmnpqrstuvwxyz23" })).toBeNull();
+  });
+
+  it("lets the same link through again once the window rolls over", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-08-18T12:00:00Z"));
+      const { ctx, paperId } = await setup();
+      const { token } = await share(ctx, { paperId });
+      await exhaust(ctx, token);
+      expect(await publicView(ctx, { token })).toEqual({ busy: true });
+
+      vi.setSystemTime(new Date("2026-08-18T12:01:30Z"));
+
+      expect(await publicView(ctx, { token })).not.toEqual({ busy: true });
+      // Rolled over in place: one row per link, and no record of how busy it
+      // used to be.
+      expect(ctx.db.all("shareRateWindows")).toHaveLength(1);
+      expect(rowAt(ctx.db.all("shareRateWindows")).count).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cannot be made to write anything by somebody guessing tokens", async () => {
+    const { ctx } = await setup();
+
+    for (const guess of [
+      "abcdefghijkmnpqrstuvwxyz23",
+      "zzzzzzzzzzzzzzzzzzzzzzzzzz",
+      "not-a-token",
+    ]) {
+      expect(await publicView(ctx, { token: guess })).toBeNull();
+    }
+
+    // A row per guessed token would be a storage denial-of-service wearing the
+    // costume of a rate limiter.
+    expect(ctx.db.all("shareRateWindows")).toEqual([]);
+  });
+
+  it("forgets the count when the link is taken down", async () => {
+    const { ctx, paperId } = await setup();
+    const { token } = await share(ctx, { paperId });
+    await publicView(ctx, { token });
+    expect(ctx.db.all("shareRateWindows")).toHaveLength(1);
+
+    const live = (await panel(ctx, { paperId })).share;
+    await takeDown(ctx, { shareId: live!._id });
+
+    expect(ctx.db.all("shareRateWindows")).toEqual([]);
+  });
+
+  it("counts links, and has nothing in it that could count people", () => {
+    const fields = Object.keys(
+      (
+        wireForm(schema.tables.shareRateWindows.validator) as {
+          value: Record<string, unknown>;
+        }
+      ).value,
+    ).sort();
+
+    // The whole assertion. There is no user, no session, no address, no
+    // fingerprint and no per-read row — so the question "who read this" has no
+    // answer here, structurally, rather than by anybody's restraint.
+    expect(fields).toEqual(["count", "shareId", "windowStart"]);
   });
 });
 
