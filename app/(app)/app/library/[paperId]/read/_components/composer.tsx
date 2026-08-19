@@ -5,11 +5,12 @@ import type { PopoverDismissal } from "@/app/(app)/app/_components/popover";
 import { readableError } from "@/app/(app)/app/_components/errors";
 import { api } from "@/convex/_generated/api";
 import type { Doc, Id } from "@/convex/_generated/dataModel";
+import { submitLabel } from "@/lib/command";
 import { collectMentionedIds } from "@/lib/mentions";
-import { errorClass } from "@/lib/ui";
+import { errorClass, keycapClass } from "@/lib/ui";
 import { useMutation } from "convex/react";
 import type { ComponentProps } from "react";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { EscapePressedIn } from "./composer-escape";
 import {
   composerEscape,
@@ -145,6 +146,26 @@ export function Composer({
    */
   const [picked, setPicked] = useState<PickedMention[]>([]);
   const mentions = collectMentionedIds(body, picked);
+
+  /**
+   * The keystroke, said out loud.
+   *
+   * `MentionField` has saved on ⌘/Ctrl+Enter since A1 and no surface has ever
+   * mentioned it, which makes it a feature only the person who wrote it has.
+   * Which modifier to name is knowable in the browser only, so the cap is held
+   * back until then rather than guessed and corrected — the row is laid out
+   * from the right and the sheet has a fixed width, so nothing moves when it
+   * arrives.
+   *
+   * The cap is decoration and says so. The announced form of the same fact
+   * belongs on the textarea, because that is the element the keystroke
+   * actually works in — `MentionField` carries it.
+   */
+  const [submitKeys, setSubmitKeys] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSubmitKeys(submitLabel(window.navigator.platform));
+  }, []);
 
   async function save() {
     if (saving) {
@@ -404,6 +425,19 @@ export function Composer({
               >
                 Cancel
               </button>
+              {/*
+               * Nothing at all until the platform is known, rather than an
+               * empty cap that fills in: a bordered blank is a control that
+               * failed to load. It costs nothing to omit — the cap is the last
+               * thing in the row and takes its space from `ml-auto`, so the
+               * buttons do not move when it arrives, and it is shorter than
+               * they are, so the row's height never depended on it.
+               */}
+              {submitKeys !== null && (
+                <kbd aria-hidden className={`${keycapClass} ml-auto`}>
+                  {submitKeys}
+                </kbd>
+              )}
             </div>
           )}
 
