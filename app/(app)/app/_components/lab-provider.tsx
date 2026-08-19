@@ -48,6 +48,13 @@ type LabContextValue = {
   libraryChecked: boolean;
   /** Whether that ask is what brought the library into being, just now. */
   libraryJustCreated: boolean;
+  /**
+   * Spend that signal. Called by the one redirect that honours it, because this
+   * provider lives in the layout and outlives the page: left standing, the flag
+   * would send a member who has come back to `/app` to `?add=1` again and
+   * reopen the panel they closed.
+   */
+  spendLibraryJustCreated: () => void;
 };
 
 const LabContext = createContext<LabContextValue | null>(null);
@@ -130,6 +137,11 @@ export function LabProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const dismissInviteNotice = useCallback(() => setInviteNotice(null), []);
+
+  const spendLibraryJustCreated = useCallback(
+    () => setLibraryJustCreated(false),
+    [],
+  );
 
   /**
    * Try to spend one invite code, and say what happened.
@@ -268,6 +280,7 @@ export function LabProvider({ children }: { children: ReactNode }) {
         retryInviteNotice,
         libraryChecked,
         libraryJustCreated,
+        spendLibraryJustCreated,
       }}
     >
       {children}
