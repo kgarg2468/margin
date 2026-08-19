@@ -113,6 +113,27 @@ const SINCE_AWAY_PAPERS = 5;
 const SINCE_AWAY_POOL_LIMIT = 200;
 
 /**
+ * How a lab of one spends that same per-paper budget, and why it is split.
+ *
+ * Every other read in this file takes the newest rows, because a delta is
+ * recent by definition: the cap can only ever cut annotations too old to have
+ * been news to anybody. Recall is the exact inverse. It wants the rows the
+ * window and the age floor will *keep*, which are the oldest ones, and a
+ * newest-first cap throws those away first — so on a paper a member has
+ * annotated more than `SINCE_AWAY_POOL_LIMIT` times, a descending read is
+ * enough on its own to make recall permanently empty. Every row it could see
+ * would be younger than the fortnight.
+ *
+ * So the budget is spent from both ends of the same index, and the split says
+ * which end the feature is about. The newest slice exists only to find the note
+ * just written on a passage the member annotated before — tier one of
+ * `assembleRecall` — and nobody writes fifty notes on one paper between two
+ * catch-ups. The two together cost exactly what one arrival cost before.
+ */
+const SOLO_RECALL_POOL_LIMIT = 150;
+const SOLO_FRESH_POOL_LIMIT = SINCE_AWAY_POOL_LIMIT - SOLO_RECALL_POOL_LIMIT;
+
+/**
  * How old one of your own notes has to be before a one-member lab may hand it
  * back to you.
  *
@@ -181,6 +202,8 @@ const digestSummary = v.object({
     v.literal("session-start"),
     v.literal("since-away"),
   ),
+  /** Assembled from the reader's own margin — see the schema's `recall`. */
+  recall: v.optional(v.boolean()),
   generatedAt: v.number(),
   deliveredAt: v.optional(v.number()),
   acknowledgedAt: v.optional(v.number()),
@@ -668,6 +691,48 @@ async function labMemberIds(
   return new Set(memberships.map((membership) => membership.userId));
 }
 
+/**
+ * One paper's lab-visible annotations, as much of them as an arrival may read.
+ *
+ * Privacy is the index and not a filter, here as everywhere else in this file:
+ * `by_paper_and_visibility` at `"lab"` cannot return a private annotation, so a
+ * private note cannot reach a digest row even in a lab of one — where it would
+ * be the reader's own and look harmless. It is not harmless: the row it would
+ * land in outlives the lab's size, nothing re-reads a stored digest's
+ * provenance, and a second member joining next month would be reading a card
+ * built out of writing that was never shared with them.
+ *
+ * The ordering is the whole reason this is a function. See
+ * `SOLO_RECALL_POOL_LIMIT`: a lab of one wants both ends of the paper's
+ * history and the ordinary arrival wants only the newest of it.
+ */
+async function visibleForArrival(
+  ctx: MutationCtx,
+  paperId: Id<"papers">,
+  solo: boolean,
+): Promise<Doc<"annotations">[]> {
+  const rows = (order: "asc" | "desc", limit: number) =>
+    ctx.db
+      .query("annotations")
+      .withIndex("by_paper_and_visibility", (q) =>
+        q.eq("paperId", paperId).eq("visibility", "lab"),
+      )
+      .order(order)
+      .take(limit);
+
+  if (!solo) {
+    return await rows("desc", SINCE_AWAY_POOL_LIMIT);
+  }
+  const oldest = await rows("asc", SOLO_RECALL_POOL_LIMIT);
+  const newest = await rows("desc", SOLO_FRESH_POOL_LIMIT);
+  // Deduped by id: a paper with fewer annotations than the budget is returned
+  // by both reads, and a row counted twice would be a note the digest says the
+  // member left twice.
+  const merged = new Map(oldest.map((row) => [row._id, row]));
+  for (const row of newest) merged.set(row._id, row);
+  return [...merged.values()];
+}
+
 const MONTH_NAMES = [
   "January",
   "February",
@@ -902,6 +967,13 @@ export const isSolo = query({
  * way, because "at most one unacknowledged since-away digest per member per
  * lab" is a property of the row rather than of what is written on it.
  *
+ * `recall` rides along because it is a fact about *this* assembly rather than
+ * about the row it lands in: a lab that gained its second member while a solo
+ * card sat unread rebuilds an ordinary digest over the top of it, and the
+ * caption has to move with the contents. Written as `undefined` rather than
+ * `false` in that case, which removes the field — the schema's reading of an
+ * absent `recall` is "assembled from the lab", and that is now true again.
+ *
  * `waiting` is the stale card to write over, or null to insert a fresh one.
  * Writing over it is safe for the reason the caller establishes: an
  * unacknowledged digest is also an undelivered one — `markDigestSeen` stamps
@@ -918,14 +990,18 @@ async function writeSinceAway(
       items: DigestItem<Id<"papers">, Id<"annotations">>[];
       droppedCount: number;
     };
+    /** True when the assembly came from the member's own margin. */
+    recall: boolean;
     waiting: Doc<"digests"> | null;
   },
 ): Promise<Id<"digests">> {
   const { items, droppedCount } = input.assembled;
   const dropped = droppedCount > 0 ? droppedCount : undefined;
+  const recall = input.recall ? true : undefined;
   if (input.waiting !== null) {
     await ctx.db.patch(input.waiting._id, {
       generatedAt: input.now,
+      recall,
       droppedCount: dropped,
       items,
     });
@@ -935,6 +1011,7 @@ async function writeSinceAway(
     userId: input.userId,
     labId: input.labId,
     boundary: "since-away",
+    recall,
     generatedAt: input.now,
     droppedCount: dropped,
     items,
@@ -1059,16 +1136,38 @@ export const catchUp = mutation({
       )
       .order("desc")
       .take(SINCE_AWAY_EVENT_SCAN);
-    const paperIds = papersToScan<Id<"papers">>(beats, SINCE_AWAY_PAPERS);
-    if (paperIds.length === 0) {
+    if (beats.length === 0) {
       return waiting?._id ?? null;
     }
 
     // Who is actually in this lab, right now. Two facts come out of one read:
     // which authors a digest may call colleagues at all, and whether there are
-    // any — a lab of one is where the recall boundary takes over.
+    // any — a lab of one is where the recall boundary takes over. Read after
+    // the ledger so the commonest arrival of all, the one where nothing has
+    // happened, still costs a single query.
     const memberIds = await labMemberIds(ctx, args.labId);
     const solo = memberIds.size === 1;
+
+    // Whose writing is allowed to nominate a paper.
+    //
+    // A ledger row is permanent and a membership is not, so a lab of one still
+    // has the beats of everybody who has ever left it. Left alone, those beats
+    // would nominate a paper the member themselves has not touched since their
+    // cursor, and recall would answer with their old notes on it — a card that
+    // appears because somebody who is gone once wrote something, phrased as
+    // though the member had just come back to the paper. Solo recall's trigger
+    // is the member's own return to their own work, so it is their own beats
+    // that select the field. Filtered after the scan rather than before it: the
+    // scan is already a sample of the newest few hundred facts, and narrowing
+    // that sample is the honest way to spend it in a lab where the member is
+    // almost always the only actor in it.
+    const qualifying = solo
+      ? beats.filter((beat) => beat.actorId === userId)
+      : beats;
+    const paperIds = papersToScan<Id<"papers">>(qualifying, SINCE_AWAY_PAPERS);
+    if (paperIds.length === 0) {
+      return waiting?._id ?? null;
+    }
 
     const names = new Map<Id<"users">, string>();
     const paperTitles = new Map<Id<"papers">, string>();
@@ -1089,16 +1188,10 @@ export const catchUp = mutation({
         continue;
       }
 
-      // Privacy is the index, not a filter, exactly as in the session job:
-      // `by_paper_and_visibility` at "lab" cannot return a private annotation.
-      const visible = await ctx.db
-        .query("annotations")
-        .withIndex("by_paper_and_visibility", (q) =>
-          q.eq("paperId", paperId).eq("visibility", "lab"),
-        )
-        .order("desc")
-        .take(SINCE_AWAY_POOL_LIMIT);
-      // And membership is the second filter, for the reason the session job
+      // Privacy is the index, not a filter, exactly as in the session job —
+      // and in a lab of one the budget is read from both ends of that index.
+      const visible = await visibleForArrival(ctx, paperId, solo);
+      // Membership is the second filter, for the reason the session job
       // gives: an author who is not in this lab is not a colleague, so their
       // note is neither news nor the far half of anything. In a solo lab it is
       // also what keeps the pool to one person's own margin, which is the only
@@ -1174,6 +1267,7 @@ export const catchUp = mutation({
         labId: args.labId,
         now,
         assembled: recall,
+        recall: true,
         waiting: plan.rebuild ? waiting : null,
       });
     }
@@ -1223,6 +1317,7 @@ export const catchUp = mutation({
       labId: args.labId,
       now,
       assembled: { items, droppedCount },
+      recall: false,
       waiting: plan.rebuild ? waiting : null,
     });
   },
@@ -1255,6 +1350,7 @@ export const listMine = query({
       _id: digest._id,
       sessionId: digest.sessionId,
       boundary: digest.boundary,
+      recall: digest.recall,
       generatedAt: digest.generatedAt,
       deliveredAt: digest.deliveredAt,
       acknowledgedAt: digest.acknowledgedAt,

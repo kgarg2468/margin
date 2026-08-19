@@ -8,6 +8,7 @@ import {
   buildSessionPrep,
   catchUp,
   isSolo,
+  listMine,
   recallWhen,
 } from "./digests";
 
@@ -452,11 +453,109 @@ describe("catchUp in a lab of one", () => {
     await wroteOn(ctx, seed, seed.me, today, NOW - 30 * 60 * 1000);
 
     const first = await arrive(ctx, seed.labId);
-    vi.setSystemTime(NOW + 2 * 60 * 60 * 1000);
+    expect(rowAt(ctx.db.all("digests")).items).toHaveLength(1);
+
+    // A memory that was not in the first assembly, and a clock two hours on.
+    // The row has to come back *rebuilt*: an implementation that found the
+    // waiting card and handed it back untouched would keep the same id and the
+    // same count, and the reader would be looking at the morning's digest all
+    // evening — which is the exact rot `REBUILD_AFTER_MS` exists to prevent.
+    await noteAt(ctx, { ...seed, memberId: seed.me }, NOW - 200 * DAY, {
+      pageIndex: 9,
+      start: 900,
+      end: 940,
+      quote: "the freeze–thaw cycle nobody controlled for",
+    });
+    const later = NOW + 2 * 60 * 60 * 1000;
+    vi.setSystemTime(later);
     const second = await arrive(ctx, seed.labId);
 
     expect(second).toBe(first);
     expect(ctx.db.all("digests")).toHaveLength(1);
+    const rebuilt = rowAt(ctx.db.all("digests"));
+    expect(rebuilt.generatedAt).toBe(later);
+    expect(rebuilt.items).toHaveLength(2);
+    expect(rebuilt.items.map((item) => item.line).join(" ")).toContain(
+      "the freeze–thaw cycle nobody controlled for",
+    );
+  });
+
+  it("reaches past the newest rows to find a memory on a busy paper", async () => {
+    // The read this feature needs is the opposite of the one every other
+    // digest needs. A member who has annotated one paper more than the
+    // per-paper budget has a newest-first window made entirely of writing too
+    // recent to recall — so a descending cap alone answers "you have no
+    // memories here" to precisely the member with the most of them.
+    const ctx = new FakeCtx();
+    const seed = await seedSoloLab(ctx);
+    const memory = await noteAt(
+      ctx,
+      { ...seed, memberId: seed.me },
+      NOW - 150 * DAY,
+      { quote: "the cold step is where the variance enters", start: 900, end: 942, pageIndex: 9 },
+    );
+    let last = memory;
+    for (let index = 0; index < 220; index++) {
+      last = await noteAt(
+        ctx,
+        { ...seed, memberId: seed.me },
+        NOW - (220 - index) * 60 * 1000,
+        { start: index * 10, end: index * 10 + 5, pageIndex: 1 },
+      );
+    }
+    await wroteOn(ctx, seed, seed.me, last, NOW - 60 * 1000);
+
+    await arrive(ctx, seed.labId);
+
+    const digest = rowAt(ctx.db.all("digests"));
+    expect(rowAt(digest.items).annotationIds).toContain(memory);
+    expect(rowAt(digest.items).line).toContain(
+      "the cold step is where the variance enters",
+    );
+  });
+
+  it("materializes nothing from a note that was private or taken back", async () => {
+    // The build-time half of redaction, which is the only half a stored digest
+    // has: `listMine` hands back what was written into the row. So the row has
+    // to be clean when it is written — the live note is the only one of these
+    // three that may appear, and the other two may not leave a trace in it.
+    const ctx = new FakeCtx();
+    const seed = await seedSoloLab(ctx);
+    await noteAt(ctx, { ...seed, memberId: seed.me }, NOW - 120 * DAY, {
+      visibility: "private",
+      quote: "the unpublished number nobody else has",
+      start: 300,
+      end: 338,
+    });
+    const withdrawn = await noteAt(
+      ctx,
+      { ...seed, memberId: seed.me },
+      NOW - 110 * DAY,
+      {
+        deletedAt: NOW - 50 * DAY,
+        quote: "the sentence they took back",
+        start: 500,
+        end: 527,
+      },
+    );
+    const live = await noteAt(ctx, { ...seed, memberId: seed.me }, NOW - 100 * DAY);
+    const today = await noteAt(
+      ctx,
+      { ...seed, memberId: seed.me },
+      NOW - 30 * 60 * 1000,
+      { start: 800, end: 820, pageIndex: 5 },
+    );
+    await wroteOn(ctx, seed, seed.me, today, NOW - 30 * 60 * 1000);
+
+    await arrive(ctx, seed.labId);
+
+    const digest = rowAt(ctx.db.all("digests"));
+    const cited = digest.items.flatMap((item) => item.annotationIds);
+    const prose = digest.items.map((item) => item.line).join(" ");
+    expect(cited).toContain(live);
+    expect(cited).not.toContain(withdrawn);
+    expect(prose).not.toContain("the unpublished number nobody else has");
+    expect(prose).not.toContain("the sentence they took back");
   });
 });
 
@@ -527,6 +626,78 @@ describe("membership decides what a digest may call activity", () => {
     } as never);
 
     expect(ctx.db.all("digests")).toHaveLength(0);
+  });
+
+  it("will not let a departed author's beat nominate a paper for recall", async () => {
+    // The ledger is permanent and a membership is not, so a lab of one still
+    // holds the writing of everybody who has ever left it. Their beat must not
+    // select a paper: the member here has not been near this one since their
+    // cursor, and a card claiming otherwise would be the product inventing a
+    // return to work that never happened.
+    const ctx = new FakeCtx();
+    const seed = await seedSoloLab(ctx);
+    const departed = await ctx.db.insert("users", { name: "Gone Already" });
+    await noteAt(ctx, { ...seed, memberId: seed.me }, NOW - 120 * DAY);
+    const theirs = await noteAt(
+      ctx,
+      { ...seed, memberId: departed },
+      NOW - 30 * 60 * 1000,
+      { memberId: departed },
+    );
+    await wroteOn(ctx, seed, departed, theirs, NOW - 30 * 60 * 1000);
+
+    expect(await arrive(ctx, seed.labId)).toBeNull();
+    expect(ctx.db.all("digests")).toHaveLength(0);
+  });
+
+  it("stamps where a digest came from on the row that carries it", async () => {
+    // Provenance is a fact about the assembly, so it is recorded when the
+    // assembly happens. Read back off the row, a card cannot be re-captioned
+    // by a lab that changed size after it was written.
+    const ctx = new FakeCtx();
+    const seed = await seedSoloLab(ctx);
+    await noteAt(ctx, { ...seed, memberId: seed.me }, NOW - 120 * DAY);
+    const today = await noteAt(
+      ctx,
+      { ...seed, memberId: seed.me },
+      NOW - 30 * 60 * 1000,
+    );
+    await wroteOn(ctx, seed, seed.me, today, NOW - 30 * 60 * 1000);
+    await arrive(ctx, seed.labId);
+    expect(rowAt(ctx.db.all("digests")).recall).toBe(true);
+
+    const mine = await handlerOf(listMine)(ctx, { labId: seed.labId } as never);
+    expect(rowAt(mine as { recall?: boolean }[]).recall).toBe(true);
+  });
+
+  it("drops the stamp when a second member turns the card into ordinary mail", async () => {
+    const ctx = new FakeCtx();
+    const seed = await seedSoloLab(ctx);
+    await noteAt(ctx, { ...seed, memberId: seed.me }, NOW - 120 * DAY);
+    const today = await noteAt(
+      ctx,
+      { ...seed, memberId: seed.me },
+      NOW - 30 * 60 * 1000,
+    );
+    await wroteOn(ctx, seed, seed.me, today, NOW - 30 * 60 * 1000);
+    await arrive(ctx, seed.labId);
+
+    // Somebody joins and writes, and the waiting card is rebuilt out of their
+    // writing. The caption has to travel with the contents.
+    const them = await addColleague(ctx, seed.labId);
+    const later = NOW + 2 * 60 * 60 * 1000;
+    const theirs = await noteAt(
+      ctx,
+      { ...seed, memberId: them },
+      NOW + 60 * 60 * 1000,
+      { memberId: them, start: 800, end: 830, pageIndex: 6 },
+    );
+    await wroteOn(ctx, seed, them, theirs, NOW + 60 * 60 * 1000);
+    vi.setSystemTime(later);
+    await arrive(ctx, seed.labId);
+
+    expect(ctx.db.all("digests")).toHaveLength(1);
+    expect(rowAt(ctx.db.all("digests")).recall).toBeUndefined();
   });
 
   it("answers whether the lab is one person, from the membership rows", async () => {

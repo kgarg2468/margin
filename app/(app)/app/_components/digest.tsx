@@ -140,18 +140,36 @@ export function SessionDigest({
  */
 export function DigestInbox({ labId }: { labId: Id<"labs"> }) {
   const digests = useQuery(api.digests.listMine, { labId });
-  // Counted from the membership rows by the same module that builds the
-  // digest, so the caption and the contents cannot disagree. It joins the
-  // slot's `loaded` below, so an empty inbox does not resolve to a framing
-  // before it knows which one is true. Mail already in hand still shows
-  // without waiting on it — that trade is `inboxState`'s and unchanged — and
-  // both queries answer in the same round trip anyway.
+  // Only the *empty* inbox asks how big the lab is, and that is the one
+  // question the lab's current size legitimately answers: the standing line
+  // below says what this reader will be shown in a fortnight, which is a fact
+  // about the lab now and not about any stored row. Everything with a card in
+  // it reads its framing off the card. Counted from `memberships` by the same
+  // module that builds the digest rather than from `labs.memberCount`, so the
+  // page and `catchUp` cannot disagree about what solo means.
+  //
+  // It joins the slot's `loaded` below, so an empty inbox does not resolve to
+  // a framing before it knows which one is true. Mail already in hand still
+  // shows without waiting on it — that trade is `inboxState`'s and unchanged —
+  // and both queries answer in the same round trip anyway.
   const solo = useQuery(api.digests.isSolo, { labId });
   const catchUp = useMutation(api.digests.catchUp);
   const reduce = useReducedMotion();
   const unread = (digests ?? []).filter(
     (digest) => digest.acknowledgedAt === undefined,
   );
+
+  // The heading describes the cards under it, so it is read off the cards.
+  //
+  // `recall` is stamped on the row when it is built, which is the only moment
+  // anybody knows where the lines came from. The lab's current size cannot
+  // stand in for it: somebody joining would put colleague words over a card
+  // assembled from the reader's own margin, and somebody leaving would put
+  // "from your own margin" over a card full of their writing. An inbox holding
+  // both kinds at once — a solo lab that has just gained a second member —
+  // takes the general heading, because that one is true of both.
+  const allRecall =
+    unread.length > 0 && unread.every((digest) => digest.recall === true);
 
   // Arriving is the boundary. Nothing on the server can know a member was away
   // until they turn up — Margin keeps no last-active stamp to poll, by
@@ -250,10 +268,10 @@ export function DigestInbox({ labId }: { labId: Id<"labs"> }) {
           className="flex flex-col gap-4"
         >
           <h2 className={eyebrowClass}>
-            {solo === true ? SOLO_SECTION_LABEL : "Since you were away"}
+            {allRecall ? SOLO_SECTION_LABEL : "Since you were away"}
           </h2>
           <p className="max-w-prose font-sans text-xs text-ink-faint">
-            {solo === true
+            {allRecall
               ? "Your own earlier notes, handed back when you come back to a paper you have written on before. Nothing here is new — that is the point. Only you see this."
               : "Delivered at a boundary — before a session, as it starts, and when you come back after time away — never on every write. Only you see this."}
           </p>
@@ -276,7 +294,7 @@ export function DigestInbox({ labId }: { labId: Id<"labs"> }) {
                   <DigestCard
                     digest={digest}
                     labId={labId}
-                    recall={solo === true && digest.boundary === "since-away"}
+                    recall={digest.recall === true}
                   />
                 </motion.div>
               ))}
