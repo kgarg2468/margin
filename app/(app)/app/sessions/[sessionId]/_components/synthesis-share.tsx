@@ -48,9 +48,16 @@ export function SynthesisShare({
     }
   }, [create, sessionId]);
 
-  if (state === undefined || !state.approved) return null;
+  if (state === undefined) return null;
 
   const { share } = state;
+
+  // `approved` now means *publishable* rather than merely signed, so it goes
+  // false while a note the copy cites is withdrawn. Hiding the whole panel on
+  // that would take away the one sentence explaining why an existing link has
+  // stopped opening, at exactly the moment somebody needs it. No write-up to
+  // share and nothing shared already is the only case with nothing to say.
+  if (share === null && !state.approved) return null;
 
   if (share === null) {
     if (!state.canShare) return null;

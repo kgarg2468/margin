@@ -17,6 +17,7 @@ import {
   revoke,
   setPaperOptIn,
   sharePaper,
+  sweepRateWindows,
   shareSynthesis,
   view,
 } from "./shares";
@@ -125,7 +126,8 @@ const pdf = call<
   { token: string },
   { storageId: Id<"_storage">; title: string } | null
 >(pdfForShare);
-const admitPdf = call<{ token: string }, boolean>(admitShare);
+const admitPdf = call<{ token: string }, "ok" | "busy" | "dead">(admitShare);
+const sweepWindows = call<Record<string, never>, null>(sweepRateWindows);
 
 /** A lab, a paper, a session, and the PI signed in. */
 async function setup() {
@@ -654,6 +656,34 @@ describe("a write-up share", () => {
     // Same predicate as the read, so mint and read cannot drift apart again.
     await expect(shareWriteUp(ctx, { sessionId })).rejects.toThrow(ConvexError);
     expect(ctx.db.all("shares")).toHaveLength(0);
+    // And no ledger row claiming the lab published something it did not.
+    expect(ctx.db.all("events").map((event) => event.type)).not.toContain(
+      "share.created",
+    );
+  });
+
+  it("does not offer a button whose mutation could only fail", async () => {
+    const { ctx, pi, labId, paperId, sessionId } = await setup();
+    const citedId = await seedAnnotation(
+      ctx,
+      { labId, paperId, memberId: pi },
+      { body: SECRET },
+    );
+    await ctx.db.patch(sessionId, {
+      synthesis: "## What we worked out",
+      synthesisApprovedAt: 100,
+      synthesisCitedAnnotationIds: [citedId],
+    });
+    expect((await sessionPanel(ctx, { sessionId })).approved).toBe(true);
+
+    // Signed, and unpublishable. The panel used to read the signature alone,
+    // so it kept offering the control after the copy stopped being shareable —
+    // and the mutation behind it could only reject.
+    await ctx.db.patch(citedId, { visibility: "private" });
+    expect((await sessionPanel(ctx, { sessionId })).approved).toBe(false);
+
+    await ctx.db.patch(sessionId, { synthesisCitedAnnotationIds: undefined });
+    expect((await sessionPanel(ctx, { sessionId })).approved).toBe(false);
   });
 
   it("does not offer the control while only a draft exists", async () => {
@@ -842,13 +872,58 @@ describe("leaving the lab", () => {
     );
   });
 
+  it("stops publishing an ex-member at once, not when the sweep catches up", async () => {
+    const { ctx, pi, member, labId, paperId } = await setup();
+    await seedAnnotation(
+      ctx,
+      { labId, paperId, memberId: member },
+      { body: SECRET },
+    );
+    ctx.auth = { userId: member };
+    await optIn(ctx, { paperId, included: true });
+    // Past one batch, so the sweep cannot finish inside the departure.
+    for (let i = 0; i < 300; i++) {
+      const other = await ctx.db.insert("papers", {
+        labId,
+        title: `Paper ${i}`,
+        addedBy: member,
+        ingestStatus: "ready",
+      });
+      await ctx.db.insert("paperShareOptIns", {
+        labId,
+        paperId: other,
+        userId: member,
+        optedInAt: 1,
+      });
+    }
+    ctx.auth = { userId: pi };
+    const { token } = await share(ctx, { paperId });
+    expect(JSON.stringify(await publicView(ctx, { token }))).toContain(SECRET);
+
+    ctx.auth = { userId: member };
+    await leaveLab(ctx, { labId });
+
+    // The whole finding. Their opt-in row for *this* paper may or may not have
+    // been in the first batch, and the continuation has not run — so if the
+    // read trusted the rows alone, a departed member's writing would go on
+    // being published to strangers until a background job caught up, or
+    // forever if it died. Consent is the row *and* current membership, asked
+    // on the read, so departure lands on the very next load.
+    expect(
+      ctx.scheduled.filter((job) => job.name.includes("continueOptInSweep")),
+    ).toHaveLength(1);
+    expect(JSON.stringify(await publicView(ctx, { token }))).not.toContain(
+      SECRET,
+    );
+  });
+
   it("cannot be blocked by a member who opted in to too much", async () => {
     const { ctx, member, labId } = await setup();
-    // Past one batch on purpose. An unbounded sweep would make this member's
-    // own removal a transaction too large to commit — and removal is the one
-    // operation that must never be refusable, since the reason for it may be
-    // that they should not be in this lab another minute.
-    for (let i = 0; i < 300; i++) {
+    // Two full batches and nothing over, which is the termination case worth
+    // pinning: a sweep that stopped only on a short batch would schedule one
+    // last job that finds nothing, and a sweep that never scheduled on a full
+    // batch would silently leave rows behind.
+    for (let i = 0; i < 512; i++) {
       const paperId = await ctx.db.insert("papers", {
         labId,
         title: `Paper ${i}`,
@@ -874,19 +949,78 @@ describe("leaving the lab", () => {
 
     const mine = () =>
       ctx.db.all("paperShareOptIns").filter((row) => row.userId === member);
-    expect(mine()).toHaveLength(300 - 256);
 
-    // The rest is handed to a scheduled continuation rather than dropped.
-    const followUp = ctx.scheduled.filter((job) =>
+    // Drain it the way the scheduler would, and count the rounds rather than
+    // invoking one and calling it proved.
+    let rounds = 0;
+    let pending = ctx.scheduled.filter((job) =>
       job.name.includes("continueOptInSweep"),
     );
-    expect(followUp).toHaveLength(1);
+    while (pending.length > 0) {
+      rounds++;
+      expect(rounds, "the sweep rescheduled itself forever").toBeLessThan(10);
+      const next = pending[pending.length - 1]!;
+      ctx.scheduled.length = 0;
+      await continueSweep(
+        ctx,
+        next.args as { userId: Id<"users">; labId: Id<"labs"> },
+      );
+      pending = ctx.scheduled.filter((job) =>
+        job.name.includes("continueOptInSweep"),
+      );
+    }
+
+    expect(mine()).toEqual([]);
+    // 512 = 256 + 256 + an empty round: the exactly-full batch cannot tell it
+    // is the last one, so it schedules once more and that round finds nothing.
+    expect(rounds).toBe(2);
+  });
+
+  it("does not delete the choices of a member who came back", async () => {
+    const { ctx, member, labId, paperId } = await setup();
+    for (let i = 0; i < 300; i++) {
+      const other = await ctx.db.insert("papers", {
+        labId,
+        title: `Paper ${i}`,
+        addedBy: member,
+        ingestStatus: "ready",
+      });
+      await ctx.db.insert("paperShareOptIns", {
+        labId,
+        paperId: other,
+        userId: member,
+        optedInAt: 1,
+      });
+    }
+    ctx.auth = { userId: member };
+    await leaveLab(ctx, { labId });
+
+    const followUp = ctx.scheduled.filter((job) =>
+      job.name.includes("continueOptInSweep"),
+    )[0]!;
+
+    // Re-invited, and they opt something in again — a fresh, current decision.
+    await ctx.db.insert("memberships", {
+      labId,
+      userId: member,
+      role: "member",
+      joinedAt: 2,
+    });
+    await optIn(ctx, { paperId, included: true });
 
     await continueSweep(
       ctx,
-      followUp[0]!.args as { userId: Id<"users">; labId: Id<"labs"> },
+      followUp.args as { userId: Id<"users">; labId: Id<"labs"> },
     );
-    expect(mine()).toEqual([]);
+
+    // A job carries a decision across time, and the world moved. Deleting here
+    // would reach past the departure it was cleaning up and silently undo a
+    // current member's stored choice with no toggle ever flipped.
+    expect(
+      ctx.db
+        .all("paperShareOptIns")
+        .filter((row) => row.userId === member && row.paperId === paperId),
+    ).toHaveLength(1);
   });
 
   it("says nothing about a lab the member has not left", async () => {
@@ -968,7 +1102,7 @@ describe("the abuse guard", () => {
    * counted here.
    */
   async function fetchPdf(ctx: FakeCtx, token: string): Promise<boolean> {
-    return await admitPdf(ctx, { token });
+    return (await admitPdf(ctx, { token })) === "ok";
   }
 
   it("serves a popular link and refuses a hammered one", async () => {
@@ -998,7 +1132,7 @@ describe("the abuse guard", () => {
   it("holds the ceiling it documents, rather than a fraction of it", async () => {
     vi.useFakeTimers();
     try {
-      // Mid-minute on purpose: windows are aligned to the clock, not to
+      // Mid-minute on purpose: the window is aligned to the clock, not to
       // whenever the first fetch happened to land, so starting here must not
       // shorten the window or shrink what it admits.
       vi.setSystemTime(new Date("2026-08-18T12:00:37Z"));
@@ -1010,17 +1144,13 @@ describe("the abuse guard", () => {
         if (!(await fetchPdf(ctx, token))) break;
         served++;
       }
-
-      // The bug this pins: per-row windows drifting apart, with the row picked
-      // at random, let the link saturate well below the stated limit. Summing
-      // across rows against one shared boundary makes 600 mean 600.
       expect(served).toBe(600);
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("lets the same link through again once the window rolls over", async () => {
+  it("keeps one row per link and resets it in place", async () => {
     vi.useFakeTimers();
     try {
       vi.setSystemTime(new Date("2026-08-18T12:00:00Z"));
@@ -1029,20 +1159,60 @@ describe("the abuse guard", () => {
       while (await fetchPdf(ctx, token)) {
         /* up to the ceiling */
       }
+      expect(ctx.db.all("shareRateWindows")).toHaveLength(1);
 
       vi.setSystemTime(new Date("2026-08-18T12:01:30Z"));
       expect(await fetchPdf(ctx, token)).toBe(true);
 
-      // And it kept no memory of the minute that refused. Rows from a window
-      // that has ended are deleted rather than rewritten, so nothing at rest
-      // says when this link was last pulled.
+      // The ended window is overwritten rather than left beside a new one, so
+      // the earlier minute's timestamp is gone the moment anybody comes back.
+      // What remains is the current minute and a count — which is exactly what
+      // the table's comment claims, no more.
       const rows = ctx.db.all("shareRateWindows");
-      expect(rows.length).toBeLessThanOrEqual(8);
-      expect(
-        rows.every(
-          (row) => row.windowStart === Date.parse("2026-08-18T12:01:00Z"),
-        ),
-      ).toBe(true);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.windowStart).toBe(Date.parse("2026-08-18T12:01:00Z"));
+      expect(rows[0]?.count).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("lets the cron take the counters of links nobody came back to", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-08-18T12:00:00Z"));
+      const { ctx, paperId } = await setup();
+      const { token } = await share(ctx, { paperId });
+      await fetchPdf(ctx, token);
+      expect(ctx.db.all("shareRateWindows")).toHaveLength(1);
+
+      // A live link's row is overwritten by its next fetch; this is the other
+      // case. Without the cron, one number and one minute would sit here for
+      // as long as the link went untouched, and the schema's promise about
+      // what survives at rest would be bounded by nothing.
+      vi.setSystemTime(new Date("2026-08-18T12:40:00Z"));
+      await sweepWindows(ctx, {});
+
+      expect(ctx.db.all("shareRateWindows")).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not sweep a counter that is still the current minute", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-08-18T12:00:10Z"));
+      const { ctx, paperId } = await setup();
+      const { token } = await share(ctx, { paperId });
+      await fetchPdf(ctx, token);
+
+      vi.setSystemTime(new Date("2026-08-18T12:00:50Z"));
+      await sweepWindows(ctx, {});
+
+      // Sweeping the live window would hand a hammered link a fresh ceiling
+      // every time the cron happened to fire.
+      expect(ctx.db.all("shareRateWindows")).toHaveLength(1);
     } finally {
       vi.useRealTimers();
     }
@@ -1057,7 +1227,7 @@ describe("the abuse guard", () => {
       "not-a-token",
     ]) {
       expect(await publicView(ctx, { token: guess })).toBeNull();
-      expect(await fetchPdf(ctx, guess)).toBe(false);
+      expect(await admitPdf(ctx, { token: guess })).toBe("dead");
     }
 
     // A row per guessed token would be a storage denial-of-service wearing the
@@ -1077,6 +1247,21 @@ describe("the abuse guard", () => {
     // no document, so it cannot conflict with a member annotating the paper
     // and cannot be spent by a render nobody receives.
     expect(ctx.db.all("shareRateWindows")).toEqual([]);
+  });
+
+  it("tells a revoked link apart from a throttled one", async () => {
+    const { ctx, paperId } = await setup();
+    const { token } = await share(ctx, { paperId });
+    expect(await admitPdf(ctx, { token })).toBe("ok");
+
+    const live = (await panel(ctx, { paperId })).share;
+    await takeDown(ctx, { shareId: live!._id });
+
+    // Not "busy". A link revoked between the route's lookup and its admission
+    // is dead, and telling that reader to come back later would be both false
+    // and an oracle — it would distinguish "revoked a moment ago" from "never
+    // existed", which the 404 exists to prevent.
+    expect(await admitPdf(ctx, { token })).toBe("dead");
   });
 
   it("forgets the count when the link is taken down", async () => {
@@ -1103,7 +1288,7 @@ describe("the abuse guard", () => {
     // The whole assertion. There is no user, no session, no address, no
     // fingerprint and no per-read row — so the question "who read this" has no
     // answer here, structurally, rather than by anybody's restraint.
-    expect(fields).toEqual(["count", "shard", "shareId", "windowStart"]);
+    expect(fields).toEqual(["count", "shareId", "windowStart"]);
   });
 });
 

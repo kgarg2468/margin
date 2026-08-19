@@ -7,7 +7,7 @@ import {
   mutation,
   query,
 } from "./_generated/server";
-import { requireMembership } from "./lib/authz";
+import { getMembership, requireMembership } from "./lib/authz";
 import { recordEvent } from "./lib/ledger";
 import { annotationType, epistemicStatus } from "./schema";
 import { canApprove } from "./sessions";
@@ -103,25 +103,6 @@ const MAX_OPT_INS_PER_PAPER = 500;
 const READ_WINDOW_MS = 60_000;
 const MAX_READS_PER_WINDOW = 600;
 
-/**
- * How many rows one link's counter is spread across.
- *
- * Write contention is the whole reason. A single document that every concurrent
- * fetcher patches is a document Convex refuses with write conflicts, and the
- * guard meant to let a popular link survive would be the thing breaking it.
- * Spreading the increments across a few rows spreads the writes.
- *
- * It does not make the transaction conflict-free, and it is worth being plain
- * about why: the ceiling is checked as a *sum*, so every admission reads all of
- * this link's rows and the read set covers what its neighbours write. Under a
- * real flood some of these transactions will still collide. That is survivable
- * only because the caller treats an exhausted retry as the same 429 the counter
- * itself returns — the link is in fact being hammered, and saying so is the
- * correct answer. Summing is not negotiable: per-row ceilings with randomly
- * chosen rows saturate well below the stated limit, which would make the
- * documented number a fiction.
- */
-const RATE_SHARDS = 8;
 
 /* -------------------------------------------------------------------------
  * The public view model
@@ -255,18 +236,17 @@ async function liveShare(
 /**
  * Count this fetch against the link's window, and say whether to serve it.
  *
- * Windows are aligned to wall-clock minutes rather than started wherever the
- * first request happened to land. Per-row windows drifting independently, with
- * the row chosen at random, meant a link's rows each held their own stale
- * fraction of the ceiling and the effective limit came out well under the
- * documented one. One boundary shared by every row makes the sum mean what it
- * says.
+ * One row per share. Windows are aligned to wall-clock minutes rather than
+ * started wherever the first request happened to land, so the boundary is a
+ * fact about the clock rather than about who arrived first.
  *
- * Fails **open** on contention: two fetches landing in the same instant may
- * cost one increment between them, and that is the right way for this to be
- * wrong. A guard against a loop that occasionally undercounts still stops the
- * loop; a guard that refused a real reader because two arrived together would
- * be a worse product and a worse promise.
+ * Fails **open** on contention, and the claim is narrower than it used to be.
+ * Two fetches landing in the same instant may cost one increment between them,
+ * which is the right way for this to be wrong: a guard that occasionally
+ * undercounts still stops a loop. What it does *not* do is swallow a genuine
+ * failure — Convex exhausting its retries on this row surfaces to the caller,
+ * which turns it into the same 429 the ceiling gives, and every other error
+ * surfaces as the fault it is.
  *
  * Nothing is written once the ceiling is reached, which is deliberate — under
  * the attack this exists for, the cheapest possible response is a read and a
@@ -276,50 +256,57 @@ async function admitRead(
   ctx: MutationCtx,
   shareId: Id<"shares">,
 ): Promise<boolean> {
-  const windowStart =
-    Math.floor(Date.now() / READ_WINDOW_MS) * READ_WINDOW_MS;
-  // At most `RATE_SHARDS` rows, plus whatever a finished window left behind.
-  const rows = await ctx.db
+  const windowStart = Math.floor(Date.now() / READ_WINDOW_MS) * READ_WINDOW_MS;
+  const row = await ctx.db
     .query("shareRateWindows")
-    .withIndex("by_share_and_shard", (q) => q.eq("shareId", shareId))
-    .collect();
+    .withIndex("by_share", (q) => q.eq("shareId", shareId))
+    .unique();
 
-  let taken = 0;
-  for (const row of rows) {
-    if (row.windowStart === windowStart) {
-      taken += row.count;
-    }
+  if (row === null) {
+    await ctx.db.insert("shareRateWindows", { shareId, windowStart, count: 1 });
+    return true;
   }
-  if (taken >= MAX_READS_PER_WINDOW) {
+  // A window that has ended is reset in place rather than left beside a new
+  // one. The old minute's timestamp is gone the moment anybody touches the
+  // link again, so the only stale row that can exist belongs to a link nobody
+  // came back to — and the cron takes those.
+  if (row.windowStart !== windowStart) {
+    await ctx.db.patch(row._id, { windowStart, count: 1 });
+    return true;
+  }
+  if (row.count >= MAX_READS_PER_WINDOW) {
     return false;
   }
-
-  // Rows from a window that has ended are deleted rather than rewritten. A
-  // count of a minute that is over answers no question anyone may ask, and
-  // leaving it in place would keep a timestamp at rest saying when this link
-  // was last pulled — which is the read receipt none of this is allowed to be.
-  for (const row of rows) {
-    if (row.windowStart !== windowStart) {
-      await ctx.db.delete(row._id);
-    }
-  }
-
-  const shard = Math.floor(Math.random() * RATE_SHARDS);
-  const mine = rows.find(
-    (row) => row.shard === shard && row.windowStart === windowStart,
-  );
-  if (mine === undefined) {
-    await ctx.db.insert("shareRateWindows", {
-      shareId,
-      shard,
-      windowStart,
-      count: 1,
-    });
-  } else {
-    await ctx.db.patch(mine._id, { count: mine.count + 1 });
-  }
+  await ctx.db.patch(row._id, { count: row.count + 1 });
   return true;
 }
+
+/**
+ * Delete counters for links nobody has come back to.
+ *
+ * A live link's row is overwritten by its next fetch, so this exists for the
+ * abandoned ones: without it, a link opened once and forgotten would leave a
+ * number and a minute sitting in the database forever, and the table's promise
+ * about what survives at rest would be bounded by nothing.
+ *
+ * Cheap when there is nothing to do — one index scan for windows that ended,
+ * and on a quiet deployment it finds none.
+ */
+export const sweepRateWindows = internalMutation({
+  args: {},
+  returns: v.null(),
+  handler: async (ctx) => {
+    const cutoff = Date.now() - READ_WINDOW_MS;
+    const stale = await ctx.db
+      .query("shareRateWindows")
+      .withIndex("by_window_start", (q) => q.lt("windowStart", cutoff))
+      .take(500);
+    for (const row of stale) {
+      await ctx.db.delete(row._id);
+    }
+    return null;
+  },
+});
 
 /** The lab's name, for the one line of provenance a public page carries. */
 async function labNameOf(ctx: QueryCtx, labId: Id<"labs">): Promise<string> {
@@ -331,21 +318,46 @@ async function labNameOf(ctx: QueryCtx, labId: Id<"labs">): Promise<string> {
  * ---------------------------------------------------------------------- */
 
 /**
- * The members who have said their notes on this paper may be read publicly.
+ * The members whose notes on this paper may be read publicly.
  *
- * A set of ids, built from rows whose *presence* is the consent — there is no
- * boolean to read the wrong way round, and opting back out deletes the row, so
- * a note stops being public in the same instant and by the same act.
+ * **Two facts, both required: the opt-in row, and current membership.**
+ *
+ * The row alone was not enough, and the gap was real rather than theoretical.
+ * Leaving a lab withdraws consent by deleting these rows, but a member with
+ * more rows than one batch has the rest deleted by a scheduled continuation —
+ * and until that job ran, or forever if it died, their writing went on being
+ * published to strangers with no way for them to stop it, since the toggle
+ * that would stop it needs the membership they no longer have. Asking for
+ * membership *here* closes that: departure takes effect on the very next read,
+ * and the sweep goes back to being hygiene rather than the thing correctness
+ * hangs on.
+ *
+ * The rows are still where consent lives — their presence is the yes, there is
+ * no boolean to read the wrong way round, and opting out deletes the row so a
+ * note stops being public in the same instant and by the same act. Membership
+ * is the second question: is this still one of the people whose lab this is.
+ *
+ * One membership lookup per distinct author who opted in, which is a small set
+ * — bounded by `MAX_OPT_INS_PER_PAPER`, and in practice by the size of a
+ * research group.
  */
 async function optedInAuthors(
   ctx: QueryCtx,
   paperId: Id<"papers">,
+  labId: Id<"labs">,
 ): Promise<Set<Id<"users">>> {
   const rows = await ctx.db
     .query("paperShareOptIns")
     .withIndex("by_paper", (q) => q.eq("paperId", paperId))
     .take(MAX_OPT_INS_PER_PAPER);
-  return new Set(rows.map((row) => row.userId));
+
+  const authors = new Set<Id<"users">>();
+  for (const row of rows) {
+    if ((await getMembership(ctx, labId, row.userId)) !== null) {
+      authors.add(row.userId);
+    }
+  }
+  return authors;
 }
 
 export type PublicReply = {
@@ -432,7 +444,7 @@ export async function paperMargin(
       q.eq("paperId", paper._id).eq("visibility", "lab"),
     )
     .take(MAX_ANNOTATIONS_PER_PAPER);
-  const optedIn = await optedInAuthors(ctx, paper._id);
+  const optedIn = await optedInAuthors(ctx, paper._id, paper.labId);
 
   /** Lab-visible, still standing, and its author has said yes to strangers. */
   const shareable = (annotation: Doc<"annotations">): boolean =>
@@ -718,7 +730,13 @@ export const view = query({
  * first one.
  */
 /**
- * The PDF route's half of the throttle.
+ * The PDF route's half of the throttle — the last gate before the bytes.
+ *
+ * Three answers rather than two, because two conflated the states that matter
+ * most. `"dead"` means the link stopped being a link between the lookup and
+ * here — a revocation landing mid-request — and the route must answer that
+ * with the same 404 it gives a token that never existed, not the 429 it would
+ * have given while a boolean could only say "no". `"busy"` is the ceiling.
  *
  * Separate from the lookup beside it so the cheap refusals stay cheap: a token
  * that names nothing is answered by `pdfForShare` without ever reaching this,
@@ -726,13 +744,17 @@ export const view = query({
  */
 export const admitShare = internalMutation({
   args: { token: v.string() },
-  returns: v.boolean(),
+  returns: v.union(
+    v.literal("ok"),
+    v.literal("busy"),
+    v.literal("dead"),
+  ),
   handler: async (ctx, args) => {
     const share = await liveShare(ctx, args.token);
     if (share === null) {
-      return false;
+      return "dead" as const;
     }
-    return await admitRead(ctx, share._id);
+    return (await admitRead(ctx, share._id)) ? ("ok" as const) : ("busy" as const);
   },
 });
 
@@ -883,7 +905,7 @@ export const forPaper = query({
     }
     const membership = await requireMembership(ctx, paper.labId);
     const share = await liveShareForPaper(ctx, paper._id);
-    const optedIn = await optedInAuthors(ctx, paper._id);
+    const optedIn = await optedInAuthors(ctx, paper._id, paper.labId);
     return {
       share: await describeShare(ctx, share, membership),
       optedIn: optedIn.has(membership.userId),
@@ -914,11 +936,13 @@ export const forSession = query({
         await liveShareForSession(ctx, session._id),
         membership,
       ),
-      // Signed, not merely drafted. `synthesis` is the text; `synthesisApprovedAt`
-      // is somebody's signature on it, and the signature is what the public read
-      // requires — so a panel that offered a link on the strength of the text
-      // alone would offer a link to a 404.
-      approved: session.synthesisApprovedAt !== undefined,
+      // `approvedWriteUp` itself — the third and last surface to ask this, and
+      // now all three ask it the same way. The signature alone was too weak a
+      // question here for the same reason it was too weak at the mint: a
+      // session with a missing citation snapshot, or one citing a note since
+      // withdrawn, is signed and still unpublishable, so the panel offered a
+      // button whose mutation could only fail.
+      approved: (await approvedWriteUp(ctx, session)) !== null,
       canShare: canApprove(session, membership),
     };
   },
@@ -1052,8 +1076,10 @@ export const shareSynthesis = mutation({
  * in front of it and nothing to wait for.
  *
  * Who may press it is `mayRevoke`: any member for a paper's link, the creator
- * or the PI for a write-up's. The rule is that everyone who could have made a
- * link can unmake it.
+ * or the PI for a write-up's — not everyone who could have made one. A
+ * presenter may mint a link for their own session and cannot take down a link
+ * somebody else made, which is deliberate; the PI is always in the set, so no
+ * link is left with nobody able to close it.
  */
 export const revoke = mutation({
   args: { shareId: v.id("shares") },
@@ -1079,10 +1105,11 @@ export const revoke = mutation({
     // The rate window goes with it. Nothing reads it once the share is dead,
     // and leaving it would be keeping a count of how busy something used to be
     // after the thing itself was taken back.
-    for (const window of await ctx.db
+    const window = await ctx.db
       .query("shareRateWindows")
-      .withIndex("by_share_and_shard", (q) => q.eq("shareId", share._id))
-      .collect()) {
+      .withIndex("by_share", (q) => q.eq("shareId", share._id))
+      .unique();
+    if (window !== null) {
       await ctx.db.delete(window._id);
     }
 

@@ -2839,37 +2839,40 @@ export default defineSchema({
    * A coarse rate window per live share. **Not a read log, and the difference
    * is structural rather than a promise.**
    *
-   * A live share has up to `RATE_SHARDS` rows, one per counter it spreads its
-   * increments across, each holding the start of the current wall-clock minute
-   * and a running count. It cannot answer who read anything, when any
-   * particular read happened, how many distinct people came, or whether a given
-   * person came at all — there is no identity in it, no per-read row, and no
-   * history: rows belonging to a window that has ended are deleted on the next
-   * admission rather than kept, so not even "when was this link last fetched"
-   * survives at rest. What it can answer is "is one link being hammered right
-   * now", which is the only question an abuse guard asks.
+   * Exactly one row per share that has been fetched recently, holding the start
+   * of a wall-clock minute and a count of PDF fetches inside it. It cannot
+   * answer who read anything, when any particular read happened, how many
+   * distinct people came, or whether a given person came at all — there is no
+   * identity in it and no per-read row.
+   *
+   * **What survives at rest, precisely.** One number saying how many times this
+   * link's file was fetched during one minute, and which minute that was. It is
+   * overwritten in place the next time anybody fetches, so a busy link never
+   * accumulates history; the only case where it lingers is a link nobody
+   * touches again, and the `shares.sweepRateWindows` cron deletes those. So the
+   * honest bound is: at most one stale minute per abandoned link, for at most
+   * one cron interval. Not "nothing", which is what an earlier version of this
+   * comment claimed while a row sat there holding a timestamp.
+   *
+   * One row rather than a set of shards. Sharding was tried and removed: the
+   * ceiling is checked as a sum over the share's rows, so every admission
+   * already reads what its neighbours write and the shards reduced no
+   * contention at all — they only added rows to create, sum and clean up.
    *
    * Keyed by the share row rather than by the token string, for two reasons:
    * it is the same 1:1 fact, and it keeps the capability from being copied
    * into a second table where revocation does not reach.
    *
    * Rows are only ever created for a share that exists and is live, so probing
-   * cannot inflate this table, and `revoke` deletes them — which is what keeps
-   * it bounded by the number of live shares rather than growing forever.
+   * cannot inflate this table, and `revoke` deletes the row — which is what
+   * keeps it bounded by the number of live shares rather than growing forever.
    */
   shareRateWindows: defineTable({
     shareId: v.id("shares"),
-    /**
-     * Which of the fixed set of counters this row is.
-     *
-     * A single row per share is the obvious design and it is the wrong one: it
-     * makes one document that every reader of a popular link has to write,
-     * and Convex answers that with write conflicts — so the guard meant to let
-     * a viral link survive would be the thing breaking it. Readers spread
-     * across a few counters instead, each holding its share of the ceiling.
-     */
-    shard: v.number(),
     windowStart: v.number(),
     count: v.number(),
-  }).index("by_share_and_shard", ["shareId", "shard"]),
+  })
+    .index("by_share", ["shareId"])
+    /** The cron's path: rows whose window ended and whose link went quiet. */
+    .index("by_window_start", ["windowStart"]),
 });
