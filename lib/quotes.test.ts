@@ -17,26 +17,51 @@ describe("cleanQuote", () => {
       "the entry x[0] and values in y[12] are swapped",
     );
   });
-  it("rejoins a word the typesetter cut across a line", () => {
-    expect(cleanQuote("the assump- tion holds", 100)).toBe("the assumption holds");
+  it("closes the extractor's space, and keeps the hyphen it found there", () => {
+    expect(cleanQuote("the assump- tion holds", 100)).toBe(
+      "the assump-tion holds",
+    );
     // The linebreak is still a linebreak when it reaches us unflattened.
-    expect(cleanQuote("the assump-\ntion holds", 100)).toBe("the assumption holds");
+    expect(cleanQuote("the assump-\ntion holds", 100)).toBe(
+      "the assump-tion holds",
+    );
   });
-  it("rejoins a word broken more than once", () => {
+  it("closes every break in a word broken more than once", () => {
     expect(cleanQuote("the infor- ma- tion gain", 100)).toBe(
-      "the information gain",
+      "the infor-ma-tion gain",
     );
   });
-  it("joins across the typographic hyphens a text layer also emits", () => {
-    expect(cleanQuote("the assump‐ tion holds", 100)).toBe(
-      "the assumption holds",
+  it("never invents a word: a split compound comes back correct", () => {
+    // The whole reason the hyphen survives. Extraction puts a space between
+    // every pair of text items, so these arrive looking exactly like a broken
+    // word — and a full join would print "costeffective" to a room.
+    expect(cleanQuote("a cost- effective assay", 100)).toBe(
+      "a cost-effective assay",
     );
-    expect(cleanQuote("the assump‑ tion holds", 100)).toBe(
-      "the assumption holds",
+    expect(cleanQuote("the state- of-the-art model", 100)).toBe(
+      "the state-of-the-art model",
+    );
+    expect(cleanQuote("a self- organising map", 100)).toBe(
+      "a self-organising map",
     );
   });
-  it("drops soft hyphens, which have no glyph to justify keeping", () => {
-    expect(cleanQuote("the assump­tion holds", 100)).toBe(
+  it("closes the space after the typographic hyphens a text layer emits", () => {
+    expect(cleanQuote("the assump\u2010 tion holds", 100)).toBe(
+      "the assump\u2010tion holds",
+    );
+    expect(cleanQuote("the assump\u2011 tion holds", 100)).toBe(
+      "the assump\u2011tion holds",
+    );
+  });
+  it("joins a soft hyphen fully, glyph and gap alike", () => {
+    // The one hyphen that proves its own discretion, so the word closes up.
+    expect(cleanQuote("the assump\u00adtion holds", 100)).toBe(
+      "the assumption holds",
+    );
+    expect(cleanQuote("the assump\u00ad tion holds", 100)).toBe(
+      "the assumption holds",
+    );
+    expect(cleanQuote("the assump\u00ad\ntion holds", 100)).toBe(
       "the assumption holds",
     );
   });
@@ -44,17 +69,28 @@ describe("cleanQuote", () => {
     // No space after it: this one came out of the text layer whole.
     expect(cleanQuote("a well-known result", 100)).toBe("a well-known result");
   });
-  it("leaves a suspended compound hanging, as written", () => {
+  // One case per exempted word, so that removing any of the four from the
+  // guard fails a test rather than passing quietly.
+  it("leaves a compound suspended on 'and' as written", () => {
     expect(cleanQuote("the pre- and post-test scores", 100)).toBe(
       "the pre- and post-test scores",
     );
+  });
+  it("leaves a compound suspended on 'or' as written", () => {
     expect(cleanQuote("intra- or inter-subject variance", 100)).toBe(
       "intra- or inter-subject variance",
     );
-    // "or" only reads as the conjunction when it is the whole word — the
-    // hyphen before "organising" is a break like any other.
-    expect(cleanQuote("a self- organising map", 100)).toBe(
-      "a selforganising map",
+  });
+  it("leaves a compound suspended on 'nor' as written", () => {
+    expect(cleanQuote("neither pre- nor post-treatment", 100)).toBe(
+      "neither pre- nor post-treatment",
+    );
+  });
+  it("leaves a compound suspended on 'to' as written", () => {
+    // Lowercase on both sides, so the guard is what spares it — unlike a
+    // numeric range, where the digit never reaches the rule at all.
+    expect(cleanQuote("a three- to five-year follow-up", 100)).toBe(
+      "a three- to five-year follow-up",
     );
   });
   it("leaves a dash between words alone", () => {
@@ -62,15 +98,16 @@ describe("cleanQuote", () => {
       "the margin — a place to think — is blank",
     );
   });
-  it("does not join across a numeric range", () => {
+  it("never reaches a hyphen a digit is holding", () => {
     expect(cleanQuote("a 3- to 5-fold increase", 100)).toBe(
       "a 3- to 5-fold increase",
     );
   });
   it("measures the cap against the healed quote, not the broken one", () => {
-    // "the assumption holds here." is 26 characters; the debris made it 27.
-    expect(cleanQuote("the assump- tion holds here. And more.", 27)).toBe(
-      "the assumption holds here.",
+    // "the assump-tion holds here." is 27 characters; the extractor's space
+    // made it 28, which is one too many for the sentence end to fit.
+    expect(cleanQuote("the assump- tion holds here. And more.", 28)).toBe(
+      "the assump-tion holds here.",
     );
   });
   it("cuts at the last sentence end that fits", () => {

@@ -2,9 +2,9 @@
  * A quote lifted from a PDF text layer arrives with the paper's plumbing
  * still attached: linebreak whitespace, the bracketed citation markers that
  * mean something in the bibliography and nothing on a passage card, and the
- * hyphens the typesetter put in to make a line fit. This trims a quote for
- * display as an address — enough to find the passage — preferring to end
- * where a sentence does.
+ * spaces extraction leaves inside a word the typesetter broke. This trims a
+ * quote for display as an address — enough to find the passage — preferring
+ * to end where a sentence does.
  */
 // Whitespace before the bracket is part of the pattern: a marker glued to a
 // word, like the subscript in "x[0]", is the author's own notation, not a
@@ -12,41 +12,59 @@
 const DEBRIS = /\s+\[\d+(?:\s*[,–-]\s*\d+)*\]/g;
 
 /**
- * A soft hyphen is a *suggestion* that a word may break here. It carries no
- * glyph, so it is never anything but debris in a string being read.
+ * A soft hyphen, and whatever the extractor left after it.
+ *
+ * U+00AD is by definition a *discretionary* hyphen: a mark saying "this word
+ * may break here" that shows no glyph when it doesn't. So this character is
+ * the proof the rule below lacks — its presence establishes that the break was
+ * the typesetter's and the word underneath is whole, which makes closing it up
+ * the one join that invents nothing. Trailing whitespace goes with it, since a
+ * text layer will happily leave a space where the line ended.
  */
-const SOFT_HYPHEN = /\u00ad/g;
+const SOFT_HYPHEN = /\u00ad\s*/g;
 
 /**
- * A word the typesetter cut in half.
+ * The synthetic space inside a word the typesetter cut in half.
  *
- * `normalizePdfText` collapses the newline the paper was set with, because
- * every stored anchor offset counts characters in the result — so a word
- * broken across two lines reaches us as "assump- tion", and the projector
- * shows the lab a hyphen the author never typed.
+ * `normalizePdfText` collapses the newline a paper was set with, because every
+ * stored anchor offset counts characters in the result — so a word broken
+ * across two lines reaches us as "assump- tion". That space is not in the
+ * paper. Extraction put it there, and it is the only thing removed here.
  *
- * The space is the tell. A hyphen somebody *wrote* has no space after it:
- * "well-known" comes out of the text layer whole, on one line or two. The one
- * common exception is the suspended compound — "pre- and post-test", "intra-
- * or inter-subject" — where the hyphen hangs on purpose and what follows is a
- * conjunction rather than the rest of the word.
+ * Closing the gap the rest of the way — "assump- tion" to "assumption" —
+ * needs to know the hyphen was discretionary, and nothing in the syntax says
+ * so. Extraction inserts a space between *every* pair of text items, so a real
+ * compound split at an item or line boundary ("cost- effective",
+ * "state- of-the-art") arrives looking exactly like a broken word, and a full
+ * join would put "costeffective" on a wall in front of a lab. Verbatim
+ * integrity beats cosmetic healing: a word the reader has to mend is a smaller
+ * injury than a word we invented, so the hyphen character always survives and
+ * the only thing ever deleted is whitespace that was never the author's.
  *
- * What is left over is genuinely ambiguous and no rule settles it: a line that
- * happened to break at a compound's own hyphen ("self- organising") is
- * indistinguishable from one that broke inside a word, and this closes both.
- * It errs that way deliberately — breaking mid-word is far and away the
- * commoner event in a two-column paper, and a lab reading "selforganising"
- * once is a better outcome than a board that shows "assump- tion" every time.
+ * The exception is the suspended compound — "pre- and post-test", "three- to
+ * five-year" — where the hyphen hangs on purpose and the space after it is the
+ * author's punctuation rather than the extractor's.
  */
-const BROKEN_WORD = /(\p{Ll})[-\u2010\u2011]\s(?!(?:and|or|nor|to)\b)(\p{Ll})/gu;
+const BROKEN_WORD = /(\p{Ll}[-\u2010\u2011])\s(?!(?:and|or|nor|to)\b)(\p{Ll})/gu;
 
-export function cleanQuote(raw: string, max: number): string {
-  const flat = raw
+/**
+ * A quote with the extraction plumbing taken off, at whatever length it is.
+ *
+ * `cleanQuote` is this plus a cap. The session board also keys its passage
+ * groups by it, so two notes on one sentence land on one card however the text
+ * layer happened to break it.
+ */
+export function healQuote(raw: string): string {
+  return raw
     .replace(SOFT_HYPHEN, "")
     .replace(DEBRIS, "")
     .replace(/\s+/g, " ")
     .trim()
     .replace(BROKEN_WORD, "$1$2");
+}
+
+export function cleanQuote(raw: string, max: number): string {
+  const flat = healQuote(raw);
   if (flat.length <= max) {
     return flat;
   }
