@@ -92,6 +92,6 @@ Funding story in one line: PLG metrics *are* the pitch — signup→first-paper 
 
 P1+P4 alone would transform the first five minutes. P2 is the strategic one — it's the only item that makes growth *compound*.
 
-## 7. Proposed TIMELINE placement (needs a go decision — nothing dispatched)
+## 7. TIMELINE placement (go decision 2026-08-18 — Track P is live in `docs/TIMELINE.md` §3b, which owns sequencing from here)
 
 New **Track P (PLG core): P1–P7 above.** P1/P3/P4 are independent of everything in flight. P2/P5/P7 touch auth/membership surfaces — sequence after B1's OAuth (shipped) and coordinate with the conflict map. Recommendation: **Track P's P1–P4 run before or alongside X-FACTOR's Track E** — the retraction sentinel gives labs a reason to *talk about* Margin; the share link is what they'd *send*. The two tracks are one funnel: P-track gets the researcher in alone; E-track gives the lab a reason to stay and pay.
