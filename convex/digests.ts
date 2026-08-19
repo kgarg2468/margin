@@ -11,11 +11,14 @@ import {
 import { getMembership, requireMembership, requireUserId } from "./lib/authz";
 import { slackIsConfigured } from "./lib/slack";
 import {
+  anchorOverlap,
   assembleDigest,
   detectCollisions,
   detectCrossPaperCollisions,
+  MAX_DIGEST_ITEMS,
   type Collision,
   type DigestAnnotation,
+  type DigestItem,
 } from "../lib/digest/engine";
 import { papersToScan, planSinceAway } from "../lib/digest/since-away";
 
@@ -108,6 +111,42 @@ const SINCE_AWAY_EVENT_SCAN = 200;
  */
 const SINCE_AWAY_PAPERS = 5;
 const SINCE_AWAY_POOL_LIMIT = 200;
+
+/**
+ * How old one of your own notes has to be before a one-member lab may hand it
+ * back to you.
+ *
+ * A fortnight, and the number is doing one job: separating a *memory* from the
+ * paragraph you typed on Tuesday. Handing back something recent is not recall,
+ * it is an echo — the reader remembers writing it, so the line spends one of
+ * five slots telling them something they already hold. Two weeks is the
+ * shortest gap that reliably clears that: it survives a week of holiday, a
+ * conference, and the ordinary case of picking a paper back up after other
+ * work. Longer would read better in a demo and be invisible for a month to the
+ * solo researcher who has only just started keeping notes, and a feature that
+ * cannot fire in a new user's first month is a feature they never find.
+ *
+ * It is a floor and not the whole rule — see `catchUp`, which also refuses
+ * anything written inside the window this arrival is reporting on, so a note
+ * cannot be both the writing that made a paper interesting again and the
+ * memory that writing turned up.
+ */
+const SOLO_RECALL_MIN_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Where a recalled note stops being "weeks ago" and starts being a month.
+ *
+ * Six weeks, because "7 weeks ago" is a number a reader has to do arithmetic on
+ * and "in March" is one they can place immediately. Under six weeks the
+ * relative form is the more useful of the two — the month name of something
+ * three weeks old is often just "this month", which locates nothing.
+ */
+const RELATIVE_WHEN_LIMIT_MS = 6 * WEEK_MS;
+
+/** Longest quote a recall line inlines before eliding. */
+const MAX_RECALL_QUOTE_CHARS = 100;
 
 /* -------------------------------------------------------------------------
  * Validators
@@ -486,15 +525,23 @@ export const buildSessionPrep = internalMutation({
       )
       .order("desc")
       .take(POOL_LIMIT);
-    const live = visible.filter((a) => a.deletedAt === undefined);
-    if (live.length === 0) {
-      return null;
-    }
 
     const memberships = await ctx.db
       .query("memberships")
       .withIndex("by_lab", (q) => q.eq("labId", session.labId))
       .collect();
+    const memberIds = new Set(memberships.map((one) => one.userId));
+
+    // Membership is the filter, not the annotation's `labId`. A note written by
+    // somebody who has since left the lab — or by an author who was never in it
+    // — is not news about a colleague, because there is no colleague. It cannot
+    // be a delta and it cannot be the far half of a collision.
+    const live = visible.filter(
+      (a) => a.deletedAt === undefined && memberIds.has(a.memberId),
+    );
+    if (live.length === 0) {
+      return null;
+    }
 
     // Author display names, resolved once for the whole run.
     const names = new Map<Id<"users">, string>();
@@ -595,6 +642,306 @@ export const buildSessionPrep = internalMutation({
 });
 
 /* -------------------------------------------------------------------------
+ * Solo recall: the one lab where your past self is the colleague
+ * ---------------------------------------------------------------------- */
+
+/**
+ * The users who are members of this lab *right now*.
+ *
+ * Every digest path filters its pool through this set, and that is the only
+ * thing standing between "a colleague wrote this" and a row whose author is
+ * not in the lab at all — someone who left, or content seeded under an author
+ * that was never a member. Membership is the fact; an annotation's `labId` is
+ * a place it was written, and the two stop agreeing the moment somebody walks
+ * out. A digest that reported a departed author's note as lab activity would
+ * be telling a member that a colleague is still writing, which is the one
+ * thing a digest is for and so the one thing it must not invent.
+ */
+async function labMemberIds(
+  ctx: QueryCtx | MutationCtx,
+  labId: Id<"labs">,
+): Promise<Set<Id<"users">>> {
+  const memberships = await ctx.db
+    .query("memberships")
+    .withIndex("by_lab", (q) => q.eq("labId", labId))
+    .collect();
+  return new Set(memberships.map((membership) => membership.userId));
+}
+
+const MONTH_NAMES = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+] as const;
+
+/**
+ * When a recalled note was written, said the way a person would say it.
+ *
+ * Two registers, and the boundary between them is `RELATIVE_WHEN_LIMIT_MS`:
+ * recent enough to count in weeks, or far enough back to have a month's name.
+ * A recall line that said only "earlier" would be the thing this whole feature
+ * is against — the point of handing somebody their own note back is that they
+ * can place it in the work they were doing at the time, and "in March" does
+ * that in two words.
+ *
+ * UTC, deliberately. The deployment's clock is UTC and this string is written
+ * into a stored row, so a local-time reading would make the same note render
+ * differently depending on which machine rebuilt the digest. The cost is a
+ * note written late on the last night of a month naming the next one.
+ */
+export function recallWhen(at: number, now: number): string {
+  const age = Math.max(0, now - at);
+  if (age < RELATIVE_WHEN_LIMIT_MS) {
+    const weeks = Math.floor(age / WEEK_MS);
+    if (weeks === 0) return "this week";
+    return weeks === 1 ? "last week" : `${weeks} weeks ago`;
+  }
+  const then = new Date(at);
+  const month = MONTH_NAMES[then.getUTCMonth()];
+  if (month === undefined) {
+    return `on ${then.toISOString().slice(0, 10)}`;
+  }
+  const monthsBack =
+    (new Date(now).getUTCFullYear() - then.getUTCFullYear()) * 12 +
+    (new Date(now).getUTCMonth() - then.getUTCMonth());
+  return monthsBack >= 12 ? `in ${month} ${then.getUTCFullYear()}` : `in ${month}`;
+}
+
+/**
+ * The ontology type as a noun, with its article.
+ *
+ * Derived from the token rather than kept as a table: every one of the seven
+ * reads correctly with its hyphens opened out, so a second copy of the noun
+ * list would be a second thing to keep in step with the schema for no benefit.
+ */
+function nounFor(type: string): string {
+  const noun = type.replace(/-/g, " ");
+  return `${/^[aeiou]/.test(noun) ? "an" : "a"} ${noun}`;
+}
+
+function elideQuote(quote: string): string {
+  const trimmed = quote.trim().replace(/\s+/g, " ");
+  if (trimmed.length <= MAX_RECALL_QUOTE_CHARS) return trimmed;
+  return `${trimmed.slice(0, MAX_RECALL_QUOTE_CHARS - 1).trimEnd()}…`;
+}
+
+/**
+ * A one-member lab's digest: what *you* wrote, handed back to you.
+ *
+ * The since-away digest everywhere else in this file is built out of other
+ * people — its delta is explicitly `memberId !== recipient`. In a lab of one
+ * that delta is empty forever, so the card never appears and the product's
+ * whole claim about memory is unreachable for the person who has not brought
+ * anybody with them yet. This is the same boundary answering the same
+ * question with the only colleague available: the version of you that was
+ * reading this paper a month ago.
+ *
+ * ## What it is allowed to say
+ *
+ * `recalled` is your own notes old enough to be memory (`catchUp` picks that
+ * set); `fresh` is what you have written in the window this arrival covers.
+ * Nothing in `fresh` is ever quoted back — a digest that reads out the
+ * paragraph you typed on Tuesday is an echo, and an echo is how a reader
+ * learns to stop reading the card.
+ *
+ * ## Two tiers, and the ranking is inverted on purpose
+ *
+ * A recalled note whose passage you have annotated *again* leads: that is the
+ * shape the feature exists for, the "you already thought about this exact
+ * sentence" case, and it is the only tier that can say `on this same passage`
+ * truthfully. Everything else coalesces per paper.
+ *
+ * Within both tiers the order is **oldest first**, which is the opposite of
+ * every other ranking in this module. Recency wins elsewhere because those
+ * digests report news, and the newest news is the most useful. This one
+ * reports the opposite of news: between two notes you have forgotten, the
+ * older is the one you are less likely to still be holding, so when the cap
+ * cuts it should cut the one nearest to memory rather than the one furthest
+ * from it.
+ */
+export function assembleRecall<
+  P extends string,
+  A extends string,
+  U extends string,
+>(input: {
+  /** Your own notes, old enough to be worth handing back. */
+  recalled: readonly DigestAnnotation<P, A, U>[];
+  /** Your own notes from the window this arrival covers. Cited, never quoted. */
+  fresh: readonly DigestAnnotation<P, A, U>[];
+  paperTitles: ReadonlyMap<P, string>;
+  now: number;
+  cap?: number;
+}): { items: DigestItem<P, A>[]; droppedCount: number } {
+  const cap = input.cap ?? MAX_DIGEST_ITEMS;
+  const titleOf = (paperId: P): string =>
+    input.paperTitles.get(paperId) ?? "this paper";
+  const cite = (note: DigestAnnotation<P, A, U>): string => {
+    const quote = elideQuote(note.quote);
+    return quote.length > 0 ? `: “${quote}”` : "";
+  };
+
+  const oldestFirst = [...input.recalled].sort((x, y) =>
+    x.createdAt !== y.createdAt
+      ? x.createdAt - y.createdAt
+      : x.id < y.id
+        ? -1
+        : x.id > y.id
+          ? 1
+          : 0,
+  );
+
+  const onPassage: DigestItem<P, A>[] = [];
+  const promoted = new Set<A>();
+  for (const note of oldestFirst) {
+    // `anchorOverlap` is the same passage test the collision detector uses, so
+    // "the same passage" means here exactly what it means in a digest line
+    // about two members. It refuses across papers by construction.
+    const again = input.fresh.find(
+      (recent) => recent.id !== note.id && anchorOverlap(note, recent) !== null,
+    );
+    if (again === undefined) continue;
+    promoted.add(note.id);
+    onPassage.push({
+      kind: "coalesced",
+      paperId: note.paperId,
+      // Both halves, the way a collision cites both of its own: the line
+      // asserts a relationship between the old note and the new one, and a
+      // citation that named only one of them would be asserting more than it
+      // shows.
+      annotationIds: [note.id, again.id],
+      line: `You left ${nounFor(note.type)} on this same passage ${recallWhen(
+        note.createdAt,
+        input.now,
+      )} — ${titleOf(note.paperId)}, p. ${note.pageIndex + 1}${cite(note)}`,
+    });
+  }
+
+  const byPaper = new Map<P, DigestAnnotation<P, A, U>[]>();
+  for (const note of oldestFirst) {
+    if (promoted.has(note.id)) continue;
+    const bucket = byPaper.get(note.paperId);
+    if (bucket === undefined) byPaper.set(note.paperId, [note]);
+    else bucket.push(note);
+  }
+
+  const perPaper: DigestItem<P, A>[] = [];
+  const papers = [...byPaper.entries()].sort((x, y) => {
+    const xAt = x[1][0]?.createdAt ?? 0;
+    const yAt = y[1][0]?.createdAt ?? 0;
+    return xAt !== yAt ? xAt - yAt : x[0] < y[0] ? -1 : 1;
+  });
+  for (const [paperId, notes] of papers) {
+    const oldest = notes[0];
+    if (oldest === undefined) continue;
+    const when = recallWhen(oldest.createdAt, input.now);
+    const opening =
+      notes.length === 1
+        ? `You left ${nounFor(oldest.type)} on ${titleOf(paperId)} ${when}`
+        : `You left ${notes.length} notes on ${titleOf(paperId)}, the oldest ${when}`;
+    perPaper.push({
+      kind: "coalesced",
+      paperId,
+      annotationIds: notes.map((note) => note.id),
+      line: `${opening} — p. ${oldest.pageIndex + 1}${cite(oldest)}`,
+    });
+  }
+
+  // Count the notes behind the lines that didn't fit, not the lines — and only
+  // recalled ones, since the fresh half of a passage line was never news.
+  const all = [...onPassage, ...perPaper];
+  const recalledIds = new Set<A>(input.recalled.map((note) => note.id));
+  const withheld = new Set<A>();
+  for (const item of all.slice(cap)) {
+    for (const id of item.annotationIds) {
+      if (recalledIds.has(id)) withheld.add(id);
+    }
+  }
+  return { items: all.slice(0, cap), droppedCount: withheld.size };
+}
+
+/**
+ * Does this lab have exactly one member?
+ *
+ * The client needs the answer because a solo digest is a different object from
+ * a since-away one and must not be introduced with the other's words — "since
+ * you were away" over your own March notes is a small lie the reader will
+ * catch immediately. It is counted from `memberships` rather than read off
+ * `labs.memberCount` so the page and `catchUp` cannot disagree: the digest is
+ * built from the membership rows, and a denormalized counter that drifted
+ * would have the inbox captioned one way and filled the other.
+ *
+ * Two rows is all it takes to answer, so that is all it reads.
+ */
+export const isSolo = query({
+  args: { labId: v.id("labs") },
+  returns: v.boolean(),
+  handler: async (ctx, args) => {
+    await requireMembership(ctx, args.labId);
+    const some = await ctx.db
+      .query("memberships")
+      .withIndex("by_lab", (q) => q.eq("labId", args.labId))
+      .take(2);
+    return some.length === 1;
+  },
+});
+
+/**
+ * Land one arrival's assembly in the member's inbox.
+ *
+ * Two assemblies reach this — the ordinary one built from colleagues, and the
+ * solo recall built from the member's own margin — and they must land the same
+ * way, because "at most one unacknowledged since-away digest per member per
+ * lab" is a property of the row rather than of what is written on it.
+ *
+ * `waiting` is the stale card to write over, or null to insert a fresh one.
+ * Writing over it is safe for the reason the caller establishes: an
+ * unacknowledged digest is also an undelivered one — `markDigestSeen` stamps
+ * both at once — so nothing here rewrites something a member has already read.
+ * Same row, same place in the inbox, current contents.
+ */
+async function writeSinceAway(
+  ctx: MutationCtx,
+  input: {
+    userId: Id<"users">;
+    labId: Id<"labs">;
+    now: number;
+    assembled: {
+      items: DigestItem<Id<"papers">, Id<"annotations">>[];
+      droppedCount: number;
+    };
+    waiting: Doc<"digests"> | null;
+  },
+): Promise<Id<"digests">> {
+  const { items, droppedCount } = input.assembled;
+  const dropped = droppedCount > 0 ? droppedCount : undefined;
+  if (input.waiting !== null) {
+    await ctx.db.patch(input.waiting._id, {
+      generatedAt: input.now,
+      droppedCount: dropped,
+      items,
+    });
+    return input.waiting._id;
+  }
+  return await ctx.db.insert("digests", {
+    userId: input.userId,
+    labId: input.labId,
+    boundary: "since-away",
+    generatedAt: input.now,
+    droppedCount: dropped,
+    items,
+  });
+}
+
+/* -------------------------------------------------------------------------
  * The third boundary: coming back
  * ---------------------------------------------------------------------- */
 
@@ -627,6 +974,30 @@ export const buildSessionPrep = internalMutation({
  * the member's own inbox, `listMine` is pinned to the caller's id, and nothing
  * anywhere aggregates digests or reads another member's. No one but them can
  * learn it.
+ *
+ * ## A lab of one
+ *
+ * The delta below is `memberId !== you`, which in a one-member lab is empty
+ * forever: the digest that carries this product's claim about memory could
+ * never fire for the person working alone. So when the lab has exactly one
+ * member — counted from `memberships` at read time, never assumed from a
+ * denormalized field — the colleague is your past self, and the rule is:
+ *
+ * > your own notes on the papers you have written on since your last "I'm
+ * > caught up", excluding anything written inside that window *and* anything
+ * > younger than `SOLO_RECALL_MIN_AGE_MS`.
+ *
+ * Both halves of that exclusion are load-bearing. The window keeps this visit's
+ * writing out, so the note you just typed cannot come back as a discovery; the
+ * age floor keeps last Tuesday out, because a digest is worth reading only when
+ * what it hands over is something you had stopped holding. The trigger is
+ * unchanged and still the ledger: a solo lab's recall fires because *you* have
+ * been writing on a paper again, which is the moment "you already wrote about
+ * this in March" is worth saying and the only moment it is not nagging.
+ *
+ * The second member arriving takes all of this away again with no migration and
+ * no flag: the count is two, the delta is the ordinary one, and the digests
+ * already sitting in the inbox still read as what they were.
  *
  * ## Idempotent by construction
  *
@@ -693,6 +1064,12 @@ export const catchUp = mutation({
       return waiting?._id ?? null;
     }
 
+    // Who is actually in this lab, right now. Two facts come out of one read:
+    // which authors a digest may call colleagues at all, and whether there are
+    // any — a lab of one is where the recall boundary takes over.
+    const memberIds = await labMemberIds(ctx, args.labId);
+    const solo = memberIds.size === 1;
+
     const names = new Map<Id<"users">, string>();
     const paperTitles = new Map<Id<"papers">, string>();
     const pool: DigestAnnotation<Id<"papers">, Id<"annotations">, Id<"users">>[] =
@@ -721,7 +1098,14 @@ export const catchUp = mutation({
         )
         .order("desc")
         .take(SINCE_AWAY_POOL_LIMIT);
-      const live = visible.filter((a) => a.deletedAt === undefined);
+      // And membership is the second filter, for the reason the session job
+      // gives: an author who is not in this lab is not a colleague, so their
+      // note is neither news nor the far half of anything. In a solo lab it is
+      // also what keeps the pool to one person's own margin, which is the only
+      // thing `assembleRecall` may speak in the first person about.
+      const live = visible.filter(
+        (a) => a.deletedAt === undefined && memberIds.has(a.memberId),
+      );
       if (live.length === 0) {
         continue;
       }
@@ -752,8 +1136,46 @@ export const catchUp = mutation({
       // quadratic, and five papers of 200 is a twenty-fifth of the work of one
       // pass over 1000. `assembleDigest` re-ranks the concatenation itself, so
       // the order the cap cuts against is unchanged.
-      collisions.push(...detectCollisions(paperPool));
+      //
+      // A lab of one has no collisions to find: the detector skips same-author
+      // pairs, and every pair here has one author. Running it would be a
+      // quadratic pass to reach an empty array.
+      if (!solo) {
+        collisions.push(...detectCollisions(paperPool));
+      }
       pool.push(...paperPool);
+    }
+
+    // A lab of one: your past self is the colleague, and the whole assembly is
+    // a different one. See the header — the recall floor is the older of "the
+    // window this arrival covers" and `SOLO_RECALL_MIN_AGE_MS`, so a note has
+    // to be behind *both* to be handed back. Behind only the age floor it could
+    // be this visit's writing on an old paper; behind only the window it could
+    // be Tuesday's.
+    if (solo) {
+      const floor = Math.min(plan.since, now - SOLO_RECALL_MIN_AGE_MS);
+      const mine = pool.filter((a) => a.memberId === userId);
+      const recalled = mine.filter((a) => a.createdAt <= floor);
+      const fresh = mine.filter((a) => a.createdAt > plan.since);
+      if (recalled.length === 0) {
+        return waiting?._id ?? null;
+      }
+      const recall = assembleRecall({
+        recalled,
+        fresh,
+        paperTitles,
+        now,
+      });
+      if (recall.items.length === 0) {
+        return waiting?._id ?? null;
+      }
+      return await writeSinceAway(ctx, {
+        userId,
+        labId: args.labId,
+        now,
+        assembled: recall,
+        waiting: plan.rebuild ? waiting : null,
+      });
     }
 
     // The one boundary that can see past a paper.
@@ -796,27 +1218,12 @@ export const catchUp = mutation({
       return waiting?._id ?? null;
     }
 
-    const dropped = droppedCount > 0 ? droppedCount : undefined;
-    if (plan.rebuild && waiting !== null) {
-      // Over the top of the card they haven't cleared: same row, same place in
-      // the inbox, current contents. Safe because an unacknowledged digest is
-      // also an undelivered one — `markDigestSeen` stamps both at once — so
-      // nothing here rewrites something a member has already read.
-      await ctx.db.patch(waiting._id, {
-        generatedAt: now,
-        droppedCount: dropped,
-        items,
-      });
-      return waiting._id;
-    }
-
-    return await ctx.db.insert("digests", {
+    return await writeSinceAway(ctx, {
       userId,
       labId: args.labId,
-      boundary: "since-away",
-      generatedAt: now,
-      droppedCount: dropped,
-      items,
+      now,
+      assembled: { items, droppedCount },
+      waiting: plan.rebuild ? waiting : null,
     });
   },
 });

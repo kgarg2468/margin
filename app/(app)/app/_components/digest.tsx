@@ -47,6 +47,20 @@ const BOUNDARY_LABEL: Record<Digest["boundary"], string> = {
 };
 
 /**
+ * The same arrival, in a lab of one.
+ *
+ * A solo lab's since-away digest is built from the member's own older notes —
+ * `digests.catchUp` says why — so every word of the colleague framing is wrong
+ * for it. It is not that "since you were away" is unflattering here; it is that
+ * it is untrue, and a card that mis-describes its own contents in a product
+ * whose whole claim is honest memory is the expensive kind of small lie. The
+ * lines themselves already speak in the first person ("You left a hypothesis on
+ * this same passage in March"); these are the headings above them.
+ */
+const SOLO_SECTION_LABEL = "From your own margin";
+const SOLO_CARD_LABEL = "What you wrote before";
+
+/**
  * The prep digest for one session — the personal half of a session page.
  */
 export function SessionDigest({
@@ -126,6 +140,13 @@ export function SessionDigest({
  */
 export function DigestInbox({ labId }: { labId: Id<"labs"> }) {
   const digests = useQuery(api.digests.listMine, { labId });
+  // Counted from the membership rows by the same module that builds the
+  // digest, so the caption and the contents cannot disagree. It joins the
+  // slot's `loaded` below, so an empty inbox does not resolve to a framing
+  // before it knows which one is true. Mail already in hand still shows
+  // without waiting on it — that trade is `inboxState`'s and unchanged — and
+  // both queries answer in the same round trip anyway.
+  const solo = useQuery(api.digests.isSolo, { labId });
   const catchUp = useMutation(api.digests.catchUp);
   const reduce = useReducedMotion();
   const unread = (digests ?? []).filter(
@@ -177,7 +198,7 @@ export function DigestInbox({ labId }: { labId: Id<"labs"> }) {
   }, [labId, catchUp]);
 
   const state = inboxState({
-    loaded: digests !== undefined,
+    loaded: digests !== undefined && solo !== undefined,
     catchUpSettled: settledFor === labId,
     unreadCount: unread.length,
   });
@@ -209,9 +230,15 @@ export function DigestInbox({ labId }: { labId: Id<"labs"> }) {
   // snapping up a card-height. The outer presence does the same for the
   // whole section when the last card goes. `AnimatePresence` stays mounted
   // through the empty state, or there would be nothing to run the exit.
+  //
+  // `mode="wait"` is for the solo lab's second child below, which takes the
+  // slot the section leaves: without it the standing line would fade in
+  // underneath a card that is still folding, and the reader would watch two
+  // things happen where one thing happened. With one child — every lab of two
+  // or more, and this one until the last card goes — it changes nothing.
   return (
-    <AnimatePresence initial={false}>
-      {unread.length > 0 && (
+    <AnimatePresence initial={false} mode="wait">
+      {unread.length > 0 ? (
         <motion.section
           key="inbox"
           exit={
@@ -222,11 +249,13 @@ export function DigestInbox({ labId }: { labId: Id<"labs"> }) {
           style={{ overflow: "hidden" }}
           className="flex flex-col gap-4"
         >
-          <h2 className={eyebrowClass}>Since you were away</h2>
+          <h2 className={eyebrowClass}>
+            {solo === true ? SOLO_SECTION_LABEL : "Since you were away"}
+          </h2>
           <p className="max-w-prose font-sans text-xs text-ink-faint">
-            Delivered at a boundary — before a session, as it starts, and when
-            you come back after time away — never on every write. Only you see
-            this.
+            {solo === true
+              ? "Your own earlier notes, handed back when you come back to a paper you have written on before. Nothing here is new — that is the point. Only you see this."
+              : "Delivered at a boundary — before a session, as it starts, and when you come back after time away — never on every write. Only you see this."}
           </p>
           <div className="flex flex-col gap-6">
             <AnimatePresence initial={false}>
@@ -244,12 +273,45 @@ export function DigestInbox({ labId }: { labId: Id<"labs"> }) {
                         }
                   }
                 >
-                  <DigestCard digest={digest} labId={labId} />
+                  <DigestCard
+                    digest={digest}
+                    labId={labId}
+                    recall={solo === true && digest.boundary === "since-away"}
+                  />
                 </motion.div>
               ))}
             </AnimatePresence>
           </div>
         </motion.section>
+      ) : (
+        /*
+         * The empty solo inbox says what it is waiting for.
+         *
+         * Everywhere else an empty inbox renders nothing, and should: a lab of
+         * several people has mail often enough that its absence is ordinary,
+         * and a standing "no mail" line is furniture. A lab of one is the
+         * opposite case — its digest is built out of the member's own notes and
+         * cannot say anything until some of those notes are old, which for a
+         * new account is a fortnight away. With nothing on the page, the only
+         * available reading of that fortnight is that the feature is broken or
+         * absent. So the slot stays occupied by a sentence that is true the
+         * whole time it is on screen, and it is gated on `state` rather than on
+         * the card count so it cannot appear while catch-up is still out.
+         */
+        state === "empty" &&
+        solo === true && (
+          <motion.p
+            key="solo-standing"
+            initial={reduce === true ? false : { opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: reduce === true ? 0 : 0.28 }}
+            className="max-w-prose font-sans text-xs text-ink-faint"
+          >
+            Nothing to bring back yet. Once a note of yours has had a fortnight
+            to settle, returning to that paper brings it back here — what you
+            wrote, and when.
+          </motion.p>
+        )
       )}
     </AnimatePresence>
   );
@@ -258,9 +320,12 @@ export function DigestInbox({ labId }: { labId: Id<"labs"> }) {
 function DigestCard({
   digest,
   labId,
+  recall = false,
 }: {
   digest: Digest;
   labId: Id<"labs">;
+  /** This arrival was assembled from the reader's own margin, not a colleague's. */
+  recall?: boolean;
 }) {
   const markDigestSeen = useMutation(api.digests.markDigestSeen);
   const markSeen = useMutation(api.digests.markSeen);
@@ -274,7 +339,7 @@ function DigestCard({
     <article className="flex flex-col gap-3 rounded-md border border-rule bg-surface p-5 shadow-[var(--shadow-card)]">
       <header className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
         <h3 className="font-serif text-lg text-ink-strong">
-          {BOUNDARY_LABEL[digest.boundary]}
+          {recall ? SOLO_CARD_LABEL : BOUNDARY_LABEL[digest.boundary]}
         </h3>
         <span className="font-sans text-xs text-ink-faint">
           {relativeWhen(digest.generatedAt)}
