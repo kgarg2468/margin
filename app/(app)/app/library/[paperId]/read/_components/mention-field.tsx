@@ -179,6 +179,15 @@ export function MentionField({
         aria-controls={open ? listId : undefined}
         aria-autocomplete="list"
         aria-activedescendant={open ? `${listId}-${active}` : undefined}
+        // Announced here and nowhere else, because here is where it works:
+        // the handler below is on this element, so a reader told about the
+        // combination while focus is on it can actually press it. Conditional
+        // for the same reason — a field whose parent passed no `onSubmit` has
+        // no save to offer, and advertising one would be a lie in the one
+        // place a screen reader user has no way to check.
+        aria-keyshortcuts={
+          onSubmit === undefined ? undefined : "Meta+Enter Control+Enter"
+        }
         onChange={(event) => {
           setCaret(event.target.selectionStart);
           setDismissed(null);

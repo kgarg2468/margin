@@ -153,9 +153,13 @@ export function Composer({
    * `MentionField` has saved on ⌘/Ctrl+Enter since A1 and no surface has ever
    * mentioned it, which makes it a feature only the person who wrote it has.
    * Which modifier to name is knowable in the browser only, so the cap is held
-   * back until after hydration rather than guessed and corrected — the row is
-   * laid out from the right and the sheet has a fixed width, so nothing moves
-   * when it arrives.
+   * back until then rather than guessed and corrected — the row is laid out
+   * from the right and the sheet has a fixed width, so nothing moves when it
+   * arrives.
+   *
+   * The cap is decoration and says so. The announced form of the same fact
+   * belongs on the textarea, because that is the element the keystroke
+   * actually works in — `MentionField` carries it.
    */
   const [submitKeys, setSubmitKeys] = useState<string | null>(null);
 
@@ -406,10 +410,6 @@ export function Composer({
                 type="button"
                 disabled={saving}
                 onClick={() => void save()}
-                // The cap beside this is a glyph, and a glyph read aloud is
-                // noise; this is the same fact in the form a screen reader
-                // was built to announce.
-                aria-keyshortcuts="Meta+Enter Control+Enter"
                 className="pressable inline-flex items-center justify-center rounded-sm bg-accent px-3 py-1.5 font-sans text-sm text-accent-contrast hover:bg-accent-strong disabled:opacity-50"
               >
                 {saving
@@ -425,9 +425,19 @@ export function Composer({
               >
                 Cancel
               </button>
-              <kbd aria-hidden className={`${keycapClass} ml-auto`}>
-                {submitKeys ?? " "}
-              </kbd>
+              {/*
+               * Nothing at all until the platform is known, rather than an
+               * empty cap that fills in: a bordered blank is a control that
+               * failed to load. It costs nothing to omit — the cap is the last
+               * thing in the row and takes its space from `ml-auto`, so the
+               * buttons do not move when it arrives, and it is shorter than
+               * they are, so the row's height never depended on it.
+               */}
+              {submitKeys !== null && (
+                <kbd aria-hidden className={`${keycapClass} ml-auto`}>
+                  {submitKeys}
+                </kbd>
+              )}
             </div>
           )}
 
