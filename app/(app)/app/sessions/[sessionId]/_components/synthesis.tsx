@@ -6,6 +6,7 @@ import { citationNumbering } from "@/lib/citations/numbering";
 import { downloadText, exportFilename } from "@/lib/export/download";
 import { SECTION_ORDER, sessionWriteUpToMarkdown } from "@/lib/export/markdown";
 import { toBlocks } from "@/lib/prose/blocks";
+import { SynthesisShare } from "./synthesis-share";
 import { relativeWhen } from "@/lib/sessions-ui";
 import {
   errorClass,
@@ -166,6 +167,7 @@ export function SessionSynthesis({
     <section className="flex flex-col gap-10">
       {isApproved && (
         <ApprovedWriteUp
+          sessionId={session._id}
           text={approved}
           approvedAt={approvedAt}
           // Before the query lands there is nothing to claim about staleness,
@@ -363,11 +365,13 @@ export function SessionSynthesis({
  * been rewritten since anyone approved this.
  */
 function ApprovedWriteUp({
+  sessionId,
   text,
   approvedAt,
   withdrawnSince,
   rewrittenSince,
 }: {
+  sessionId: Id<"sessions">;
   text: string;
   approvedAt: number;
   withdrawnSince: number | undefined;
@@ -405,6 +409,10 @@ function ApprovedWriteUp({
       )}
 
       <ApprovedProse text={text} />
+
+      {/* Under the copy, because a link to it is only worth offering to
+          somebody who has read what they would be sending. */}
+      <SynthesisShare sessionId={sessionId} stale={stale} />
     </div>
   );
 }
