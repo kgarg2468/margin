@@ -44,8 +44,18 @@ const SOFT_HYPHEN = /\u00ad\s*/g;
  * The exception is the suspended compound — "pre- and post-test", "three- to
  * five-year" — where the hyphen hangs on purpose and the space after it is the
  * author's punctuation rather than the extractor's.
+ *
+ * Either side may be any letter, not only a lowercase one. Papers are dense
+ * with "anti- TNF", "non- Hodgkin" and "COVID- related", and a capital is no
+ * evidence that a line did not break there. Since the hyphen survives either
+ * way, the worst a wrong join can produce is "word-Word", which still reads as
+ * the compound it probably is.
+ *
+ * The tail is a lookahead rather than a capture so that the letter ending one
+ * break can begin the next: consuming it left "x- y- z" repaired to "x-y- z",
+ * one break short of done.
  */
-const BROKEN_WORD = /(\p{Ll}[-\u2010\u2011])\s(?!(?:and|or|nor|to)\b)(\p{Ll})/gu;
+const BROKEN_WORD = /(\p{L}[-\u2010\u2011])\s(?!(?:and|or|nor|to)\b)(?=\p{L})/gu;
 
 /**
  * A quote with the extraction plumbing taken off, at whatever length it is.
@@ -60,7 +70,7 @@ export function healQuote(raw: string): string {
     .replace(DEBRIS, "")
     .replace(/\s+/g, " ")
     .trim()
-    .replace(BROKEN_WORD, "$1$2");
+    .replace(BROKEN_WORD, "$1");
 }
 
 export function cleanQuote(raw: string, max: number): string {

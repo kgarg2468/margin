@@ -31,6 +31,22 @@ describe("cleanQuote", () => {
       "the infor-ma-tion gain",
     );
   });
+  it("closes consecutive breaks with nothing between them", () => {
+    // The letter that ends one break is the letter that begins the next, so a
+    // rule that consumed it would stop one break short.
+    expect(cleanQuote("the x- y- z axis", 100)).toBe("the x-y-z axis");
+  });
+  it("closes a break a capital is standing on either side of", () => {
+    // A capital is no evidence the line did not break there, and papers are
+    // full of these.
+    expect(cleanQuote("an anti- TNF regimen", 100)).toBe("an anti-TNF regimen");
+    expect(cleanQuote("non- Hodgkin lymphoma", 100)).toBe(
+      "non-Hodgkin lymphoma",
+    );
+    expect(cleanQuote("COVID- related admissions", 100)).toBe(
+      "COVID-related admissions",
+    );
+  });
   it("never invents a word: a split compound comes back correct", () => {
     // The whole reason the hyphen survives. Extraction puts a space between
     // every pair of text items, so these arrive looking exactly like a broken
