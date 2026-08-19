@@ -266,11 +266,26 @@ async function sweepOptIns(
   }
 }
 
-/** The scheduled continuation of `sweepOptIns`. Internal: no caller outside. */
+/**
+ * The scheduled continuation of `sweepOptIns`. Internal: no caller outside.
+ *
+ * Re-asks the question its arguments only answered when they were written. A
+ * job carries a decision across time, and in that time the member may have
+ * been re-invited and opted things back in — deleting *those* rows would be
+ * this sweep reaching past the departure it was cleaning up and destroying a
+ * current member's stored choice, silently and with no toggle flipped.
+ *
+ * Nothing depends on this finishing. `shares.optedInAuthors` asks for current
+ * membership on every public read, so a member who left has already stopped
+ * being published whether or not the rest of their rows are gone.
+ */
 export const continueOptInSweep = internalMutation({
   args: { userId: v.id("users"), labId: v.id("labs") },
   returns: v.null(),
   handler: async (ctx, args) => {
+    if ((await getMembership(ctx, args.labId, args.userId)) !== null) {
+      return null;
+    }
     await sweepOptIns(ctx, args.userId, args.labId);
     return null;
   },
