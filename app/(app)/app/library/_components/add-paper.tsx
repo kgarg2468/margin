@@ -301,12 +301,16 @@ function DoiTab({
    * stopped thinking about.
    */
   const live = useRef(true);
-  useEffect(
-    () => () => {
+  // Set on the way in as well as cleared on the way out. A cleanup-only effect
+  // reads correctly and is wrong in development: StrictMode mounts, tears down
+  // and remounts, so the cleanup fires once with nothing to undo it and every
+  // later navigation is silently declined.
+  useEffect(() => {
+    live.current = true;
+    return () => {
       live.current = false;
-    },
-    [],
-  );
+    };
+  }, []);
 
   const hold = lookupHold(pending);
 
@@ -643,12 +647,14 @@ function UploadTab({
    * they never asked for. Same discipline as `DoiTab`.
    */
   const live = useRef(true);
-  useEffect(
-    () => () => {
+  // Set on entry, not only cleared on exit — see `DoiTab` for the StrictMode
+  // remount this would otherwise lose every navigation to.
+  useEffect(() => {
+    live.current = true;
+    return () => {
       live.current = false;
-    },
-    [],
-  );
+    };
+  }, []);
 
   // The same offer the control below is drawn from, so the panel can never be
   // held shut by a stage whose exit is not on screen.
