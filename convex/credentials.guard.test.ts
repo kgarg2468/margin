@@ -261,13 +261,18 @@ const normalizeName = (name: string): string =>
  *
  * Each of these is a handle to something, not a permission to do anything.
  * A Zotero item key names a record in a library the member has already been
- * authorized for; `key` on a section is which section it is.
+ * authorized for.
+ *
+ * Bare `key` is deliberately **not** here. It was, and it bought nothing: the
+ * two fields in this schema actually named `key` are literal unions, so they
+ * fail `admitsText` and never reach this set at all. What the entry did buy
+ * was a standing pre-approval for the next public string field somebody names
+ * `key` — the exact blanket this file refuses to grant elsewhere, where a
+ * token is allowed by exact function and exact path and nothing wider. If a
+ * `key` ever needs allowing, it gets allowed the way tokens do: by name, with
+ * a reason.
  */
-const IDENTIFIER_NAMES = new Set([
-  "zoteroitemkey",
-  "collectionkey",
-  "key",
-]);
+const IDENTIFIER_NAMES = new Set(["zoteroitemkey", "collectionkey"]);
 
 /**
  * Normalized before matching — lowercased with separators stripped — so
@@ -505,12 +510,26 @@ describe("no credential ever reaches a client", () => {
     "shares.shareSynthesis → token",
   ];
 
+  /**
+   * Not secrets — named by exact path, on the same terms as the tokens above.
+   *
+   * A Zotero collection key is the id of a folder in a library the caller has
+   * already been authorized for; the picker cannot list collections without
+   * saying which is which. It is here rather than in `IDENTIFIER_NAMES`
+   * because a global pass for the bare name `key` would stand for every future
+   * field spelled that way, including one that turned out to be a real
+   * credential. One path, one function, one reason.
+   */
+  const OPAQUE_IDENTIFIERS = ["zotero.listCollections → collections.key"];
+
+  const ALLOWED = [...TOKEN_BEARING, ...OPAQUE_IDENTIFIERS];
+
   it("declares no credential-shaped field in any public returns validator", () => {
     const offenders = publicFunctions
       .flatMap((fn) =>
         credentialShaped(fn.returns).map((path) => `${fn.name} → ${path}`),
       )
-      .filter((offender) => !TOKEN_BEARING.includes(offender))
+      .filter((offender) => !ALLOWED.includes(offender))
       .sort();
 
     expect(
