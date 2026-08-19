@@ -80,11 +80,30 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Cache Chromium
+        # The download, not the browser, is the flaky part: uncached, every
+        # run pulls ~150MB from Playwright's CDN, and a hung connection has
+        # repeatedly wedged this job to its six-hour timeout. Keyed on the
+        # lockfile because that is what pins the Playwright version.
+        id: chromium-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
       - name: Install Chromium
         # Chromium only. The suite asserts routing and server responses, not
         # rendering quirks, so a second engine would double the runtime and
-        # find nothing.
-        run: npx playwright install --with-deps chromium
+        # find nothing. On a cache hit only the OS deps are installed —
+        # they land in system paths the cache cannot hold. The timeout turns
+        # a hung download into a fast, rerunnable failure.
+        timeout-minutes: 10
+        run: |
+          if [ "${{ steps.chromium-cache.outputs.cache-hit }}" = "true" ]; then
+            npx playwright install-deps chromium
+          else
+            npx playwright install --with-deps chromium
+          fi
 
       # `playwright.config.ts` owns the build and the server both: `NEXT_PUBLIC_*`
       # is inlined at build time, so building in a step here and starting over
