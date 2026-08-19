@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
+import type { Id } from "@/convex/_generated/dataModel";
 import { ANNOTATION_TYPES } from "../../../library/[paperId]/read/_components/ontology";
 import type { AnnotationType } from "../../../library/[paperId]/read/_components/ontology";
+import type { AnnotationView } from "../../../library/[paperId]/read/_components/types";
 import { FLOOR } from "./session-board";
 import {
   anchoredIds,
   AT_THE_PASSAGE,
+  groupSessionNotes,
   MAX_PASSAGE_CARDS,
   ON_THE_FLOOR,
 } from "./session-notes";
@@ -26,6 +29,74 @@ function board(over: {
     passages: over.passages ?? [],
   };
 }
+
+const SESSION = "session-1" as Id<"sessions">;
+
+/**
+ * A lab-visible note on a passage. Cast because `AnnotationView` is the whole
+ * shape `annotations.listForPaper` hands back, and the grouping reads six
+ * fields of it.
+ */
+function shared(id: string, quote: string, pageIndex = 0): AnnotationView {
+  return {
+    _id: id,
+    type: "note",
+    visibility: "lab",
+    deleted: false,
+    sessionId: SESSION,
+    anchor: { pageIndex, quote, start: 0, end: quote.length },
+  } as unknown as AnnotationView;
+}
+
+describe("groupSessionNotes", () => {
+  it("groups one sentence the text layer broke two different ways", () => {
+    // A soft hyphen is the typesetter's own mark, so both of these heal to
+    // "the assumption holds" and both cards would have read identically.
+    const notes = groupSessionNotes(
+      [
+        shared("a", "the assump\u00ad tion holds"),
+        shared("b", "the assumption holds"),
+      ],
+      SESSION,
+    );
+    expect(notes.passages).toHaveLength(1);
+    expect(notes.passages[0]?.notes.map((row) => row._id)).toEqual(["a", "b"]);
+  });
+
+  it("counts a surviving hyphen as a real difference", () => {
+    // The other half of the cleaner's contract: an ordinary hyphen is left
+    // where it was found, so these two genuinely read differently on the
+    // board and genuinely are two passages. Grouping them would mean the
+    // card showed one of two texts the room can tell apart.
+    const notes = groupSessionNotes(
+      [
+        shared("a", "the assump- tion holds"),
+        shared("b", "the assumption holds"),
+      ],
+      SESSION,
+    );
+    expect(notes.passages).toHaveLength(2);
+  });
+
+  it("keeps different sentences on different cards", () => {
+    const notes = groupSessionNotes(
+      [shared("a", "the assumption holds"), shared("b", "the result holds")],
+      SESSION,
+    );
+    expect(notes.passages).toHaveLength(2);
+  });
+
+  it("keeps one sentence on two pages apart", () => {
+    const notes = groupSessionNotes(
+      [
+        shared("a", "the assumption holds", 0),
+        shared("b", "the assumption holds", 4),
+      ],
+      SESSION,
+    );
+    expect(notes.passages).toHaveLength(2);
+  });
+});
 
 describe("anchoredIds", () => {
   it("anchors a floor note and the replies drawn under it", () => {

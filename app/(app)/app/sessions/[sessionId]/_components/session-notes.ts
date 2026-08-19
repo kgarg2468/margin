@@ -1,4 +1,5 @@
 import type { Id } from "@/convex/_generated/dataModel";
+import { healQuote } from "@/lib/quotes";
 import type { AnnotationType } from "../../../library/[paperId]/read/_components/ontology";
 import { ANNOTATION_TYPES } from "../../../library/[paperId]/read/_components/ontology";
 import type { AnnotationView } from "../../../library/[paperId]/read/_components/types";
@@ -50,11 +51,23 @@ export type SessionNotes = {
 /**
  * Two people reading different PDFs of the same paper land on the same sentence
  * at different offsets, so a passage is keyed by its page and its text rather
- * than by its numbers — the same identity rule `lib/digest/engine.ts` uses when
+ * than by its numbers — the identity rule `lib/digest/engine.ts` also uses when
  * it decides whether two annotations collided.
+ *
+ * Keyed on the *healed* text, because the board shows the healed text: two
+ * copies of one sentence that differ only in where a text layer put a soft
+ * hyphen would otherwise open two cards that read identically, which is a
+ * duplicate the room can see and nobody can explain. `healQuote` is the same
+ * pass `PassageCard` renders through, so what groups and what is drawn cannot
+ * disagree.
+ *
+ * This is where the rule parts company with `engine.ts`, which normalizes
+ * whitespace and case only. Nothing forces them to agree — one groups cards on
+ * a board, the other decides whether two people collided — but the divergence
+ * is worth knowing about if that one ever grows a hyphenation case too.
  */
 function passageKey(annotation: AnnotationView): string {
-  const quote = annotation.anchor.quote.trim().toLowerCase().replace(/\s+/g, " ");
+  const quote = healQuote(annotation.anchor.quote).toLowerCase();
   return `${annotation.anchor.pageIndex}:${quote}`;
 }
 
