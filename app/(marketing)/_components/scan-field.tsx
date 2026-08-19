@@ -60,10 +60,14 @@ const uniformValues = () => ({
   uAccent: { value: new THREE.Color("#7fa3d8") },
   uRest: { value: new THREE.Color("#938578") },
   uOrigin: { value: ORIGIN },
-  uTail: { value: 5 },
-  uRelief: { value: 0.9 },
+  uTail: { value: 6 },
+  uRelief: { value: 1.5 },
   uPitch: { value: 0.62 },
-  uRestAlpha: { value: 0.085 },
+  /* Lines a little over a pixel wide. Exactly one pixel is what the
+     derivative gives you for free and it reads as a dotted screen door once
+     the grid tilts away; the extra fraction is what keeps it a drawn line. */
+  uWidth: { value: 1.7 },
+  uRestAlpha: { value: 0.115 },
   uHalfWidth: { value: FIELD_WIDTH / 2 },
   uHalfDepth: { value: FIELD_DEPTH / 2 },
 });
@@ -102,11 +106,19 @@ const NOISE = /* glsl */ `
 `;
 
 /**
- * How lit a point is. Nothing ahead of the front; behind it, a bright edge
- * decaying into the field over `uTail`. The leading edge is deliberately
- * abrupt — that hard rim is what makes it read as a scan and not as a
- * gradient — and is softened over a fraction of a unit only so it does not
- * alias into a staircase where it crosses the grid at a shallow angle.
+ * How lit a point is: nothing at all ahead of the front, and behind it two
+ * decays at once.
+ *
+ * The two are the whole character of the effect. A single exponential — which
+ * is the obvious way to write this — spreads the light over the entire field
+ * and reads as a gradient drifting past, not as a survey. What makes it a
+ * scan is a tight rim at the front, bright and about a unit deep, with a much
+ * dimmer wash trailing several units behind it: the edge is the instrument
+ * and the wash is the ground still holding the light.
+ *
+ * Ahead of the front there is a hard cut, softened over a sixth of a unit —
+ * enough to keep it from staircasing where it crosses the ruling at a shallow
+ * angle, not enough to blunt it.
  */
 const PULSE = /* glsl */ `
   uniform float uFront;
@@ -114,14 +126,20 @@ const PULSE = /* glsl */ `
   uniform float uTail;
   uniform vec2 uOrigin;
 
-  float pulseAt(vec2 field) {
+  /* x is the rim alone, y is everything the front has lit. They are returned
+     together because the fragment stage spends them differently: the wash
+     brightens the ruling, but only the rim is allowed to glow off the ground
+     between the lines — light that spilled evenly out of the whole tail would
+     fog the masthead instead of crossing it. */
+  vec2 pulseAt(vec2 field) {
     float behind = uFront - distance(field, uOrigin);
     if (behind < 0.0) {
-      return 0.0;
+      return vec2(0.0);
     }
-    float decay = exp(-behind / uTail);
-    float rim = mix(0.45, 1.0, smoothstep(0.0, 0.4, behind));
-    return decay * rim * uAmp;
+    float soften = smoothstep(0.0, 0.16, behind) * uAmp;
+    float rim = exp(-behind / 0.9) * soften;
+    float wash = exp(-behind / uTail) * 0.4 * soften;
+    return vec2(rim, rim + wash);
   }
 `;
 
@@ -129,6 +147,7 @@ const VERTEX = /* glsl */ `
   uniform float uRelief;
   varying vec2 vField;
   varying float vPulse;
+  varying float vRim;
   varying float vRidge;
 
   ${NOISE}
@@ -138,14 +157,15 @@ const VERTEX = /* glsl */ `
     vec3 place = position;
     // The plane is built in its own XY and rotated flat by the mesh, so local
     // +z is the world's up and this is the only axis terrain happens on.
-    float ridge = fbm(place.xy * 0.11) - 0.5;
-    float pulse = pulseAt(place.xy);
+    float ridge = fbm(place.xy * 0.42) - 0.5;
+    vec2 pulse = pulseAt(place.xy);
     // The front does not merely light the ground, it raises it: terrain comes
     // up into the light as the edge arrives and settles again behind it.
-    place.z += ridge * uRelief * (1.0 + pulse * 0.75);
+    place.z += ridge * uRelief * (1.0 + pulse.y * 0.75);
 
     vField = place.xy;
-    vPulse = pulse;
+    vPulse = pulse.y;
+    vRim = pulse.x;
     vRidge = ridge;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(place, 1.0);
   }
@@ -155,11 +175,13 @@ const FRAGMENT = /* glsl */ `
   uniform vec3 uAccent;
   uniform vec3 uRest;
   uniform float uPitch;
+  uniform float uWidth;
   uniform float uRestAlpha;
   uniform float uHalfWidth;
   uniform float uHalfDepth;
   varying vec2 vField;
   varying float vPulse;
+  varying float vRim;
   varying float vRidge;
 
   /* Coverage of the nearest ruling, in pixels, so a line is one pixel wide
@@ -167,7 +189,7 @@ const FRAGMENT = /* glsl */ `
      invisible at the horizon. */
   float ruling(vec2 field, float pitch) {
     vec2 cell = field / pitch;
-    vec2 distanceToLine = abs(fract(cell - 0.5) - 0.5) / fwidth(cell);
+    vec2 distanceToLine = abs(fract(cell - 0.5) - 0.5) / (fwidth(cell) * uWidth);
     return 1.0 - clamp(min(distanceToLine.x, distanceToLine.y), 0.0, 1.0);
   }
 
@@ -176,8 +198,8 @@ const FRAGMENT = /* glsl */ `
 
     // The sheet has no border. It thins into the distance and at both sides,
     // so nothing on screen ever announces where the geometry stops.
-    float far = smoothstep(uHalfDepth * 0.1, uHalfDepth, vField.y);
-    float near = smoothstep(-uHalfDepth, -uHalfDepth * 0.55, vField.y);
+    float far = smoothstep(uHalfDepth * 0.35, uHalfDepth * 1.15, vField.y);
+    float near = smoothstep(-uHalfDepth, -uHalfDepth * 0.8, vField.y);
     float sides = 1.0 - smoothstep(0.5, 1.0, abs(vField.x) / uHalfWidth);
     float sheet = (1.0 - far) * near * sides;
 
@@ -186,10 +208,11 @@ const FRAGMENT = /* glsl */ `
     // Ridges catch the front the way high ground catches a low sun, which is
     // most of what makes the lit moment read as terrain rather than as a grid.
     float relief = 0.55 + 0.45 * smoothstep(-0.2, 0.3, vRidge);
-    float alpha = line * (uRestAlpha + vPulse * 0.85 * relief);
-    // A little haze off the ground itself, so the front has a body and is not
-    // only a brighter set of lines.
-    alpha += vPulse * 0.05 * relief;
+    float alpha = line * (uRestAlpha + vPulse * 1.9 * relief);
+    // The rim, and only the rim, glows off the ground between the lines. This
+    // is what gives the front a body and lets it be seen crossing ground the
+    // ruling has already thinned out of.
+    alpha += vRim * 0.24 * relief;
 
     gl_FragColor = vec4(tint, clamp(alpha * sheet, 0.0, 1.0));
   }
@@ -216,7 +239,10 @@ function Field({
   const uniforms = useMemo(uniformValues, []);
 
   useEffect(() => {
-    camera.lookAt(0, -0.4, -3);
+    // Pitched down far enough that the plane's own horizon sits above the top
+    // of the frame: a visible horizon line would make this a landscape, and
+    // the field is meant to be ground seen from a desk, not a view.
+    camera.lookAt(0, -0.6, -1);
   }, [camera]);
 
   useEffect(() => {
@@ -273,7 +299,7 @@ function Field({
   }, [animate, uniforms, invalidate]);
 
   return (
-    <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.9, -3]}>
+    <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -2.2, -4]}>
       <planeGeometry
         args={[FIELD_WIDTH, FIELD_DEPTH, SEGMENTS_X, SEGMENTS_Y]}
       />
@@ -346,9 +372,9 @@ export default function ScanField() {
       className="pointer-events-none absolute inset-0"
       style={{
         maskImage:
-          "linear-gradient(to bottom, transparent, rgba(0,0,0,0.85) 22%, rgba(0,0,0,0.9) 62%, transparent 92%)",
+          "linear-gradient(to bottom, rgba(0,0,0,0.5), rgba(0,0,0,0.95) 35%, rgba(0,0,0,0.9) 72%, transparent 97%)",
         WebkitMaskImage:
-          "linear-gradient(to bottom, transparent, rgba(0,0,0,0.85) 22%, rgba(0,0,0,0.9) 62%, transparent 92%)",
+          "linear-gradient(to bottom, rgba(0,0,0,0.5), rgba(0,0,0,0.95) 35%, rgba(0,0,0,0.9) 72%, transparent 97%)",
       }}
     >
       <Canvas
@@ -357,7 +383,7 @@ export default function ScanField() {
         // Retina is worth having for hairlines; anything past 2x is spending
         // four times the fill rate on a decoration nobody is inspecting.
         dpr={[1, 2]}
-        camera={{ position: [0, 1.5, 6.2], fov: 36, near: 0.1, far: 60 }}
+        camera={{ position: [0, 3.4, 8], fov: 40, near: 0.1, far: 60 }}
         gl={{
           alpha: true,
           // The grid is antialiased in the shader, so MSAA would be paying
