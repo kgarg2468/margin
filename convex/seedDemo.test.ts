@@ -1,10 +1,18 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
-import { FakeCtx } from "./delegations.fixtures";
+import { FakeCtx, handlerOf } from "./delegations.fixtures";
+import * as labs from "./labs";
 import { ensurePersonalLibrary, personalLibraryName } from "./labs";
-import { seedDemoPaper } from "./seedDemo";
+import * as papers from "./papers";
+import { seedDemoPaper, sha256Hex } from "./seedDemo";
 import { DEMO_ANCHORS, DEMO_PAGES } from "./seedDemoPaper.data";
+
+vi.mock("@convex-dev/auth/server", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@convex-dev/auth/server")>()),
+  getAuthUserId: async (ctx: unknown) =>
+    (ctx as { auth?: { userId?: string } }).auth?.userId ?? null,
+}));
 
 /**
  * What a personal library is, and what the demo paper in it is not allowed to
@@ -60,7 +68,11 @@ describe("provisioning", () => {
     const ctx = new FakeCtx();
     const userId = await newAccount(ctx, "Ada");
 
-    const labId = await ensurePersonalLibrary(asMutationCtx(ctx), userId);
+    const { labId, created } = await ensurePersonalLibrary(
+      asMutationCtx(ctx),
+      userId,
+    );
+    expect(created).toBe(true);
 
     const labs = ctx.db.all("labs");
     expect(labs).toHaveLength(1);
@@ -74,7 +86,7 @@ describe("provisioning", () => {
     expect(memberships[0]?.userId).toBe(userId);
   });
 
-  it("is idempotent, because the callback that drives it fires more than once", async () => {
+  it("is idempotent, because every arrival at the app asks it again", async () => {
     const ctx = new FakeCtx();
     const userId = await newAccount(ctx, "Ada");
     await withCanonicalPdf(ctx);
@@ -82,7 +94,12 @@ describe("provisioning", () => {
     const first = await ensurePersonalLibrary(asMutationCtx(ctx), userId);
     const second = await ensurePersonalLibrary(asMutationCtx(ctx), userId);
 
-    expect(second).toBe(first);
+    expect(second.labId).toBe(first.labId);
+    // Only the arrival that actually minted it may claim to have done so: this
+    // is the flag `/app` routes a brand-new account on, and a second sign-in
+    // reporting `created` would reopen the add panel over a working library.
+    expect(first.created).toBe(true);
+    expect(second.created).toBe(false);
     expect(ctx.db.all("labs")).toHaveLength(1);
     expect(ctx.db.all("memberships")).toHaveLength(1);
     // The half that would be worst to get wrong: a second demo paper, and a
@@ -108,7 +125,7 @@ describe("provisioning", () => {
     const adaLab = await ensurePersonalLibrary(asMutationCtx(ctx), ada);
     const benLab = await ensurePersonalLibrary(asMutationCtx(ctx), ben);
 
-    expect(benLab).not.toBe(adaLab);
+    expect(benLab.labId).not.toBe(adaLab.labId);
     expect(ctx.db.all("labs")).toHaveLength(2);
   });
 
@@ -183,7 +200,19 @@ describe("the seeded paper", () => {
     }
   });
 
-  it("puts a thread in the margin, not just a pile of highlights", async () => {
+  it("seeds no reply, because a private one is a state the product cannot reach", async () => {
+    // `annotations.reply` refuses a parent that isn't shared with the lab and
+    // always writes the child `visibility: "lab"`. A private reply under a
+    // private parent is therefore a row no member could ever have produced —
+    // and the reader gives child cards no edit or withdraw control, so the
+    // owner would be left with a note in their own name that they could
+    // neither change nor get rid of.
+    //
+    // Sharing the pair instead would hand the seeded content to the digest,
+    // the brief, the scout and the synthesis, which is the one thing this file
+    // exists to prevent. So the answer is a second top-level note on the same
+    // passage, and every seeded row stays something `annotations.create`
+    // writes.
     const ctx = new FakeCtx();
     const userId = await newAccount(ctx, "Ada");
     await withCanonicalPdf(ctx);
@@ -192,13 +221,25 @@ describe("the seeded paper", () => {
 
     const notes = ctx.db.all("annotations");
     expect(notes.length).toBeGreaterThan(1);
-    const replies = notes.filter((note) => note.parentId !== undefined);
-    // A margin with no reply in it demonstrates highlighting. The reply is
-    // what demonstrates the thing the product is for.
-    expect(replies.length).toBeGreaterThan(0);
-    for (const reply of replies) {
-      expect(notes.some((note) => note._id === reply.parentId)).toBe(true);
+    for (const note of notes) {
+      expect(note.parentId).toBeUndefined();
     }
+  });
+
+  it("still puts two notes on one passage, which is what the thread was for", async () => {
+    const ctx = new FakeCtx();
+    const userId = await newAccount(ctx, "Ada");
+    await withCanonicalPdf(ctx);
+
+    await ensurePersonalLibrary(asMutationCtx(ctx), userId);
+
+    const perQuote = new Map<string, number>();
+    for (const note of ctx.db.all("annotations")) {
+      const quote = note.anchor.quote;
+      perQuote.set(quote, (perQuote.get(quote) ?? 0) + 1);
+    }
+    // A question and, further down the same margin, a partial answer to it.
+    expect([...perQuote.values()].some((count) => count > 1)).toBe(true);
   });
 });
 
@@ -213,7 +254,7 @@ describe("what the seeding is not allowed to leak into", () => {
     const userId = await newAccount(ctx, "Ada");
     await withCanonicalPdf(ctx);
 
-    const labId = await ensurePersonalLibrary(asMutationCtx(ctx), userId);
+    const { labId } = await ensurePersonalLibrary(asMutationCtx(ctx), userId);
     const paperId = ctx.db.all("papers")[0]?._id;
 
     const events = ctx.db.all("events");
@@ -265,7 +306,7 @@ describe("what the seeding is not allowed to leak into", () => {
     const userId = await newAccount(ctx, "Ada");
     await withCanonicalPdf(ctx);
 
-    const labId = await ensurePersonalLibrary(asMutationCtx(ctx), userId);
+    const { labId } = await ensurePersonalLibrary(asMutationCtx(ctx), userId);
 
     for (const note of ctx.db.all("annotations")) {
       expect(note.memberId).toBe(userId);
@@ -311,5 +352,237 @@ describe("seeding a library directly", () => {
     });
 
     expect(await seedDemoPaper(asMutationCtx(ctx), labId, userId)).toBeNull();
+  });
+});
+
+describe("pinning the file the anchors were measured against", () => {
+  it("hex-encodes a digest the way the published vectors do", async () => {
+    // NIST's SHA-256 vector for "abc". The constant this helper is compared
+    // against was taken with `shasum -a 256`, so the two have to agree about
+    // encoding or the pin rejects the very file it was made from.
+    const abc = new TextEncoder().encode("abc");
+    expect(await sha256Hex(abc.buffer as ArrayBuffer)).toBe(
+      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    );
+  });
+
+  it("pads a byte that hexes to one digit", async () => {
+    // The empty string's digest begins `e3b0c442…` and contains `0x0b`. Without
+    // `padStart` this returns 63 characters and every comparison fails.
+    const digest = await sha256Hex(new ArrayBuffer(0));
+    expect(digest).toHaveLength(64);
+    expect(digest).toBe(
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    );
+  });
+});
+
+describe("who gets a library, now that a session is required to ask", () => {
+  /**
+   * The provisioning used to run in `afterUserCreatedOrUpdated`, and the reason
+   * it no longer does is worth stating where it can be checked: requesting an
+   * emailed sign-in link creates the user row *before the mail is sent*, so that
+   * callback fired with `existingUserId === null` for any address a stranger
+   * cared to type. A lab, a membership, two ledger events and a seeded paper,
+   * from an unauthenticated POST, in a loop.
+   *
+   * `labs.ensureMyLibrary` needs a caller. These are the rules it applies once
+   * it has one.
+   */
+  const callEnsureMyLibrary = async (ctx: FakeCtx) =>
+    (await handlerOf(labs.ensureMyLibrary)(ctx, {} as never)) as {
+      labId: Id<"labs">;
+      created: boolean;
+    } | null;
+
+  it("refuses a caller with no session at all", async () => {
+    const ctx = new FakeCtx();
+
+    await expect(callEnsureMyLibrary(ctx)).rejects.toThrow();
+    expect(ctx.db.all("labs")).toHaveLength(0);
+  });
+
+  it("provisions for an account that belongs nowhere", async () => {
+    const ctx = new FakeCtx();
+    const userId = await newAccount(ctx, "Ada");
+    await withCanonicalPdf(ctx);
+    ctx.auth.userId = userId;
+
+    const outcome = await callEnsureMyLibrary(ctx);
+
+    expect(outcome?.created).toBe(true);
+    expect(ctx.db.all("labs")).toHaveLength(1);
+    expect(ctx.db.all("papers")).toHaveLength(1);
+  });
+
+  it("says created only once, however many times the app arrives", async () => {
+    const ctx = new FakeCtx();
+    const userId = await newAccount(ctx, "Ada");
+    await withCanonicalPdf(ctx);
+    ctx.auth.userId = userId;
+
+    const first = await callEnsureMyLibrary(ctx);
+    const second = await callEnsureMyLibrary(ctx);
+
+    expect(first?.created).toBe(true);
+    expect(second?.created).toBe(false);
+    expect(second?.labId).toBe(first?.labId);
+    expect(ctx.db.all("labs")).toHaveLength(1);
+    expect(ctx.db.all("papers")).toHaveLength(1);
+  });
+
+  it("leaves an account that already belongs to a lab exactly as it was", async () => {
+    // The regression that would be noticed by everybody at once: people who
+    // have used Margin for a year signing in one morning to a second library
+    // and a paper they never added. Backfilling them is an operator's decision,
+    // not something a sign-in does behind their back.
+    const ctx = new FakeCtx();
+    const userId = await newAccount(ctx, "Elena");
+    await withCanonicalPdf(ctx);
+    const labId = await ctx.db.insert("labs", {
+      name: "Computational Memory Lab",
+      createdBy: userId,
+      memberCount: 2,
+    });
+    await ctx.db.insert("memberships", {
+      labId,
+      userId,
+      role: "pi",
+      joinedAt: 1,
+    });
+    ctx.auth.userId = userId;
+
+    expect(await callEnsureMyLibrary(ctx)).toBeNull();
+    expect(ctx.db.all("labs")).toHaveLength(1);
+    expect(ctx.db.all("papers")).toHaveLength(0);
+    expect(ctx.db.all("annotations")).toHaveLength(0);
+  });
+
+  it("still answers the library of somebody who has since joined real labs", async () => {
+    // The personal library is found by `by_personal_for`, not by whichever
+    // membership happens to come back first — otherwise the answer for a
+    // two-lab member would depend on insertion order.
+    const ctx = new FakeCtx();
+    const userId = await newAccount(ctx, "Ada");
+    await withCanonicalPdf(ctx);
+    ctx.auth.userId = userId;
+    const mine = await callEnsureMyLibrary(ctx);
+
+    const other = await ctx.db.insert("labs", {
+      name: "Reyes Lab",
+      createdBy: userId,
+      memberCount: 2,
+    });
+    await ctx.db.insert("memberships", {
+      labId: other,
+      userId,
+      role: "member",
+      joinedAt: 2,
+    });
+
+    const again = await callEnsureMyLibrary(ctx);
+    expect(again?.labId).toBe(mine?.labId);
+    expect(again?.created).toBe(false);
+  });
+});
+
+describe("the blob every library points at", () => {
+  /**
+   * One stored file, referenced by every provisioned copy — which means the
+   * question "may I delete this PDF" stopped being answerable from one paper's
+   * row on the day P4 shipped. `papers.attachPdf` answered it from one row
+   * anyway: replacing the file on your own demo paper deleted the bytes out from
+   * under every other library, leaving each of them a `ready` paper that renders
+   * as a broken download, discoverable only by somebody opening one.
+   */
+  const attachPdf = handlerOf(papers.attachPdf);
+  const discardUpload = handlerOf(papers.discardUpload);
+
+  /** A member, their library, and the demo paper on its shelf. */
+  async function seededLibrary(ctx: FakeCtx, name: string) {
+    const userId = await newAccount(ctx, name);
+    const { labId } = await ensurePersonalLibrary(asMutationCtx(ctx), userId);
+    const paper = ctx.db
+      .all("papers")
+      .filter((row) => row.labId === labId)
+      .at(0);
+    return { userId, labId, paperId: paper?._id as Id<"papers"> };
+  }
+
+  /** A fresh upload, declared to the platform the way a real one would be. */
+  function upload(ctx: FakeCtx, id: string): Id<"_storage"> {
+    ctx.db.putSystem(id, { contentType: "application/pdf", size: 1000 });
+    return id as Id<"_storage">;
+  }
+
+  it("keeps the shared copy when one library swaps its own file", async () => {
+    const ctx = new FakeCtx();
+    const shared = await withCanonicalPdf(ctx);
+    const ada = await seededLibrary(ctx, "Ada");
+    await seededLibrary(ctx, "Ben");
+
+    ctx.auth.userId = ada.userId;
+    await attachPdf(ctx, {
+      paperId: ada.paperId,
+      storageId: upload(ctx, "storage_ada_replacement"),
+      pages: ["a new text layer"],
+    } as never);
+
+    // Ben's copy is still readable, which it would not be if the delete had
+    // gone through on Ada's say-so.
+    expect(ctx.discarded).not.toContain(shared as string);
+    const bens = ctx.db
+      .all("papers")
+      .filter((row) => row.addedBy !== ada.userId);
+    expect(bens).toHaveLength(1);
+    expect(bens[0]?.storageId).toBe(shared);
+  });
+
+  it("still collects a file genuinely nobody is using", async () => {
+    // The guard has to stay a guard and not become a leak: an ordinary
+    // replacement, on a blob no one else claims, must still free the bytes.
+    const ctx = new FakeCtx();
+    await withCanonicalPdf(ctx);
+    const ada = await seededLibrary(ctx, "Ada");
+
+    ctx.auth.userId = ada.userId;
+    const first = upload(ctx, "storage_ada_one");
+    await attachPdf(ctx, {
+      paperId: ada.paperId,
+      storageId: first,
+      pages: ["one"],
+    } as never);
+    await attachPdf(ctx, {
+      paperId: ada.paperId,
+      storageId: upload(ctx, "storage_ada_two"),
+      pages: ["two"],
+    } as never);
+
+    expect(ctx.discarded).toContain("storage_ada_one");
+  });
+
+  it("refuses to discard the canonical copy before the first signup claims it", async () => {
+    // The window nothing else covers. Between seeding a deployment and its
+    // first provisioned library, no `papers` row points at the canonical blob
+    // at all — so a `by_pdf_storage` check alone would call it garbage.
+    const ctx = new FakeCtx();
+    const shared = await withCanonicalPdf(ctx);
+    const userId = await newAccount(ctx, "Ada");
+    const labId = await ctx.db.insert("labs", {
+      name: "Reyes Lab",
+      createdBy: userId,
+      memberCount: 1,
+    });
+    await ctx.db.insert("memberships", {
+      labId,
+      userId,
+      role: "pi",
+      joinedAt: 1,
+    });
+    ctx.auth.userId = userId;
+
+    await discardUpload(ctx, { labId, storageId: shared } as never);
+
+    expect(ctx.discarded).toEqual([]);
   });
 });

@@ -2661,13 +2661,12 @@ export default defineSchema({
    *
    * ## What sharing the blob costs, and where it is owed
    *
-   * A blob two labs point at cannot be deleted on one lab's say-so.
-   * `papers.discardUpload` already asks `by_pdf_storage` before deleting and so
-   * is safe by construction. `papers.attachPdf` is not: replacing a paper's
-   * file deletes the old blob unconditionally, so a member who swaps the PDF on
-   * their demo paper would take every other library's copy with it. That guard
-   * is not written yet — see the note in `convex/seedDemo.ts` and the PR that
-   * introduced this table.
+   * A blob two labs point at cannot be deleted on one lab's say-so. Both
+   * deleting paths in `convex/papers.ts` therefore ask `blobIsStillClaimed`
+   * first, and `by_storage` is the half of that question this table answers:
+   * the canonical copy stays reachable even at the moment no paper claims it,
+   * which is exactly the window between seeding a deployment and its first
+   * signup.
    *
    * `revision` is the asset's own version, not a schema version. Replacing the
    * demo paper means storing a new blob under a higher revision; libraries
@@ -2678,5 +2677,8 @@ export default defineSchema({
     storageId: v.id("_storage"),
     revision: v.number(),
     seededAt: v.number(),
-  }).index("by_revision", ["revision"]),
+  })
+    .index("by_revision", ["revision"])
+    /** "Is this blob the deployment's canonical copy?" — asked before a delete. */
+    .index("by_storage", ["storageId"]),
 });

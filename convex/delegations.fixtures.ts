@@ -264,6 +264,24 @@ export class FakeDb {
    */
   hostileSearchIndex = false;
 
+  /**
+   * `ctx.db.system`, which in Convex reads the metadata Convex itself keeps —
+   * here, the `_storage` rows `papers.requireStoredPdf` checks a file's type and
+   * size against before a paper is allowed to claim it. Nothing writes these; a
+   * test that wants an upload to exist calls `putSystem` and says what it is.
+   */
+  readonly system = {
+    get: async (id: string): Promise<Row | null> =>
+      this.systemRows.get(id) ?? null,
+  };
+
+  private readonly systemRows = new Map<string, Row>();
+
+  /** Declare a stored file, as the platform would have after an upload. */
+  putSystem(id: string, doc: Record<string, unknown>): void {
+    this.systemRows.set(id, { ...doc, _id: id, _creationTime: 0 } as Row);
+  }
+
   private rowsOf(table: string): Row[] {
     const existing = this.tables.get(table);
     if (existing !== undefined) return existing;

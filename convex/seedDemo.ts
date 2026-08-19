@@ -72,6 +72,26 @@ const DEMO_TITLE = "Why Most Published Research Findings Are False";
 const DEMO_DOI = "10.1371/journal.pmed.0020124";
 
 /**
+ * SHA-256 of the exact file the committed text layer was extracted from.
+ *
+ * This is the load-bearing check, and size and magic bytes are only the cheap
+ * ones in front of it. `seedDemoPaper.data.ts` freezes six pages of normalized
+ * text and four anchors as *character offsets into those pages*; the annotations
+ * are those offsets and nothing else. Any other PDF at this URL — a publisher's
+ * reflow, a new cover sheet, a substitution — still passes for a PDF of roughly
+ * the right size while extracting to different text, and every seeded note would
+ * then point at a passage it was never about. Silently, and on every account
+ * created afterwards.
+ *
+ * So the bytes are pinned rather than described. Bump this and `DEMO_REVISION`
+ * together, from a file that has actually been re-extracted.
+ *
+ * Verify with: `shasum -a 256 <the downloaded file>`
+ */
+const DEMO_PDF_SHA256 =
+  "ffc1005680cb620eec4c913437dfabbf311b535cfe16cbaeb2faec1f92afc362";
+
+/**
  * Bounds on what will be accepted off the wire. The file is a quarter of a
  * megabyte; anything wildly outside that is a redirect to a login page, an
  * error document, or a publisher who has changed what lives at this URL — none
@@ -79,6 +99,22 @@ const DEMO_DOI = "10.1371/journal.pmed.0020124";
  */
 const MIN_PDF_BYTES = 100_000;
 const MAX_PDF_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Lowercase hex of a SHA-256 digest, for comparing against the pin above.
+ *
+ * Exported only so a test can hold it against a published vector. A dropped
+ * `padStart` here would shorten one byte in two hundred and fifty-six and turn
+ * the pin into a check that fails on the correct file — which, since the pin is
+ * the thing standing between a reflowed PDF and every seeded annotation, is a
+ * failure worth catching somewhere other than an operator's terminal.
+ */
+export async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
 
 /** The deployment's stored copy, as the two functions below pass it around. */
 type CanonicalPdf = { storageId: Id<"_storage">; revision: number };
@@ -140,6 +176,19 @@ export const seedCanonicalPdf = internalAction({
     if (header !== "%PDF-") {
       throw new ConvexError(
         "That download is not a PDF. Nothing was stored.",
+      );
+    }
+    // And the check that actually protects the annotations. Loud on purpose:
+    // the operator is the only one who can decide whether the publisher changed
+    // the file or the URL now serves something else entirely, and either way the
+    // answer involves re-extracting the text layer, not retrying this.
+    const digest = await sha256Hex(bytes);
+    if (digest !== DEMO_PDF_SHA256) {
+      throw new ConvexError(
+        `That download hashes to ${digest}, not the file revision ${DEMO_REVISION}'s ` +
+          "text layer and anchor offsets were taken from. Nothing was stored — " +
+          "re-extract convex/seedDemoPaper.data.ts against the new file and bump " +
+          "DEMO_REVISION and DEMO_PDF_SHA256 together.",
       );
     }
 
@@ -214,24 +263,41 @@ type SeededNote = {
     | "open-question"
     | "connection-to-own-work";
   body: string;
-  /** Index into this array of the note this one answers, for the one thread. */
-  replyTo?: number;
 };
 
 /**
  * The margin the first screen shows.
  *
- * Five notes, four passages, and one of them a reply — because a margin with no
- * thread in it demonstrates highlighting rather than conversation, and the
- * conversation is the product. The types are spread deliberately across the
- * vocabulary a reader would actually reach for on this paper: what the argument
- * proves, what its method rests on, what it leaves open, and where it touches
- * work of your own.
+ * Five notes over four passages, two of them on the same one. The types are
+ * spread deliberately across the vocabulary a reader would actually reach for on
+ * this paper: what the argument proves, what its method rests on, what it leaves
+ * open, and where it touches work of your own.
  *
- * Written to survive being read closely. Somebody who opens Margin for the
- * first time and finds four sentences of filler learns that the margin is
- * decoration; these are notes a person could have written about this paper, and
- * they are meant to be argued with, edited, or thrown away.
+ * Written to survive being read closely. Somebody who opens Margin for the first
+ * time and finds four sentences of filler learns that the margin is decoration;
+ * these are notes a person could have written about this paper, and they are
+ * meant to be argued with, edited, or thrown away.
+ *
+ * ## Why there is no thread here
+ *
+ * An earlier version made the fourth note a reply to the third, to show a margin
+ * conversation rather than a row of highlights. It was seeding a state the
+ * product cannot reach: `annotations.reply` refuses a parent that isn't shared
+ * with the lab and always writes the child `visibility: "lab"`, so a private
+ * reply under a private parent is a shape no member could ever have produced —
+ * and the reader, reasonably, offers no edit or withdraw control on a child
+ * card. The result was a note with the owner's name on it that the owner could
+ * neither change nor get rid of.
+ *
+ * The two honest ways out both cost more than the thread is worth: making the
+ * pair lab-visible would hand the seeded content to the digest, the brief, the
+ * scout and the synthesis, which is the whole thing this file is built to avoid;
+ * and giving child cards their own controls is reader surgery in service of demo
+ * content. So the answer stays, as a second top-level note on the same passage.
+ * A question and, further down the same margin, a partial answer to it is most
+ * of what the thread was demonstrating anyway — and every seeded row is now
+ * exactly what `annotations.create` writes for a private note, editable and
+ * removable like any other.
  */
 const SEEDED_NOTES: readonly SeededNote[] = [
   {
@@ -252,8 +318,7 @@ const SEEDED_NOTES: readonly SeededNote[] = [
   {
     anchor: "bias",
     type: "note",
-    replyTo: 2,
-    body: "Partial answer, years later: the trial-registration literature gets at it sideways. Comparing registered outcomes against published ones is u observed rather than assumed — not the same quantity, but the closest thing to a measurement of it we have.",
+    body: "Partial answer to my own question above, years later: the trial-registration literature gets at it sideways. Comparing registered outcomes against published ones is u observed rather than assumed — not the same quantity, but the closest thing to a measurement of it we have.",
   },
   {
     anchor: "corollary3",
@@ -313,33 +378,31 @@ export async function seedDemoPaper(
     });
   }
 
-  const inserted: Id<"annotations">[] = [];
   for (const note of SEEDED_NOTES) {
     const anchor = DEMO_ANCHORS[note.anchor];
-    const parentId =
-      note.replyTo === undefined ? undefined : inserted[note.replyTo];
-    inserted.push(
-      await ctx.db.insert("annotations", {
-        labId,
-        paperId,
-        memberId: userId,
-        anchor: {
-          quote: anchor.quote,
-          prefix: anchor.prefix,
-          suffix: anchor.suffix,
-          start: anchor.start,
-          end: anchor.end,
-          pageIndex: anchor.pageIndex,
-        },
-        type: note.type,
-        body: note.body,
-        // The load-bearing line. See the top of this file: private is what puts
-        // these outside the digest, the brief, the scout and the synthesis
-        // without a single exclusion clause anywhere for someone to forget.
-        visibility: "private",
-        ...(parentId === undefined ? {} : { parentId }),
-      }),
-    );
+    // No `parentId` on any of them, deliberately — see SEEDED_NOTES for why the
+    // one thread became a second note on the same passage. What goes in here is
+    // row-for-row what `annotations.create` writes for a private note, so every
+    // seeded card meets the reader's owner controls like any other.
+    await ctx.db.insert("annotations", {
+      labId,
+      paperId,
+      memberId: userId,
+      anchor: {
+        quote: anchor.quote,
+        prefix: anchor.prefix,
+        suffix: anchor.suffix,
+        start: anchor.start,
+        end: anchor.end,
+        pageIndex: anchor.pageIndex,
+      },
+      type: note.type,
+      body: note.body,
+      // The load-bearing line. See the top of this file: private is what puts
+      // these outside the digest, the brief, the scout and the synthesis
+      // without a single exclusion clause anywhere for someone to forget.
+      visibility: "private",
+    });
   }
 
   // No `recordEvent`, deliberately, for the paper or for any of the notes. The

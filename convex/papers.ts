@@ -406,6 +406,47 @@ export const createFromMetadata = mutation({
 });
 
 /**
+ * Is anything still pointing at this blob?
+ *
+ * Storage is shared, and one paper's row is not enough to answer with. Every
+ * personal library is provisioned with the *same* demo PDF — one blob stored
+ * per deployment by `seedDemo.seedCanonicalPdf`, referenced by every copy — so
+ * "this paper has stopped using the file" and "the file is unreachable" stopped
+ * being the same sentence the day that landed. A member swapping the PDF on
+ * their own demo paper would otherwise delete the bytes out from under every
+ * other library, leaving each of them a `ready` paper whose pages render as a
+ * broken download and no way to notice until somebody opens one.
+ *
+ * Two things can claim a blob and both are asked. Another `papers` row is the
+ * obvious one. The `demoSeeds` record is the one that is easy to miss: between
+ * seeding a deployment and its first signup no paper claims the canonical copy
+ * at all, and without this half of the check that window is one where the file
+ * every future library depends on looks like garbage worth collecting.
+ *
+ * `exceptPaperId` excuses the caller's own row, so a paper is never kept alive
+ * by the claim it is in the middle of giving up.
+ */
+async function blobIsStillClaimed(
+  ctx: MutationCtx,
+  storageId: Id<"_storage">,
+  exceptPaperId: Id<"papers"> | null,
+): Promise<boolean> {
+  const claims = await ctx.db
+    .query("papers")
+    .withIndex("by_pdf_storage", (q) => q.eq("storageId", storageId))
+    .take(2);
+  if (claims.some((claim) => claim._id !== exceptPaperId)) {
+    return true;
+  }
+
+  const seeded = await ctx.db
+    .query("demoSeeds")
+    .withIndex("by_storage", (q) => q.eq("storageId", storageId))
+    .first();
+  return seeded !== null;
+}
+
+/**
  * Give a metadata-only paper its PDF — the second half of a DOI ingest that
  * found no open-access copy. Also the way to replace a preprint with the
  * published file, in which case the old blob and the old text layer go with
@@ -431,7 +472,9 @@ export const attachPdf = mutation({
     });
     await replacePageText(ctx, paper._id, args.pages);
 
-    if (isReplacement) {
+    // The patch above has already moved this paper off `previous`, so anything
+    // the check still finds is somebody else's claim on the same bytes.
+    if (isReplacement && !(await blobIsStillClaimed(ctx, previous, paper._id))) {
       await ctx.storage.delete(previous);
     }
 
@@ -538,8 +581,10 @@ export const markIngestFailed = mutation({
  * PDF over the size limit. Without this the file stays in storage with
  * nothing pointing at it and no way to ever find it again.
  *
- * The `by_pdf_storage` lookup is the safety catch: if any paper already
- * claims this blob, the caller is confused and the file stays.
+ * `blobIsStillClaimed` is the safety catch: if any paper already claims this
+ * blob — or if it is the deployment's canonical demo copy, which spends the
+ * time before the first signup claimed by nothing at all — the caller is
+ * confused and the file stays.
  */
 export const discardUpload = mutation({
   args: { labId: v.id("labs"), storageId: v.id("_storage") },
@@ -547,11 +592,7 @@ export const discardUpload = mutation({
   handler: async (ctx, args) => {
     await requireMembership(ctx, args.labId);
 
-    const claimed = await ctx.db
-      .query("papers")
-      .withIndex("by_pdf_storage", (q) => q.eq("storageId", args.storageId))
-      .first();
-    if (claimed !== null) {
+    if (await blobIsStillClaimed(ctx, args.storageId, null)) {
       return null;
     }
 

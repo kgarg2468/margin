@@ -4,8 +4,6 @@ import { convexAuth } from "@convex-dev/auth/server";
 import type { AuthProviderConfig, EmailConfig } from "@convex-dev/auth/server";
 import { ConvexError } from "convex/values";
 import type { DataModel, Doc } from "./_generated/dataModel";
-import type { MutationCtx } from "./_generated/server";
-import { ensurePersonalLibrary } from "./labs";
 
 /**
  * Three ways in, and the deployment decides which of them exist.
@@ -643,7 +641,7 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
      *
      * Only ever fills a gap: a name that is already there is never rewritten.
      */
-    async afterUserCreatedOrUpdated(ctx, { userId, existingUserId }) {
+    async afterUserCreatedOrUpdated(ctx, { userId }) {
       const user = (await ctx.db.get(userId)) as Doc<"users"> | null;
       if (user === null) {
         return;
@@ -655,32 +653,20 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
         }
       }
 
-      // And give a *new* account somewhere to put a paper.
+      // Deliberately the only thing this callback does.
       //
-      // Here rather than on the first render of `/app`, because this is the one
-      // point all three doors pass through — password, Google, and the emailed
-      // link — and because a provisioning the client asks for is a provisioning
-      // a closed tab can interrupt. It shares the transaction that created the
-      // account, so there is a person and a library or there is neither.
+      // Provisioning the new account's personal library belongs here by every
+      // instinct — it is the one point all three doors pass through, and it
+      // shares the transaction that creates the user. It is still wrong, and
+      // `createVerificationCodeImpl` in `@convex-dev/auth` is why: requesting an
+      // emailed sign-in link calls `upsertUserAndAccount` *before the mail is
+      // sent*, so this runs with `existingUserId === null` for an address nobody
+      // has proven they can read. A lab, a membership, two ledger events and a
+      // seeded paper, from an unauthenticated POST, repeatable in a loop.
       //
-      // `existingUserId` is the gate and it is not a nicety. This callback also
-      // fires on every OAuth sign-in to an account that already exists, and
-      // provisioning from there would hand a library — and a demo paper — to
-      // people who have been using Margin for a year, on the next morning they
-      // signed in. `null` means the account is being created right now, which
-      // is the only moment a starting point is a starting point. Accounts made
-      // before this shipped therefore have none, and giving them one is a
-      // backfill somebody runs on purpose rather than something a sign-in does
-      // behind their back.
-      if (existingUserId === null) {
-        await ensurePersonalLibrary(
-          // The library types this callback against `AnyDataModel`; the ctx it
-          // hands over is this deployment's own. Same cast, and the same
-          // reason, as the `Doc<"users">` above.
-          ctx as unknown as MutationCtx,
-          userId,
-        );
-      }
+      // So the library is minted on first authenticated arrival instead, by
+      // `labs.ensureMyLibrary`. See that mutation for how it stays a *new*
+      // account's privilege without this callback's `existingUserId` to lean on.
     },
   },
 });
