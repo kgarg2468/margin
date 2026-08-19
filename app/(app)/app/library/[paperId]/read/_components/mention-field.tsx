@@ -181,12 +181,13 @@ export function MentionField({
         aria-activedescendant={open ? `${listId}-${active}` : undefined}
         // Announced here and nowhere else, because here is where it works:
         // the handler below is on this element, so a reader told about the
-        // combination while focus is on it can actually press it. Conditional
-        // for the same reason — a field whose parent passed no `onSubmit` has
-        // no save to offer, and advertising one would be a lie in the one
-        // place a screen reader user has no way to check.
+        // combination while focus is on it can actually press it. Withdrawn in
+        // the two cases where pressing it would do something else — a parent
+        // that passed no `onSubmit` has no save to offer, and an open roster
+        // takes Enter for its own pick, modifiers and all. Both are places a
+        // screen reader user has no way to check the claim for themselves.
         aria-keyshortcuts={
-          onSubmit === undefined ? undefined : "Meta+Enter Control+Enter"
+          onSubmit === undefined || open ? undefined : "Meta+Enter Control+Enter"
         }
         onChange={(event) => {
           setCaret(event.target.selectionStart);
