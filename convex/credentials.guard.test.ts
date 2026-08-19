@@ -427,15 +427,65 @@ describe("no credential ever reaches a client", () => {
     ).toEqual([]);
   });
 
+  /**
+   * The one kind of secret a member is supposed to be handed.
+   *
+   * Every other credential in this codebase is machinery: a lab's Slack
+   * webhook, a member's Zotero key. Nobody ever needs to see one, so the rule
+   * for them is absolute and the assertion below is `[]`.
+   *
+   * A share token is the opposite kind of thing. It is minted *because* a
+   * member asked for a link to send to somebody, and a link they cannot read
+   * is not a link. The management panel has to render it, so it has to travel
+   * in a query result, so this file has to know the difference between a
+   * secret that leaked and one that was handed over on purpose.
+   *
+   * Named one at a time rather than by a `shares.*` prefix, because the thing
+   * that would go wrong here is a *new* function on this module quietly
+   * growing a token in its answer — which is exactly what a prefix would wave
+   * through. All four are membership-gated; the assertion under this one is
+   * what holds that to be true of the query a stranger can call.
+   */
+  const TOKEN_BEARING = [
+    "shares.forPaper → share.token",
+    "shares.forSession → share.token",
+    "shares.sharePaper → token",
+    "shares.shareSynthesis → token",
+  ];
+
   it("declares no credential-shaped field in any public returns validator", () => {
-    const offenders = publicFunctions.flatMap((fn) =>
-      credentialShaped(fn.returns).map((path) => `${fn.name} → ${path}`),
-    );
+    const offenders = publicFunctions
+      .flatMap((fn) =>
+        credentialShaped(fn.returns).map((path) => `${fn.name} → ${path}`),
+      )
+      .filter((offender) => !TOKEN_BEARING.includes(offender))
+      .sort();
 
     expect(
       offenders,
       "A Slack webhook URL and a Zotero API key are credentials. Neither has any business in a query result, a browser cache, or a devtools pane — not even the PI's.",
     ).toEqual([]);
+  });
+
+  it("hands a share token only to somebody already inside the lab", () => {
+    // The exemption above is only safe while every function on that list is
+    // behind a membership check, so the list is checked against the module
+    // rather than trusted. `shares.view` is the one function in this codebase
+    // that answers an anonymous caller, and it is deliberately not on it: a
+    // page rendered from a token must not echo the token back into the markup,
+    // where a browser extension, a screenshot or a copied "view source" would
+    // carry the capability somewhere the reader never meant to send it.
+    const present = publicFunctions
+      .flatMap((fn) =>
+        credentialShaped(fn.returns).map((path) => `${fn.name} → ${path}`),
+      )
+      .filter((path) => path.startsWith("shares."))
+      .sort();
+    expect(present).toEqual([...TOKEN_BEARING].sort());
+
+    const view = publicFunctions.find((fn) => fn.name === "shares.view");
+    expect(view, "shares.view is the public read; it must exist").toBeDefined();
+    expect(credentialShaped(view?.returns ?? null)).toEqual([]);
   });
 
   it("does put them in the internal queries that need them, so the check is real", () => {
@@ -518,7 +568,17 @@ describe("where the credential is stored", () => {
     // appeared the day this pattern learned the word `secret`, which is the
     // widening working — the assertion above already proves no public returns
     // validator carries it either.
-    expect(holders).toEqual(["authAccounts", "labs", "zoteroLinks"]);
+    //
+    // `shares.token` is the fourth, and the only one on this list that a
+    // member is ever shown — see `TOKEN_BEARING` above. It earns its place
+    // here for the same reason the others do: it is a bearer secret with a
+    // lifetime to reason about. Its lifetime is the shortest of the four,
+    // because revoking is one press and a revoked row keeps its token only so
+    // that the link stays dead rather than becoming available to re-mint.
+    expect(holders).toEqual(["authAccounts", "labs", "shares", "zoteroLinks"]);
+    expect(fieldPaths(wireForm(schema.tables.shares.validator))).toContain(
+      "token",
+    );
     expect(fieldPaths(wireForm(schema.tables.labs.validator))).toContain(
       "slackWebhookUrl",
     );

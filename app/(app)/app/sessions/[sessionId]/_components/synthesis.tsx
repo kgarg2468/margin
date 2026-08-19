@@ -5,6 +5,7 @@ import type { Id } from "@/convex/_generated/dataModel";
 import { citationNumbering } from "@/lib/citations/numbering";
 import { downloadText, exportFilename } from "@/lib/export/download";
 import { SECTION_ORDER, sessionWriteUpToMarkdown } from "@/lib/export/markdown";
+import { toBlocks } from "@/lib/prose/blocks";
 import { relativeWhen } from "@/lib/sessions-ui";
 import {
   errorClass,
@@ -406,49 +407,6 @@ function ApprovedWriteUp({
       <ApprovedProse text={text} />
     </div>
   );
-}
-
-/** A block of the approved copy, in the order it was written. */
-type Block =
-  | { kind: "heading"; text: string }
-  | { kind: "list"; items: string[] }
-  | { kind: "paragraph"; text: string };
-
-/**
- * Markdown, as much of it as this surface promises.
- *
- * The editor hands people a markdown draft, so the copy has to render headings
- * and bullets or the `##` a person never touched shows up in the lab's record.
- * It stops there deliberately: a real markdown pipeline is a dependency and an
- * HTML-injection surface, in exchange for emphasis marks nobody has asked for.
- * Anything it does not recognise is a paragraph — the text always survives.
- */
-function toBlocks(markdown: string): Block[] {
-  const blocks: Block[] = [];
-  for (const raw of markdown.split("\n")) {
-    const line = raw.trim();
-    if (line.length === 0) continue;
-
-    const heading = /^#{1,6}\s+(.+)$/.exec(line);
-    if (heading?.[1] !== undefined) {
-      blocks.push({ kind: "heading", text: heading[1] });
-      continue;
-    }
-
-    const bullet = /^[-*]\s+(.+)$/.exec(line);
-    if (bullet?.[1] !== undefined) {
-      const last = blocks.at(-1);
-      if (last?.kind === "list") {
-        last.items.push(bullet[1]);
-      } else {
-        blocks.push({ kind: "list", items: [bullet[1]] });
-      }
-      continue;
-    }
-
-    blocks.push({ kind: "paragraph", text: line });
-  }
-  return blocks;
 }
 
 function ApprovedProse({ text }: { text: string }) {
