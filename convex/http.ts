@@ -139,4 +139,84 @@ http.route({
   }),
 });
 
+/* -------------------------------------------------------------------------
+ * PDF delivery for a share link
+ * ---------------------------------------------------------------------- */
+
+/**
+ * `GET /shared-pdf?token=…` — the same bytes, for somebody with no account.
+ *
+ * A second door with its own key, rather than a hole in the first one. The
+ * route above is untouched: it still demands a bearer header, and no share
+ * token will ever make it answer. This one takes a share token and nothing
+ * else, and `shares.pdfForShare` re-runs the whole gate on every request —
+ * token exists, share not revoked, share is of a paper, paper still in the lab
+ * the share names, paper still has a file. A link taken down stops serving the
+ * PDF at the same moment it stops serving the page.
+ *
+ * ## Why a token in a URL is not the thing this route was built to avoid
+ *
+ * The authed route's doc comment above is emphatic that a permanent
+ * unauthenticated link to a stored file is unacceptable, and it is right. The
+ * difference here is what the credential *is*. A bearer token is a member's
+ * whole session: leaking one hands over their labs, their private notes, and
+ * the ability to write. A share token is a capability for one artifact that
+ * somebody deliberately made public, it grants read and nothing else, and it
+ * can be revoked in one press without touching anything else the member has.
+ * Putting a session token in a URL would be a mistake of a different kind, and
+ * this route does not do it: it accepts no `Authorization` header at all, so
+ * there is no bearer credential anywhere near it to reuse or confuse.
+ *
+ * `X-Robots-Tag` because a PDF is a document a crawler indexes on its own
+ * terms — the page's `<meta name="robots">` protects the page and says nothing
+ * about a file fetched from another origin.
+ *
+ * As above and for the same reason: nothing about this request is recorded.
+ */
+http.route({
+  path: "/shared-pdf",
+  method: "OPTIONS",
+  handler: httpAction(
+    async () => new Response(null, { status: 204, headers: CORS_HEADERS }),
+  ),
+});
+
+http.route({
+  path: "/shared-pdf",
+  method: "GET",
+  handler: httpAction(async (ctx, request) => {
+    const token = new URL(request.url).searchParams.get("token");
+    if (token === null) {
+      return refuse(400, "Ask for a paper.");
+    }
+
+    // One refusal for a token that was never minted, a link that has been
+    // taken down, a share of a write-up rather than a paper, and a paper with
+    // no file on it. A prober must not be able to tell them apart.
+    const delivery = await ctx.runQuery(internal.shares.pdfForShare, { token });
+    if (delivery === null) {
+      return refuse(404, "No such paper.");
+    }
+
+    const blob = await ctx.storage.get(delivery.storageId);
+    if (blob === null) {
+      return refuse(404, "No such paper.");
+    }
+
+    return new Response(blob, {
+      status: 200,
+      headers: {
+        ...CORS_HEADERS,
+        "Content-Type": "application/pdf",
+        "Content-Disposition": `inline; filename="${headerFilename(delivery.title)}"`,
+        // `no-store` for the reason the authed route gives — the check on
+        // every request is what protects the file, so a copy of the bytes in a
+        // shared cache under this URL would outlive the revocation.
+        "Cache-Control": "private, no-store",
+        "X-Robots-Tag": "noindex, nofollow",
+      },
+    });
+  }),
+});
+
 export default http;
