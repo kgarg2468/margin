@@ -91,7 +91,11 @@ export function SharedPaper({
                 <NoteCard key={note._id} note={note} onJump={jumpToPage} />
               ))
             )}
-            <KeepThisPaper token={token} pdf={shared.pdf} />
+            <KeepThisPaper
+              token={token}
+              pdf={shared.pdf}
+              hasNotes={shared.notes.length > 0}
+            />
           </aside>
         </div>
       </main>
@@ -122,7 +126,10 @@ export function SharedPaper({
  * The wording follows the file, because the promise has to. A share that
  * carries the PDF hands over a paper you can open; one that does not hands
  * over the citation, and saying otherwise would be the first thing this
- * product told somebody that was not true.
+ * product told somebody that was not true. It follows the margin for the same
+ * reason: on a link whose lab published none of its notes there is nothing
+ * above this line to stay anywhere, and the sentence would be describing a
+ * column the reader is looking at and cannot see.
  *
  * The token goes into this tab's `sessionStorage` on the way out and never
  * into the URL — see `lib/shares/pending-import.ts`. The press is a plain
@@ -132,13 +139,15 @@ export function SharedPaper({
 function KeepThisPaper({
   token,
   pdf,
+  hasNotes,
 }: {
   token: string;
   pdf: SharedPaperView["pdf"];
+  hasNotes: boolean;
 }) {
   return (
     <p className="border-t border-rule pt-4 font-serif text-sm leading-relaxed text-ink-muted">
-      The notes above stay with the lab that wrote them.{" "}
+      {hasNotes ? "The notes above stay with the lab that wrote them. " : null}
       <Link
         href="/app"
         onClick={() => {
