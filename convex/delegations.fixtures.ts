@@ -447,6 +447,18 @@ export class FakeCtx {
   readonly stored: Blob[] = [];
   readonly discarded: string[] = [];
   private storageCounter = 0;
+  private readonly blobs = new Map<string, Blob>();
+
+  /**
+   * Declare the bytes behind a storage id, as an upload would have.
+   *
+   * The companion to `db.putSystem`, which declares that a file *exists*:
+   * `shares.copySharedPdf` reads one, so a test about copying a shared PDF
+   * needs a deployment where the bytes can actually be fetched.
+   */
+  putBlob(id: string, blob: Blob): void {
+    this.blobs.set(id, blob);
+  }
 
   /**
    * `ctx.storage`, as far as anything under test needs it.
@@ -457,13 +469,18 @@ export class FakeCtx {
    * Recording rather than simulating, for the same reason the scheduler does.
    */
   readonly storage = {
+    get: async (id: Id<"_storage">): Promise<Blob | null> =>
+      this.blobs.get(id as string) ?? null,
     store: async (blob: Blob): Promise<Id<"_storage">> => {
       this.storageCounter += 1;
       this.stored.push(blob);
-      return `storage_${this.storageCounter}` as Id<"_storage">;
+      const id = `storage_${this.storageCounter}`;
+      this.blobs.set(id, blob);
+      return id as Id<"_storage">;
     },
     delete: async (id: Id<"_storage">): Promise<void> => {
       this.discarded.push(id as string);
+      this.blobs.delete(id as string);
     },
     getUrl: async (): Promise<string | null> => null,
   };

@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { LabOverview } from "./_components/lab-overview";
 import { landOnShelf } from "./_components/landing";
+import type { LabSummary } from "./_components/lab-provider";
 import { useLabs } from "./_components/lab-provider";
 import { Onboarding } from "./_components/onboarding";
 import { PageSkeleton } from "./_components/skeletons";
@@ -15,6 +16,8 @@ export default function AppHome() {
     libraryChecked,
     libraryJustCreated,
     spendLibraryJustCreated,
+    selectLab,
+    sharedImport,
   } = useLabs();
   const router = useRouter();
   /**
@@ -53,8 +56,29 @@ export default function AppHome() {
   const soloLibrary =
     labs !== undefined && labs.length === 1 && labs[0]?.personal === true;
 
+  /**
+   * A paper that came in on a share link, once it is certain there is one or
+   * certain there is not.
+   *
+   * The wait is what makes this safe rather than lucky. A redemption is a round
+   * trip and the lab list is another, and the one that lands first is not fixed
+   * — so an arrival that redirected on `labs` alone would carry a reader who
+   * pressed "Keep the paper" to their shelf, and drop the paper's own
+   * destination on the floor a moment later.
+   */
+  const importPending = sharedImport.kind !== "settled";
+  const importedPaper =
+    sharedImport.kind === "settled" ? sharedImport.paper : null;
+
   useEffect(() => {
-    if (redirected.current || !soloLibrary) {
+    if (redirected.current || importPending) {
+      return;
+    }
+    // A paper the reader asked for outranks the solo-library rule and is not
+    // limited by it: somebody who already has labs of their own may still press
+    // "Keep the paper" on a share page, and the paper still lands in their own
+    // library.
+    if (!soloLibrary && importedPaper === null) {
       return;
     }
     // Never out from under an invitation. `/app?invite=CODE` is where an emailed
@@ -69,12 +93,32 @@ export default function AppHome() {
     }
     redirected.current = true;
     setRedirecting(true);
+    // An imported paper lands in the reader's *personal* library, which need
+    // not be the lab the shell was last left showing. Switched before the
+    // navigation rather than after, so the shelf the reader arrives on is the
+    // one the paper is actually on.
+    //
+    // Guarded because remembering the choice writes to `localStorage`, which
+    // throws on a device with site data blocked or a quota full — and the
+    // navigation underneath must not be taken down by a failure to write down
+    // a preference. The reader still arrives on their paper; the shell simply
+    // does not remember which library they were in next time.
+    if (importedPaper !== null) {
+      try {
+        selectLab(importedPaper.labId as LabSummary["_id"]);
+      } catch {
+        // Deliberately swallowed — see above.
+      }
+    }
     // Where to go, and the signal to leave behind — see `landOnShelf`. That the
     // server decides whether this account is new, rather than which tab of the
     // sign-in form was showing, is what makes it right for the Google and
     // sign-in-link doors too; that the answer is spent here is what stops it
     // reopening the panel on a later visit to this page.
-    const { destination, justCreatedAfter } = landOnShelf(libraryJustCreated);
+    const { destination, justCreatedAfter } = landOnShelf(
+      libraryJustCreated,
+      importedPaper,
+    );
     if (libraryJustCreated && !justCreatedAfter) {
       spendLibraryJustCreated();
     }
@@ -82,9 +126,22 @@ export default function AppHome() {
     // library goes where the reader actually came from rather than to a page
     // whose only behaviour is to bounce them here again.
     router.replace(destination);
-  }, [soloLibrary, libraryJustCreated, spendLibraryJustCreated, router]);
+  }, [
+    soloLibrary,
+    importPending,
+    importedPaper,
+    libraryJustCreated,
+    spendLibraryJustCreated,
+    selectLab,
+    router,
+  ]);
 
-  if (labs === undefined || redirecting) {
+  // `importPending` is here as well as in the effect, unlike the invitation
+  // check below it, and the difference is that this one always ends: both
+  // outcomes of a redemption settle it. What it buys is the flash it prevents —
+  // a reader who pressed "Keep the paper" would otherwise watch their lab's
+  // front matter draw itself for one round trip before being carried off it.
+  if (labs === undefined || redirecting || importPending) {
     return <PageSkeleton />;
   }
 
