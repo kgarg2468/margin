@@ -118,10 +118,10 @@ export function rankCommands<
 }
 
 /**
- * How to write the palette's shortcut for a given `navigator.platform`.
+ * Which key the reader is being told to hold.
  *
- * The palette itself listens for either modifier, so this only ever decides
- * what the hint chip *says* — and saying the wrong one is worse than saying
+ * Every shortcut in the app listens for either modifier, so this only ever
+ * decides what a hint *says* — and saying the wrong one is worse than saying
  * nothing: a Mac user who reads "Ctrl K" tries it, gets a kill-line in
  * whatever field they were in, and concludes the feature is broken.
  *
@@ -133,8 +133,24 @@ export function rankCommands<
  * being asked of it — which glyph is on the modifier key — is one it still
  * answers correctly everywhere.
  */
-export function shortcutLabel(platform: string): string {
+function isApple(platform: string): boolean {
   // Covers "MacIntel", "macOS", "iPhone", "iPad", "iPod" — every Apple
   // platform reports a string starting with one of these two.
-  return /^(mac|i(phone|pad|pod))/i.test(platform) ? "⌘K" : "Ctrl K";
+  return /^(mac|i(phone|pad|pod))/i.test(platform);
+}
+
+/** How to write the palette's shortcut for a given `navigator.platform`. */
+export function shortcutLabel(platform: string): string {
+  return isApple(platform) ? "⌘K" : "Ctrl K";
+}
+
+/**
+ * How to write "send this note" for a given `navigator.platform`.
+ *
+ * The glyph carries the modifier on Apple keyboards, where the key is printed
+ * with it; everywhere else the word is what is on the keycap, and needs the
+ * space that a word needs.
+ */
+export function submitLabel(platform: string): string {
+  return isApple(platform) ? "⌘↵" : "Ctrl ↵";
 }

@@ -5,6 +5,8 @@ import type { Id } from "@/convex/_generated/dataModel";
 import { citationNumbering } from "@/lib/citations/numbering";
 import { downloadText, exportFilename } from "@/lib/export/download";
 import { SECTION_ORDER, sessionWriteUpToMarkdown } from "@/lib/export/markdown";
+import { toBlocks } from "@/lib/prose/blocks";
+import { SynthesisShare } from "./synthesis-share";
 import { relativeWhen } from "@/lib/sessions-ui";
 import {
   errorClass,
@@ -165,6 +167,7 @@ export function SessionSynthesis({
     <section className="flex flex-col gap-10">
       {isApproved && (
         <ApprovedWriteUp
+          sessionId={session._id}
           text={approved}
           approvedAt={approvedAt}
           // Before the query lands there is nothing to claim about staleness,
@@ -362,11 +365,13 @@ export function SessionSynthesis({
  * been rewritten since anyone approved this.
  */
 function ApprovedWriteUp({
+  sessionId,
   text,
   approvedAt,
   withdrawnSince,
   rewrittenSince,
 }: {
+  sessionId: Id<"sessions">;
   text: string;
   approvedAt: number;
   withdrawnSince: number | undefined;
@@ -404,51 +409,12 @@ function ApprovedWriteUp({
       )}
 
       <ApprovedProse text={text} />
+
+      {/* Under the copy, because a link to it is only worth offering to
+          somebody who has read what they would be sending. */}
+      <SynthesisShare sessionId={sessionId} stale={stale} />
     </div>
   );
-}
-
-/** A block of the approved copy, in the order it was written. */
-type Block =
-  | { kind: "heading"; text: string }
-  | { kind: "list"; items: string[] }
-  | { kind: "paragraph"; text: string };
-
-/**
- * Markdown, as much of it as this surface promises.
- *
- * The editor hands people a markdown draft, so the copy has to render headings
- * and bullets or the `##` a person never touched shows up in the lab's record.
- * It stops there deliberately: a real markdown pipeline is a dependency and an
- * HTML-injection surface, in exchange for emphasis marks nobody has asked for.
- * Anything it does not recognise is a paragraph — the text always survives.
- */
-function toBlocks(markdown: string): Block[] {
-  const blocks: Block[] = [];
-  for (const raw of markdown.split("\n")) {
-    const line = raw.trim();
-    if (line.length === 0) continue;
-
-    const heading = /^#{1,6}\s+(.+)$/.exec(line);
-    if (heading?.[1] !== undefined) {
-      blocks.push({ kind: "heading", text: heading[1] });
-      continue;
-    }
-
-    const bullet = /^[-*]\s+(.+)$/.exec(line);
-    if (bullet?.[1] !== undefined) {
-      const last = blocks.at(-1);
-      if (last?.kind === "list") {
-        last.items.push(bullet[1]);
-      } else {
-        blocks.push({ kind: "list", items: [bullet[1]] });
-      }
-      continue;
-    }
-
-    blocks.push({ kind: "paragraph", text: line });
-  }
-  return blocks;
 }
 
 function ApprovedProse({ text }: { text: string }) {

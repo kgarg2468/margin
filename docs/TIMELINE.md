@@ -1,6 +1,6 @@
 # Margin — Execution Timeline
 
-**Updated:** 2026-08-09 (Wave 1 lands) · against `origin/main` @ `ad2a9b1`
+**Updated:** 2026-08-18 (Track P folded in; Waves 1–4 all shipped) · against `origin/main` @ `012a0c9`
 **This is the single source of truth for execution order.** The other docs stay as rationale and design — when sequencing here disagrees with a roadmap section elsewhere, this file wins and the other doc should be corrected.
 
 | Source doc | Role |
@@ -8,6 +8,8 @@
 | `docs/STRATEGY.md` | Why: moat, ICP, adoption playbook, competitive/prior-art evidence, phase rationale |
 | `docs/design/agent-delegation.md` | Design for Track C (the scout), post red-team v2 |
 | UX-polish plan (Track A below — previously a standalone plan) | Screen-level fidelity + README-gap closure, folded in here |
+| `docs/PLG.md` | Why and what for Track P: the product-led funnel (evidence + the P1–P7 build list) |
+| `docs/X-FACTOR.md` | Who pays and what's fundable; composes with PLG (proposed Track E — no go decision yet) |
 
 **House rules for every dispatched task** (from the standing project workflow):
 - Feature branch → small commits → PR → Greptile + Opus review → merge only when green. Never push to main.
@@ -55,6 +57,27 @@ Design: `docs/design/agent-delegation.md` (v2). Sequential; C2 blocks C3's *laun
 
 Gate: **C3/C4/C5 do not launch to design partners until C2 shows the scout beating the search drawer.**
 
+## 3b. Track P — PLG core (go decision 2026-08-18; design + evidence in `docs/PLG.md`)
+
+The ladder: see it without an account → useful alone in three actions → second person costs one click → the ritual. Everything below is small-to-medium; P1/P3/P4 are independent of all other tracks.
+
+- [ ] **P1 — Solo entry.** Auto-provision a personal library at signup (an invisible one-member lab — the model already supports it); land new users in the library with the add-paper panel open, not on organizational setup; jump straight into the reader after ingest. Eight actions become three.
+- [x] **P2 — Read-only share links.** (#86) Annotated paper + signed-off synthesis, opt-in per artifact (row + current membership, asked on every read), unlisted 130-bit capability URLs, revocation-on-read with revoked ≡ nonexistent, only lab-visible annotations ever render; the PDF route throttled per-link without logging any reader. The viral loop; the first public surface — shipped through dual security review.
+- [x] **P3 — Solo catch-up mode.** (#81) In a one-member lab the digest surfaces your own notes older than both the arrival window and 14 days, and says so — recall provenance is stored on the digest, not inferred at read. The thesis delivered to a single user.
+- [ ] **P4 — Seeded demo paper.** Every new library opens containing one classic annotated paper so the first screen demonstrates the margin-conversation idea instead of showing a form.
+- [ ] **P5 — Quiet lab conversion + guest tier.** Invite-from-personal-library names/converts the lab; a viewer/guest state on shared artifacts (membership roles are exactly `pi|member` today — deliberate schema change, needs design). After P2.
+- [ ] **P6 — Projected-board polish.** Rides Track A (A2 shipped #73); the weekly 10-person demo is the 39% discovery channel. No new box — fold future board work here.
+- [ ] **P7 — Share-link → signup → annotate continuity.** Closes rung 0 into rung 1. After P2.
+
+Ordering: **P3 and P2 are shipped (#81, #86); P1+P4 are built and gated on the founder's attribution call (#82); P5/P7 are next, after #82 merges** — P5 rewrites the same signup/onboarding surfaces P1 touched, so it does not start against a moving base. Monetization stays out of the product entirely (standing rule); nothing in Track P adds pricing surfaces.
+
+## 3c. Track V — Signature visual layer (founder direction 2026-08-18)
+
+Direction from Krish: use three.js for front-end animation; scan effects over cards; wireframe treatments in the spirit of Death Stranding's terrain-scan sweep.
+
+- [ ] **V1 — Scan-effect spike.** One shared WebGL surface (never per-card contexts), a wireframe/scan sweep grammar that respects `prefers-reduced-motion` and never regresses the 120Hz compositor-only press feel; applied first where it earns its bytes (landing hero, card reveal/hover sweep). Ships as its own PR with screenshots/recordings for founder judgment before any wider rollout.
+- [ ] **V2 — Rollout.** Apply the approved grammar across card surfaces (library, scout findings, session board). Gated on V1 approval.
+
 ## 4. Track D — Later (strategy Phase 3; do not start without a new decision)
 
 In rough order: on-demand delegation (scout v1.5, reactive card status — no notifications until a subject-discriminated notification path is designed) · AI-*suggested* epistemic edges (proposal slot already reserved in schema; always human-assented) · new-member onboarding paths · paper-triage-on-add · browser capture extension · public API / MCP server (contract shape already fixed by C1's mutations) · literature scout (external retrieval; separate design doc required) · audio overview of the weekly synthesis · optional exploration view over the derived index.
@@ -76,11 +99,16 @@ Non-engineering, founder-owned, runs alongside everything: recruit 5–10 design
 | Library/ingest UI | A3 | Isolated |
 | Shell/theme/README assets | A4 | Isolated; A4 last in Track A so screenshots capture A1–A3 |
 
+| Signup/onboarding flow (`convex/labs.ts`, `convex/users.ts`, post-auth routing) | P1, P5 | P1 owns the auto-provision path; P5 rebases onto it |
+| Digest assembly (`convex/digests.ts`) | P3 | Isolated from P1/P4 |
+| Landing page + card surfaces (visual layer) | V1, V2 | V1 spike approved before V2 touches shared card components |
+
 **Suggested parallel waves** (each item = one worker in its own worktree):
-- **Wave 1 (now):** A1 (big, Opus) ∥ B1 ∥ B2 ∥ C1
-- **Wave 2:** A2 ∥ B3 ∥ C2 ∥ B4
-- **Wave 3:** A3 ∥ C3 ∥ B5
-- **Wave 4:** A4 ∥ C4+C5 → design-partner launch gate (C2 results) → Track D decision
+- **Wave 1:** A1 (big, Opus) ∥ B1 ∥ B2 ∥ C1 — shipped
+- **Wave 2:** A2 ∥ B3 ∥ C2 ∥ B4 — shipped
+- **Wave 3:** A3 ∥ C3 ∥ B5 — shipped
+- **Wave 4:** A4 ∥ C4+C5 → design-partner launch gate (C2 results) → Track D decision — shipped; gate still shut (C2 n=0)
+- **Wave 5 (now):** ~~P1+P4 ∥ P3 ∥ V1~~ → founder review (V1 verdicts + #82 attribution call, where the wave stands) → ~~P2~~ → P5/P7 ∥ V2
 
 ## 6. Done (context for agents — don't rebuild these)
 

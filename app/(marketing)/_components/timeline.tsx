@@ -1,8 +1,9 @@
 "use client";
 
-import { motion, useReducedMotion, useScroll, useSpring } from "motion/react";
+import { motion, useScroll, useSpring } from "motion/react";
 import type { ReactNode } from "react";
 import { useRef } from "react";
+import { useSettledReducedMotion } from "./reduced-motion";
 
 /**
  * The § 2 timeline draws its own rule.
@@ -14,7 +15,7 @@ import { useRef } from "react";
  */
 export function TimelineDraw({ children }: { children: ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
-  const reduce = useReducedMotion();
+  const reduce = useSettledReducedMotion();
 
   const { scrollYProgress } = useScroll({
     target: ref,

@@ -1,0 +1,56 @@
+/*
+ * The two entrances, in CSS.
+ *
+ * Both begin with their element invisible, which is the one state a server
+ * cannot choose: whether the reader asked for stillness is a media query, and
+ * the server has nobody to ask. Guessing at render time and correcting at
+ * hydration is what this file replaces — React threw the entire page away over
+ * the correction, and the reader who asked for no motion was shown hidden text
+ * anyway while it did. A media query answers before the first paint and
+ * without any JavaScript, so under reduced motion the hidden state never
+ * exists at all.
+ *
+ * `Rise` is for the masthead, on screen before anyone scrolls, so it is an
+ * animation that simply plays. `Reveal` has to be told when it is in view, so
+ * it is a transition an attribute flips. Both settle within ~600ms: the page
+ * is a document first, and a document that keeps moving is a document nobody
+ * can read.
+ */
+
+.rise {
+  animation: rise 0.6s cubic-bezier(0.16, 1, 0.3, 1) var(--enter-delay, 0s) both;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    translate: 0 18px;
+  }
+}
+
+.reveal {
+  opacity: 0;
+  translate: 0 22px;
+  transition:
+    opacity 0.55s cubic-bezier(0.16, 1, 0.3, 1) var(--enter-delay, 0s),
+    translate 0.55s cubic-bezier(0.16, 1, 0.3, 1) var(--enter-delay, 0s);
+}
+
+.reveal[data-shown="true"] {
+  opacity: 1;
+  translate: 0 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rise {
+    animation: none;
+  }
+
+  /* Not "the entrance, instantly" — no entrance, so there is never a frame
+     in which the words are not on the page. */
+  .reveal {
+    opacity: 1;
+    translate: 0 0;
+    transition: none;
+  }
+}

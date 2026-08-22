@@ -1,8 +1,9 @@
 "use client";
 
-import { useInView, useReducedMotion } from "motion/react";
+import { useInView } from "motion/react";
 import type { ReactNode } from "react";
 import { useRef } from "react";
+import { useSettledReducedMotion } from "./reduced-motion";
 import styles from "./showcase.module.css";
 
 /**
@@ -27,9 +28,9 @@ export function SweepMark({
   children: ReactNode;
 }) {
   const ref = useRef<HTMLElement>(null);
-  const reduce = useReducedMotion();
+  const reduce = useSettledReducedMotion();
   const inView = useInView(ref, { once: true, margin: "0px 0px -18% 0px" });
-  const on = reduce === true || inView;
+  const on = reduce || inView;
 
   return (
     <mark

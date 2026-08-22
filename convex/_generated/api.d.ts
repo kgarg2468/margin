@@ -33,6 +33,7 @@ import type * as search from "../search.js";
 import type * as seedDemo from "../seedDemo.js";
 import type * as sessionTemplates from "../sessionTemplates.js";
 import type * as sessions from "../sessions.js";
+import type * as shares from "../shares.js";
 import type * as slack from "../slack.js";
 import type * as synthesis from "../synthesis.js";
 import type * as temporal from "../temporal.js";
@@ -71,6 +72,7 @@ declare const fullApi: ApiFromModules<{
   seedDemo: typeof seedDemo;
   sessionTemplates: typeof sessionTemplates;
   sessions: typeof sessions;
+  shares: typeof shares;
   slack: typeof slack;
   synthesis: typeof synthesis;
   temporal: typeof temporal;

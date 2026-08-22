@@ -3,6 +3,7 @@ import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { httpAction } from "./_generated/server";
 import { auth } from "./auth";
+import { decideSharedPdf, isWriteConflict } from "../lib/shares/pdf-order";
 
 /**
  * Convex Auth's HTTP endpoints (token exchange, OAuth callbacks, sign-out)
@@ -43,6 +44,22 @@ auth.addHttpRoutes(http);
  * alternative, pinning to `SITE_URL`, buys no safety and breaks every preview
  * deployment and local origin that isn't the one configured.
  */
+/**
+ * The share routes' own block.
+ *
+ * Identical to the authed one except for what is missing: no
+ * `Access-Control-Allow-Headers: Authorization`. Reusing the block next door
+ * advertised a credential header on a route that accepts none, which is a
+ * small lie in a place where the whole argument is that this door has a
+ * different key — and an invitation to some future caller to try attaching a
+ * session to it.
+ */
+const SHARED_CORS_HEADERS: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, OPTIONS",
+  "Access-Control-Max-Age": "86400",
+};
+
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, OPTIONS",
@@ -71,6 +88,17 @@ function refuse(status: number, message: string): Response {
   return new Response(message, {
     status,
     headers: { ...CORS_HEADERS, "Content-Type": "text/plain; charset=utf-8" },
+  });
+}
+
+/** The same, minus the credential header the share routes do not accept. */
+function refuseShared(status: number, message: string): Response {
+  return new Response(message, {
+    status,
+    headers: {
+      ...SHARED_CORS_HEADERS,
+      "Content-Type": "text/plain; charset=utf-8",
+    },
   });
 }
 
@@ -134,6 +162,127 @@ http.route({
         // close. It costs a re-download per open, which for a paper-sized PDF
         // is the cheaper half of the trade.
         "Cache-Control": "private, no-store",
+      },
+    });
+  }),
+});
+
+/* -------------------------------------------------------------------------
+ * PDF delivery for a share link
+ * ---------------------------------------------------------------------- */
+
+/**
+ * `GET /shared-pdf?token=…` — the same bytes, for somebody with no account.
+ *
+ * A second door with its own key, rather than a hole in the first one. The
+ * route above is untouched: it still demands a bearer header, and no share
+ * token will ever make it answer. This one takes a share token and nothing
+ * else, and `shares.pdfForShare` re-runs the whole gate on every request —
+ * token exists, share not revoked, share is of a paper, paper still in the lab
+ * the share names, paper still has a file. A link taken down stops serving the
+ * PDF at the same moment it stops serving the page.
+ *
+ * ## Why a token in a URL is not the thing this route was built to avoid
+ *
+ * The authed route's doc comment above is emphatic that a permanent
+ * unauthenticated link to a stored file is unacceptable, and it is right. The
+ * difference here is what the credential *is*. A bearer token is a member's
+ * whole session: leaking one hands over their labs, their private notes, and
+ * the ability to write. A share token is a capability for one artifact that
+ * somebody deliberately made public, it grants read and nothing else, and it
+ * can be revoked in one press without touching anything else the member has.
+ * Putting a session token in a URL would be a mistake of a different kind, and
+ * this route does not do it: it accepts no `Authorization` header at all, so
+ * there is no bearer credential anywhere near it to reuse or confuse.
+ *
+ * `X-Robots-Tag` because a PDF is a document a crawler indexes on its own
+ * terms — the page's `<meta name="robots">` protects the page and says nothing
+ * about a file fetched from another origin.
+ *
+ * On what is and is not recorded, precisely — the loose version of this
+ * sentence was wrong. Margin writes nothing about this request: no row, no
+ * ledger entry, no counter that could say who came. What Margin does not
+ * control is the transport. The token travels as a query parameter, so it
+ * appears in Convex's own HTTP request logs and in any intermediary that logs
+ * URLs, and **revocation does not reach log storage** — taking the link down
+ * stops it working everywhere that matters and does not unwrite it from a log
+ * line. That is the cost of a capability in a URL, it is the same cost every
+ * unguessable link has, and it is why the token is scoped to one artifact and
+ * grants read only.
+ *
+ * The rate window in `shares.admitShare` is the one thing written on this
+ * path, and it is keyed by the share rather than the reader — see the table's
+ * own comment in `schema.ts`.
+ */
+http.route({
+  path: "/shared-pdf",
+  method: "OPTIONS",
+  handler: httpAction(
+    async () =>
+      new Response(null, { status: 204, headers: SHARED_CORS_HEADERS }),
+  ),
+});
+
+http.route({
+  path: "/shared-pdf",
+  method: "GET",
+  handler: httpAction(async (ctx, request) => {
+    const token = new URL(request.url).searchParams.get("token");
+
+    // The order is `decideSharedPdf`'s, not this handler's — see that module
+    // for why each question is where it is. The short version: nothing that
+    // was going to fail anyway is ever counted against the link's ceiling, and
+    // a revocation landing mid-request is a 404 rather than a "try later".
+    const outcome = await decideSharedPdf(token, {
+      lookup: (t) => ctx.runQuery(internal.shares.pdfForShare, { token: t }),
+      // Metadata, not bytes. `storage.get` here would mean every refused
+      // request downloaded the whole PDF before being told no, which is the
+      // exact cost the ceiling exists to stop it from spending.
+      exists: async (delivery) =>
+        (await ctx.runQuery(internal.shares.storedFileExists, {
+          storageId: delivery.storageId,
+        })) === true,
+      admit: async (t) => {
+        try {
+          return await ctx.runMutation(internal.shares.admitShare, { token: t });
+        } catch (error) {
+          // Only the one failure this route knows how to answer. Convex
+          // exhausting its retries on the counter means the link is genuinely
+          // being hammered, and "busy" is the true thing to say. Every other
+          // error is a fault, and dressing a fault up as "come back later" is
+          // exactly what this branch deleted from the page path — the reader
+          // would keep coming back to something that was never going to work.
+          if (isWriteConflict(error)) {
+            return "busy";
+          }
+          throw error;
+        }
+      },
+      download: (delivery) => ctx.storage.get(delivery.storageId),
+    });
+
+    if (outcome.status === 400) {
+      return refuseShared(400, "Ask for a paper.");
+    }
+    if (outcome.status === 404) {
+      return refuseShared(404, "No such paper.");
+    }
+    if (outcome.status === 429) {
+      return refuseShared(429, "This link is busy. Try again shortly.");
+    }
+    const { blob, title } = outcome;
+
+    return new Response(blob, {
+      status: 200,
+      headers: {
+        ...SHARED_CORS_HEADERS,
+        "Content-Type": "application/pdf",
+        "Content-Disposition": `inline; filename="${headerFilename(title)}"`,
+        // `no-store` for the reason the authed route gives — the check on
+        // every request is what protects the file, so a copy of the bytes in a
+        // shared cache under this URL would outlive the revocation.
+        "Cache-Control": "private, no-store",
+        "X-Robots-Tag": "noindex, nofollow",
       },
     });
   }),

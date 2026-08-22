@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { fuzzyScore, rankCommands, shortcutLabel } from "./command";
+import {
+  fuzzyScore,
+  rankCommands,
+  shortcutLabel,
+  submitLabel,
+} from "./command";
 
 describe("fuzzyScore", () => {
   it("matches subsequences", () => {
@@ -80,5 +85,17 @@ describe("shortcutLabel", () => {
     expect(shortcutLabel("Win32")).toBe("Ctrl K");
     expect(shortcutLabel("Linux x86_64")).toBe("Ctrl K");
     expect(shortcutLabel("")).toBe("Ctrl K");
+  });
+});
+
+describe("submitLabel", () => {
+  it("reads the same platform rule as the palette's hint", () => {
+    expect(submitLabel("MacIntel")).toBe("⌘↵");
+    expect(submitLabel("iPad")).toBe("⌘↵");
+  });
+  it("spells the modifier out everywhere else", () => {
+    expect(submitLabel("Win32")).toBe("Ctrl ↵");
+    expect(submitLabel("Linux x86_64")).toBe("Ctrl ↵");
+    expect(submitLabel("")).toBe("Ctrl ↵");
   });
 });

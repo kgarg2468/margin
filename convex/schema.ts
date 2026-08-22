@@ -309,6 +309,45 @@ export const delegationCancellation = v.union(
   v.literal("by-member"),
 );
 
+/** The two artifacts a link can open: an annotated paper, or a signed-off write-up. */
+export const shareKind = v.union(v.literal("paper"), v.literal("synthesis"));
+
+/** Fields every share carries, whatever it points at. See the `shares` table. */
+const shareBase = {
+  /** The capability. 130 bits of randomness, minted in `lib/shares/token.ts`. */
+  token: v.string(),
+  labId: v.id("labs"),
+  createdBy: v.id("users"),
+  createdAt: v.number(),
+  /** Set once and never cleared: revoking is final, and a new link is a new row. */
+  revokedAt: v.optional(v.number()),
+  paperId: v.optional(v.id("papers")),
+  sessionId: v.optional(v.id("sessions")),
+};
+
+export const shareDoc = v.union(
+  v.object({
+    ...shareBase,
+    kind: v.literal("paper"),
+    paperId: v.id("papers"),
+  }),
+  /**
+   * A write-up share points at the *session*, not at the `syntheses` row.
+   *
+   * Sign-off is the consent model here, and sign-off lives on the session
+   * (`synthesis`, `synthesisApprovedAt`, `synthesisCitedAnnotationIds`). A
+   * share pointed at the draft row would be a share whose consent was stored
+   * somewhere else — and re-generating replaces that row while deliberately
+   * leaving the approved copy alone, so such a link would survive a rewrite it
+   * has no signature for.
+   */
+  v.object({
+    ...shareBase,
+    kind: v.literal("synthesis"),
+    sessionId: v.id("sessions"),
+  }),
+);
+
 /**
  * Fields every ledger row carries, whatever kind of fact it records.
  *
@@ -1018,6 +1057,53 @@ export const eventDoc = v.union(
     type: v.literal("delegation.cancelled"),
     delegationId: v.id("delegations"),
     reason: delegationCancellation,
+  }),
+  /**
+   * An artifact of the lab's got a public address.
+   *
+   * The same shape of fact as `slack.delivery_changed`: somebody decided that
+   * writing the lab did in private may now be read outside it, and every
+   * member is owed the record of when that started and whose decision it was.
+   * It is the more consequential of the two, since the audience here is not a
+   * channel but anyone.
+   *
+   * The token is not carried, and could not be. It *is* the credential —
+   * anyone holding it can read the artifact — and `events` rows are never
+   * deleted, so a copy of one here would outlive every revocation, exactly as
+   * a Slack webhook URL would. `shareId` names which share, which is the whole
+   * fact a reader needs; the token lives on the row, where revoking can reach
+   * it.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("share.created"),
+    shareId: v.id("shares"),
+    kind: shareKind,
+  }),
+  v.object({
+    ...eventBase,
+    type: v.literal("share.revoked"),
+    shareId: v.id("shares"),
+    kind: shareKind,
+  }),
+  /**
+   * A member said their own notes on a paper may travel with its share, or
+   * took that back.
+   *
+   * Filed for the reason `zotero.link_changed` is: this is the one decision
+   * nobody can make for anybody else, and the lab's record should say who made
+   * it and when. `actorId` is therefore always the member themselves.
+   *
+   * `included` says which way the switch moved, which is the whole fact — the
+   * notes it covers are not enumerated, because the consent is about a margin
+   * rather than a list, and a list written into an append-only table would go
+   * stale the moment its author wrote another note.
+   */
+  v.object({
+    ...eventBase,
+    type: v.literal("share.optin_changed"),
+    paperId: v.id("papers"),
+    included: v.boolean(),
   }),
 );
 
@@ -2094,6 +2180,22 @@ export default defineSchema({
       v.literal("session-start"),
       v.literal("since-away"),
     ),
+    /**
+     * This arrival was assembled from the reader's own older notes rather than
+     * from a colleague's writing — the one-member lab's recall, built by
+     * `digests.catchUp` when the lab has exactly one member.
+     *
+     * Stored rather than inferred from the lab's size when the card is drawn,
+     * because the row outlives the fact that produced it. A second member
+     * joining would re-caption an unread solo digest with colleague words; the
+     * second member leaving again would claim an ordinary digest as the
+     * reader's own writing. Both are the product lying about where a line came
+     * from, in the one place whose whole claim is honest provenance.
+     *
+     * Optional, and absent on every row written before it existed. Absent reads
+     * as "assembled from the lab", which is what all of them were.
+     */
+    recall: v.optional(v.boolean()),
     generatedAt: v.number(),
     deliveredAt: v.optional(v.number()),
     acknowledgedAt: v.optional(v.number()),
@@ -2681,4 +2783,159 @@ export default defineSchema({
     .index("by_revision", ["revision"])
     /** "Is this blob the deployment's canonical copy?" — asked before a delete. */
     .index("by_storage", ["storageId"]),
+
+  /**
+   * A link that lets somebody with no account read one artifact.
+   *
+   * The product's first public surface, and the whole of it. There is no feed,
+   * no directory, and no query anywhere that answers "what is public" — a
+   * share is reachable through `by_token` and through the artifact's own page,
+   * and by nothing else. Unlisted is not a setting here; it is the absence of
+   * any index that could list.
+   *
+   * ## The token is the capability
+   *
+   * `token` is 130 bits of `crypto.getRandomValues` (see
+   * `lib/shares/token.ts`), never a document id. A document id is guessable in
+   * the sense that matters — it is short, it is structured, and it is printed
+   * in a dozen places a member can copy — so a share URL built out of one
+   * would make every artifact's address its own credential. This is a separate
+   * secret with its own index, which is what lets it be revoked without
+   * touching the thing it points at.
+   *
+   * Nothing about who followed it is ever written down. The privacy
+   * constitution's ban on read tracking does not relax because the reader is a
+   * stranger; if anything it binds harder, since a stranger never agreed to
+   * anything at all.
+   *
+   * ## Revocation is a field, not a delete
+   *
+   * `revokedAt` rather than deleting the row, for the reason every other
+   * revocable thing in this schema (`invites.revokedAt`) keeps one: a lab
+   * asking "was this ever public, and when did we stop" is asking about a
+   * fact, and a deleted row answers by pretending it never happened. The read
+   * path treats a revoked share exactly as it treats one that never existed.
+   *
+   * `paperId` and `sessionId` are both declared optional on the base and
+   * narrowed to required on the variant that owns them — the same arrangement
+   * `eventDoc` uses above, and for the same reason: an index field has to
+   * exist on every document in the table.
+   */
+  shares: defineTable(shareDoc)
+    /** The only way in from the outside. */
+    .index("by_token", ["token"])
+    /**
+     * "Does this paper have a live link?", asked by the paper's own share
+     * panel and by the mutation that refuses to mint a second one.
+     *
+     * `revokedAt` is in the index rather than filtered after it because
+     * revoked rows accumulate — every share/revoke cycle leaves one — and the
+     * question is only ever about the live one. A missing field indexes as
+     * `undefined`, so `.eq("revokedAt", undefined)` is exactly "not revoked",
+     * as an indexed read rather than a scan with a ceiling to get wrong.
+     */
+    .index("by_paper", ["paperId", "revokedAt"])
+    /** The same question about a session's write-up. */
+    .index("by_session", ["sessionId", "revokedAt"]),
+
+  /**
+   * One member saying their notes on one paper may be read by strangers.
+   *
+   * ## Why consent is per author and per paper
+   *
+   * A share is created by one person, and the margin it opens is written by
+   * several. Publishing the lot on one member's say-so would make any member
+   * able to publish any other member's writing — which is the same act
+   * `annotations.visibility` exists to keep in the author's hands, performed
+   * through a side door. So the share and the consent are two different
+   * records: the share decides that the artifact has a public address, and a
+   * row here decides whose notes are at it.
+   *
+   * The rule the read path applies is the conjunction of both: a note renders
+   * publicly only if it is lab-visible *and* its author has a row here for
+   * that paper. Creating a share writes the sharer's own row, so the common
+   * case — one researcher, their own library, their own margin (Track P's
+   * personal library) — degenerates to self-consent and asks nobody anything.
+   * A labmate's notes stay off the public page until they flip their own
+   * toggle, and no approval flow, no request, and no notification is needed to
+   * express that: the absence of a row is the answer.
+   *
+   * ## Why a row rather than a flag on the annotation
+   *
+   * Per paper, not per note. The question a member is answering is "may the
+   * outside read my side of this conversation", which is a decision about a
+   * margin rather than about a sentence — a per-note version would be a
+   * consent form attached to every act of writing, which is the ceremony that
+   * killed every annotation product in `docs/PLG.md` §2. It is also why the
+   * row carries no annotation ids: notes written after the toggle was flipped
+   * are covered by it, and the member can take the whole lot back in one act.
+   *
+   * Presence *is* the consent. Opting back out deletes the row, so there is no
+   * state to read wrong and nothing that could be stale — the note stops being
+   * public in the same instant, by the same act, with no second write.
+   */
+  paperShareOptIns: defineTable({
+    labId: v.id("labs"),
+    paperId: v.id("papers"),
+    userId: v.id("users"),
+    optedInAt: v.number(),
+  })
+    /** The read path: whose notes may be shown on this paper. */
+    .index("by_paper", ["paperId"])
+    /** One member's own answer, for the toggle and for the write. */
+    .index("by_paper_and_user", ["paperId", "userId"])
+    /**
+     * Every paper one member has opened up in one lab.
+     *
+     * Read by `endMembership`. Consent to be published has to be withdrawable
+     * by the person who gave it, and somebody who has left the lab can no
+     * longer reach the toggle that would withdraw it — so leaving withdraws
+     * all of it. Scoped by lab as well as user because a member of two labs
+     * leaving one of them has said nothing about the other.
+     */
+    .index("by_user_and_lab", ["userId", "labId"]),
+
+  /**
+   * A coarse rate window per live share. **Not a read log, and the difference
+   * is structural rather than a promise.**
+   *
+   * Exactly one row per share that has been fetched recently, holding the start
+   * of a wall-clock minute and a count of PDF fetches inside it. It cannot
+   * answer who read anything, when any particular read happened, how many
+   * distinct people came, or whether a given person came at all — there is no
+   * identity in it and no per-read row.
+   *
+   * **What survives at rest, precisely.** One number saying how many times this
+   * link's file was fetched during one minute, and which minute that was. It is
+   * overwritten in place the next time anybody fetches, so a busy link never
+   * accumulates history; the only case where it lingers is a link nobody
+   * touches again, and the `shares.sweepRateWindows` cron deletes those. So the
+   * honest bound is: at most one stale minute per abandoned link, until the
+   * next `shares.sweepRateWindows` run — which is every 30 minutes, and which
+   * reschedules itself while it is still finding rows, so a busy deployment
+   * cannot build a backlog that outlives the interval. Not "nothing", which is
+   * what an earlier version of this comment claimed while a row sat there
+   * holding a timestamp.
+   *
+   * One row rather than a set of shards. Sharding was tried and removed: the
+   * ceiling is checked as a sum over the share's rows, so every admission
+   * already reads what its neighbours write and the shards reduced no
+   * contention at all — they only added rows to create, sum and clean up.
+   *
+   * Keyed by the share row rather than by the token string, for two reasons:
+   * it is the same 1:1 fact, and it keeps the capability from being copied
+   * into a second table where revocation does not reach.
+   *
+   * Rows are only ever created for a share that exists and is live, so probing
+   * cannot inflate this table, and `revoke` deletes the row — which is what
+   * keeps it bounded by the number of live shares rather than growing forever.
+   */
+  shareRateWindows: defineTable({
+    shareId: v.id("shares"),
+    windowStart: v.number(),
+    count: v.number(),
+  })
+    .index("by_share", ["shareId"])
+    /** The cron's path: rows whose window ended and whose link went quiet. */
+    .index("by_window_start", ["windowStart"]),
 });
