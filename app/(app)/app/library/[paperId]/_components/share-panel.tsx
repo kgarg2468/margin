@@ -31,23 +31,8 @@ import {
  */
 export function SharePanel({ paperId }: { paperId: Id<"papers"> }) {
   const state = useQuery(api.shares.forPaper, { paperId });
-  const create = useMutation(api.shares.sharePaper);
   const revoke = useMutation(api.shares.revoke);
   const setOptIn = useMutation(api.shares.setPaperOptIn);
-  const [working, setWorking] = useState(false);
-  // Off unless the sharer says otherwise, and held here rather than on the
-  // server until they press: an unminted link has no row to remember it on,
-  // and the answer only becomes a fact when the link does.
-  const [includePdf, setIncludePdf] = useState(false);
-
-  const mint = useCallback(async () => {
-    setWorking(true);
-    try {
-      await create({ paperId, includePdf });
-    } finally {
-      setWorking(false);
-    }
-  }, [create, paperId, includePdf]);
 
   if (state === undefined) {
     return (
@@ -65,45 +50,7 @@ export function SharePanel({ paperId }: { paperId: Id<"papers"> }) {
       <h2 className={eyebrowClass}>Sharing</h2>
 
       {share === null ? (
-        <div className="flex flex-col gap-3">
-          <p className="max-w-prose font-serif text-base leading-relaxed text-ink-muted">
-            A read-only link opens this paper with the margin beside it, for
-            anyone you send it to. It is unlisted, it is not indexed, and it
-            carries your notes and nobody else&rsquo;s until they say so
-            themselves.
-          </p>
-          {/* Asked only where there is a file to ask about, and only before
-              minting: the answer is one of the link's terms, so changing it
-              means a new link rather than new terms on an address people
-              already have. */}
-          {state.hasPdf ? (
-            <div className="flex flex-col gap-1.5">
-              <label className="flex items-baseline gap-2.5">
-                <input
-                  type="checkbox"
-                  checked={includePdf}
-                  onChange={(event) => setIncludePdf(event.target.checked)}
-                  className="accent-accent"
-                />
-                <span className="font-serif text-sm leading-relaxed text-ink">
-                  Include the PDF itself
-                </span>
-              </label>
-              <p className="max-w-prose pl-6 font-sans text-xs leading-relaxed text-ink-faint">
-                Anyone with the link will be able to download the file, so
-                include it only if you have the right to pass it on.
-              </p>
-            </div>
-          ) : null}
-          <button
-            type="button"
-            onClick={() => void mint()}
-            disabled={working}
-            className={`${secondaryButtonClass} self-start`}
-          >
-            Create a link
-          </button>
-        </div>
+        <MintForm paperId={paperId} hasPdf={state.hasPdf} />
       ) : (
         <div className="flex flex-col gap-3">
           <LinkRow token={share.token} />
@@ -166,6 +113,83 @@ export function SharePanel({ paperId }: { paperId: Id<"papers"> }) {
         </p>
       </div>
     </section>
+  );
+}
+
+/**
+ * The form that mints a link, and the only place the PDF answer lives.
+ *
+ * It is a component rather than a branch of the panel *because* of where the
+ * state sits. Held on the panel, the answer outlived the form: the panel stays
+ * mounted through mint and revoke, so a link minted with the file included
+ * left the checkbox ticked, and a member who revoked that link and pressed
+ * Create again minted a second file-bearing token from an answer they gave
+ * once, to a link that no longer exists. Down here the state cannot outlive
+ * the question — the form unmounts the moment a share exists and mounts fresh
+ * when there is none, so "off unless the sharer says so" is a property of the
+ * component's lifetime rather than a reset somebody has to remember to write.
+ *
+ * The answer is held here rather than on the server because an unminted link
+ * has no row to remember it on: it becomes a fact when the link does.
+ */
+function MintForm({
+  paperId,
+  hasPdf,
+}: {
+  paperId: Id<"papers">;
+  hasPdf: boolean;
+}) {
+  const create = useMutation(api.shares.sharePaper);
+  const [working, setWorking] = useState(false);
+  const [includePdf, setIncludePdf] = useState(false);
+
+  const mint = useCallback(async () => {
+    setWorking(true);
+    try {
+      await create({ paperId, includePdf });
+    } finally {
+      setWorking(false);
+    }
+  }, [create, paperId, includePdf]);
+
+  return (
+    <div className="flex flex-col gap-3">
+      <p className="max-w-prose font-serif text-base leading-relaxed text-ink-muted">
+        A read-only link opens this paper with the margin beside it, for anyone
+        you send it to. It is unlisted, it is not indexed, and it carries your
+        notes and nobody else&rsquo;s until they say so themselves.
+      </p>
+      {/* Asked only where there is a file to ask about, and only before
+          minting: the answer is one of the link's terms, so changing it means a
+          new link rather than new terms on an address people already have. */}
+      {hasPdf ? (
+        <div className="flex flex-col gap-1.5">
+          <label className="flex items-baseline gap-2.5">
+            <input
+              type="checkbox"
+              checked={includePdf}
+              onChange={(event) => setIncludePdf(event.target.checked)}
+              className="accent-accent"
+            />
+            <span className="font-serif text-sm leading-relaxed text-ink">
+              Include the PDF itself
+            </span>
+          </label>
+          <p className="max-w-prose pl-6 font-sans text-xs leading-relaxed text-ink-faint">
+            Anyone with the link will be able to download the file, so include
+            it only if you have the right to pass it on.
+          </p>
+        </div>
+      ) : null}
+      <button
+        type="button"
+        onClick={() => void mint()}
+        disabled={working}
+        className={`${secondaryButtonClass} self-start`}
+      >
+        Create a link
+      </button>
+    </div>
   );
 }
 

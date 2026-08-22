@@ -730,7 +730,15 @@ export const view = query({
         ...(paper.year === undefined ? {} : { year: paper.year }),
         ...(paper.venue === undefined ? {} : { venue: paper.venue }),
         ...(paper.doi === undefined ? {} : { doi: paper.doi }),
-        ...(paper.pageCount === undefined ? {} : { pageCount: paper.pageCount }),
+        // Only alongside the file it describes. A page count is derived from
+        // the PDF, so publishing it on a share that withholds the PDF would
+        // publish a fact extracted from the very thing the sharer kept back —
+        // small, but it is the withheld artifact talking. No public surface
+        // reads it when there are no pages to number: the notes carry their
+        // own page numbers, which is what a reader actually navigates by.
+        ...(paper.pageCount === undefined || share.includePdf !== true
+          ? {}
+          : { pageCount: paper.pageCount }),
         pdf:
           paper.storageId === undefined
             ? ("none" as const)
@@ -850,6 +858,22 @@ export const pdfForShare = internalQuery({
     if (share === null || share.kind !== "paper") {
       return null;
     }
+    // Before the paper is read, and deliberately so — this ordering was
+    // reviewed and kept, so please do not "fix" it into the other one.
+    //
+    // Returning here skips the `ctx.db.get` that the artifact-missing path
+    // performs, which makes a withheld link measurably cheaper than a paper
+    // that was deleted. Moving the check below the read would even those two
+    // and unalign it from the revoked path instead: no ordering makes all
+    // three identical, so the question is only which pair to align.
+    //
+    // This pair, because `revoked` reading exactly as `never existed` is the
+    // constitutional promise a share link makes, and it is the one an attacker
+    // gains something from breaking. The off-versus-none distinction it leaves
+    // exposed is already public by design — the share page states which of the
+    // two it is, in words — so a timing measurement of a live link reveals
+    // nothing the page does not say outright, and for a dead link the whole
+    // difference is one document read inside a single Convex query.
     if (share.includePdf !== true) {
       return null;
     }
@@ -1099,7 +1123,17 @@ export const sharePaper = mutation({
       // decided rather than leaving the reader to infer it from an absence.
       // Absent keeps meaning false, for the rows minted before the question
       // was asked.
-      includePdf: args.includePdf === true,
+      //
+      // Coerced to false when there is no file, and that is the substantive
+      // half. Consent has to be about an artifact somebody saw. A yes given
+      // for a paper with nothing attached would otherwise sit on the row and
+      // wait — and the moment a file arrived, by upload or by a Zotero sync
+      // nobody was watching, a URL already in strangers' hands would start
+      // serving a document that did not exist when the answer was given. The
+      // panel hides the question in that case, so this is only reachable by a
+      // direct call, but the rule belongs on the mutation rather than in the
+      // UI that usually avoids it.
+      includePdf: args.includePdf === true && paper.storageId !== undefined,
     });
     await recordEvent(ctx, {
       type: "share.created",
