@@ -1,10 +1,12 @@
 "use client";
 
+import Link from "next/link";
 import type { PDFDocumentLoadingTask } from "pdfjs-dist/types/src/display/api";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { typeStyle } from "@/app/(app)/app/library/[paperId]/read/_components/ontology";
 import { loadPdfjs } from "@/lib/pdf/extract";
 import { sharedPdfEndpoint } from "@/lib/pdf/delivery";
+import { rememberSharedPaper } from "@/lib/shares/pending-import";
 import { eyebrowClass, skeletonClass } from "@/lib/ui";
 import { PartialNotice, ShareFrame } from "./chrome";
 import type { SharedNote, SharedPaperView } from "./types";
@@ -89,10 +91,67 @@ export function SharedPaper({
                 <NoteCard key={note._id} note={note} onJump={jumpToPage} />
               ))
             )}
+            <KeepThisPaper token={token} pdf={shared.pdf} />
           </aside>
         </div>
       </main>
     </ShareFrame>
+  );
+}
+
+/**
+ * The one line that turns a page you are reading into a paper you have.
+ *
+ * `docs/PLG.md` P7, and the restraint is the design. It sits at the foot of
+ * the margin column — after the conversation, not over it — as a sentence in
+ * the same serif as everything else, with no border, no box, no colour and no
+ * verb about accounts. The rung-0 argument is the page; a banner interrupting
+ * it to advertise the product would be arguing over itself.
+ *
+ * **It says the same thing to a stranger and to a member, on purpose.** The
+ * line names an outcome — the paper, on a shelf of your own — rather than a
+ * ceremony, so it is honest for a reader who has an account and is one press
+ * from their library, and honest for a reader who has not and will pass
+ * through the sign-in door on the way. Neither is being sold anything, and the
+ * page never has to know which of them is reading it: `/app` is a protected
+ * route, so the middleware puts whoever needs it in front of the form and
+ * everyone else straight into their own library. Asking the question here
+ * would mean putting an authenticated Convex client on the one surface in this
+ * product that is built not to need one.
+ *
+ * The wording follows the file, because the promise has to. A share that
+ * carries the PDF hands over a paper you can open; one that does not hands
+ * over the citation, and saying otherwise would be the first thing this
+ * product told somebody that was not true.
+ *
+ * The token goes into this tab's `sessionStorage` on the way out and never
+ * into the URL — see `lib/shares/pending-import.ts`. The press is a plain
+ * link either way: if that write fails, or if scripts never ran, the reader
+ * still gets where the link says they are going.
+ */
+function KeepThisPaper({
+  token,
+  pdf,
+}: {
+  token: string;
+  pdf: SharedPaperView["pdf"];
+}) {
+  return (
+    <p className="border-t border-rule pt-4 font-serif text-sm leading-relaxed text-ink-muted">
+      The notes above stay with the lab that wrote them.{" "}
+      <Link
+        href="/app"
+        onClick={() => {
+          rememberSharedPaper(() => window.sessionStorage, token);
+        }}
+        className="text-ink underline decoration-rule underline-offset-4 transition-colors hover:decoration-ink-faint"
+      >
+        Keep the paper
+      </Link>{" "}
+      {pdf === "included"
+        ? "and it goes on a shelf of your own, with an empty margin to write in."
+        : "and its citation goes on a shelf of your own, waiting for the file."}
+    </p>
   );
 }
 

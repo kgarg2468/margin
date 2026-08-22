@@ -13,7 +13,9 @@ import {
   useState,
 } from "react";
 import type { ReactNode } from "react";
+import { consumeSharedPaper } from "@/lib/shares/pending-import";
 import { isPermanentInviteRefusal, readableError } from "./errors";
+import type { ImportedPaper } from "./landing";
 
 export type LabSummary = FunctionReturnType<typeof api.labs.getMyLabs>[number];
 
@@ -29,6 +31,27 @@ type InviteNoticeState = {
   message: string;
   retryCode?: string;
 };
+
+/**
+ * What became of the share link somebody arrived on, if they arrived on one.
+ *
+ * Three states rather than two, because "nothing to wait for" and "not asked
+ * yet" are the difference between a landing that works and one that races. The
+ * redirect at `/app` fires the moment the lab list arrives, which can easily be
+ * before a redemption has come back — so it has to be able to tell an arrival
+ * with no pending link, which it may land immediately, from one whose paper is
+ * still on its way, which it must wait for.
+ *
+ * `settled` carries `null` for every way a redemption can come to nothing: no
+ * token in this tab, a link revoked while the reader was signing up, a paper
+ * deleted under it, a lab gone. The reader is simply where they would have been
+ * anyway. See `shares.importFromShare` for why none of those is worth an error
+ * screen in somebody's first five minutes.
+ */
+type SharedImport =
+  | { kind: "unasked" }
+  | { kind: "running" }
+  | { kind: "settled"; paper: (ImportedPaper & { labId: string }) | null };
 
 type LabContextValue = {
   /** `undefined` while the first query is in flight. */
@@ -55,6 +78,14 @@ type LabContextValue = {
    * reopen the panel they closed.
    */
   spendLibraryJustCreated: () => void;
+  /**
+   * The paper a share link brought in, and whether it is still coming.
+   *
+   * Reported rather than acted on, exactly as `libraryJustCreated` is and for
+   * the same reason: `/app` owns the one redirect an arrival gets, and a second
+   * `router.replace` racing it is how a destination gets dropped.
+   */
+  sharedImport: SharedImport;
 };
 
 const LabContext = createContext<LabContextValue | null>(null);
@@ -102,6 +133,7 @@ export function LabProvider({ children }: { children: ReactNode }) {
   const labs = useQuery(api.labs.getMyLabs);
   const redeemInvite = useMutation(api.invites.redeemInvite);
   const ensureMyLibrary = useMutation(api.labs.ensureMyLibrary);
+  const importFromShare = useMutation(api.shares.importFromShare);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [inviteNotice, setInviteNotice] = useState<InviteNoticeState | null>(
     null,
@@ -126,6 +158,9 @@ export function LabProvider({ children }: { children: ReactNode }) {
    * one navigation that is supposed to carry it.
    */
   const [libraryJustCreated, setLibraryJustCreated] = useState(false);
+  const [sharedImport, setSharedImport] = useState<SharedImport>({
+    kind: "unasked",
+  });
 
   useEffect(() => {
     setSelectedId(window.localStorage.getItem(STORAGE_KEY));
@@ -234,6 +269,61 @@ export function LabProvider({ children }: { children: ReactNode }) {
       .finally(() => setLibraryChecked(true));
   }, [ensureMyLibrary]);
 
+  /**
+   * Take the token out of the tab now, redeem it once the library exists.
+   *
+   * Split in two, and both halves are load-bearing.
+   *
+   * The *taking* happens on mount, before anything has been asked of the
+   * server. It has to: `/app` waits on this answer before it redirects, and a
+   * question that could not be answered until a round trip came back would put
+   * a skeleton in front of every ordinary arrival for the length of one. Read
+   * on the first commit, it is settled long before the lab list is. Taking also
+   * clears storage at the earliest possible moment — after this the token lives
+   * in one closure and nowhere a later navigation could find it.
+   *
+   * The *redeeming* waits for `libraryChecked`, which is not politeness either.
+   * `shares.importFromShare` writes into the caller's personal library and does
+   * nothing at all if they have not got one, so redeeming before
+   * `ensureMyLibrary` has answered would make whether a new account keeps the
+   * paper it signed up for a matter of which round trip landed first.
+   *
+   * A failure is swallowed and reported as nothing imported. That is the same
+   * answer a revoked link gets, deliberately: the reader is one press of Back
+   * from the page the link is still on, and the alternative is an error about
+   * somebody else's lab on the first screen of their account.
+   */
+  const pendingShareToken = useRef<string | null>(null);
+  const tookShareToken = useRef(false);
+  useEffect(() => {
+    if (tookShareToken.current) {
+      return;
+    }
+    tookShareToken.current = true;
+    const token = consumeSharedPaper(() => window.sessionStorage);
+    pendingShareToken.current = token;
+    if (token === null) {
+      setSharedImport({ kind: "settled", paper: null });
+    }
+  }, []);
+
+  const redeemedShare = useRef(false);
+  useEffect(() => {
+    const token = pendingShareToken.current;
+    if (!libraryChecked || token === null || redeemedShare.current) {
+      return;
+    }
+    redeemedShare.current = true;
+    setSharedImport({ kind: "running" });
+    void importFromShare({ token })
+      .then((paper) => {
+        setSharedImport({ kind: "settled", paper });
+      })
+      .catch(() => {
+        setSharedImport({ kind: "settled", paper: null });
+      });
+  }, [libraryChecked, importFromShare]);
+
   // One attempt per code per mount. Without this, StrictMode's double-invoke
   // in development fires two redemptions for the same code; the mutation is
   // idempotent per member so nothing breaks, but there is no reason to ask
@@ -281,6 +371,7 @@ export function LabProvider({ children }: { children: ReactNode }) {
         libraryChecked,
         libraryJustCreated,
         spendLibraryJustCreated,
+        sharedImport,
       }}
     >
       {children}
