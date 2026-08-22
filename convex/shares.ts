@@ -3,6 +3,7 @@ import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import {
+  internalAction,
   internalMutation,
   internalQuery,
   mutation,
@@ -802,6 +803,13 @@ export const view = query({
     if (session === null || session.labId !== share.labId) {
       return null;
     }
+    // The same question `paperBehind` asks about a paper's lab, asked here so
+    // the two branches of this query cannot come to disagree about what a live
+    // link is. A write-up whose lab has been deleted is prose nobody is left to
+    // have signed, and sign-off is the whole consent model for one.
+    if ((await ctx.db.get(share.labId)) === null) {
+      return null;
+    }
     const approved = await approvedWriteUp(ctx, session);
     if (approved === null) {
       return null;
@@ -943,7 +951,7 @@ export const pdfForShare = internalQuery({
  * ---------------------------------------------------------------------- */
 
 /**
- * How much of the caller's own shelf one dedupe pass reads.
+ * How much of the caller's own shelf the last dedupe pass reads.
  *
  * `zotero.newAmong`'s ceiling and `papers.listPapers`'s, restated for the same
  * reason `MAX_ANNOTATIONS_PER_PAPER` is: neither module exports it, and a
@@ -951,18 +959,57 @@ export const pdfForShare = internalQuery({
  * two hundred papers this stops catching a duplicate that shares neither a DOI
  * nor a file with what is already on the shelf — the same limit the library
  * page itself has, and the 201st paper is the signal to lift both together.
+ *
+ * It is the *last* pass and not the only one, which is what keeps that ceiling
+ * a nuisance rather than a hole: the two passes above it go through indexes and
+ * answer for a library of any size. What falls off the end here is a second
+ * copy of a paper with no DOI and no file, which is a duplicate row on the
+ * reader's own shelf and nothing more.
  */
 const IDENTITY_SCAN_LIMIT = 200;
 
-/** What the redeemer's library already holds that this share would repeat. */
+/**
+ * How many papers may be claiming one blob before the file pass gives up.
+ *
+ * Almost every blob in a deployment is claimed by exactly one paper, so this
+ * is one indexed read that answers immediately. The exception is the demo PDF,
+ * which every personal library points at — and on that one blob this bound is
+ * reached and the pass finds nothing, deliberately. The demo paper carries a
+ * DOI, so the pass above has already recognised it; spending an unbounded scan
+ * of every library in the deployment to reach the same answer is the trade
+ * this refuses.
+ */
+const BLOB_CLAIM_SCAN_LIMIT = 50;
+
+/**
+ * What the redeemer's library already holds that this share would repeat.
+ *
+ * Three passes, in descending order of how much they prove and ascending order
+ * of what they cost.
+ *
+ * 1. **The DOI**, through `by_lab_and_doi`. The one key with no ceiling behind
+ *    it, and the one the overwhelming majority of shared papers carry.
+ * 2. **The file**, through `by_pdf_storage`. Two rows pointing at one blob are
+ *    two names for the same bytes, whatever their metadata says. This catches
+ *    a paper the redeemer already had from some other route that happens to
+ *    claim the sharer's file — it does *not* catch a second redemption of the
+ *    same link, because an import now copies the bytes and its copy has an id
+ *    of its own. Pass 1 or pass 3 catches that.
+ * 3. **Title and year**, over one bounded read of the shelf. The last resort,
+ *    for a preprint with no DOI and no file to be recognised by.
+ *
+ * **Pass 3 never overrules a DOI.** Two rows that both carry one, and carry
+ * different ones, are two different papers however alike their titles read —
+ * that is what a DOI is *for* — and merging them would lose one of them behind
+ * the other with no way for the reader to tell it had happened. Since pass 1
+ * has already returned for a matching DOI, any row that reaches pass 3 holding
+ * one alongside a source that also holds one is provably distinct.
+ */
 async function alreadyOnShelf(
   ctx: QueryCtx,
   labId: Id<"labs">,
   paper: Doc<"papers">,
 ): Promise<Doc<"papers"> | null> {
-  // The DOI first, through its own index, because it is the one key with no
-  // ceiling behind it: a library of any size answers this in one read, and a
-  // paper with a DOI is the overwhelming majority of what gets shared.
   const doi = paper.doi;
   if (doi !== undefined) {
     const byDoi = await ctx.db
@@ -974,12 +1021,18 @@ async function alreadyOnShelf(
     }
   }
 
-  // Then one bounded pass over the shelf, answering the other two questions at
-  // once. The file is the sharper of them here and it exists nowhere else in
-  // this codebase's dedupe: an imported copy points at the *same* blob as the
-  // paper it came from, so a second redemption of the same link is the one
-  // case where two rows would be provably the same document — and a preprint
-  // shared without a DOI has nothing else to be recognised by.
+  const storageId = paper.storageId;
+  if (storageId !== undefined) {
+    const claiming = await ctx.db
+      .query("papers")
+      .withIndex("by_pdf_storage", (q) => q.eq("storageId", storageId))
+      .take(BLOB_CLAIM_SCAN_LIMIT);
+    const ours = claiming.find((row) => row.labId === labId);
+    if (ours !== undefined) {
+      return ours;
+    }
+  }
+
   const identity = referenceIdentity(paper.title, paper.year);
   const shelf = await ctx.db
     .query("papers")
@@ -988,10 +1041,55 @@ async function alreadyOnShelf(
   return (
     shelf.find(
       (row) =>
-        (paper.storageId !== undefined && row.storageId === paper.storageId) ||
+        (doi === undefined || row.doi === undefined) &&
         referenceIdentity(row.title, row.year) === identity,
     ) ?? null
   );
+}
+
+/**
+ * How much one library may gain in an hour before this door stops opening.
+ *
+ * The cheapest guard that is a fact about the *caller* rather than about the
+ * reader — and the distinction is the whole reason it is written this way.
+ * Every other rate limit on this module is keyed by the share, because
+ * counting a stranger's reads is a read log whatever it is called. This one is
+ * counted against the redeemer's own library, by an authenticated caller,
+ * about writes they themselves made: the row it reads is their shelf.
+ *
+ * It counts every paper the library gained, whatever put it there — a DOI
+ * fetch, a Zotero run, an upload, an import. Telling them apart would mean
+ * writing down where each paper came from, and a column recording that this
+ * one arrived from somebody else's share link is exactly the provenance trail
+ * P7 refuses to keep. So the ceiling is set where a library that gained that
+ * many papers in one hour has clearly been driven by a script: two hundred is
+ * the number every other bound in this codebase's library paths uses, and a
+ * researcher who genuinely crosses it has to wait rather than being refused
+ * forever.
+ *
+ * Read before the dedupe rather than after, so the refusal is the cheapest
+ * thing this mutation can do. The cost of being wrong that way round is that a
+ * *second* redemption of a link — which writes nothing — is also refused at the
+ * ceiling, which is the harmless direction.
+ */
+const IMPORT_WINDOW_MS = 60 * 60 * 1000;
+const MAX_IMPORTS_PER_WINDOW = 200;
+
+async function importBurstSpent(
+  ctx: QueryCtx,
+  labId: Id<"labs">,
+): Promise<boolean> {
+  const since = Date.now() - IMPORT_WINDOW_MS;
+  // Newest first, one row past the ceiling. If that row is itself inside the
+  // window then everything above it is too, which is the whole question — and
+  // it is answered without reading a shelf of any size.
+  const newest = await ctx.db
+    .query("papers")
+    .withIndex("by_lab", (q) => q.eq("labId", labId))
+    .order("desc")
+    .take(MAX_IMPORTS_PER_WINDOW + 1);
+  const oldestCounted = newest[MAX_IMPORTS_PER_WINDOW];
+  return oldestCounted !== undefined && oldestCounted._creationTime > since;
 }
 
 /** What the caller ends up holding, whichever way the redemption went. */
@@ -1001,8 +1099,24 @@ const importedPaper = v.union(
     paperId: v.id("papers"),
     /** The caller's own library, so the shell can switch to it before landing. */
     labId: v.id("labs"),
-    /** File present and text read: the one state the margins can be written in. */
+    /**
+     * File present and text read: the one state the margins can be written in.
+     *
+     * Always false for a paper that has just been created, because the bytes
+     * are copied by a scheduled action and cannot have landed yet. It is true
+     * only on the idempotent path, where it describes a row the shelf already
+     * held.
+     */
     ready: v.boolean(),
+    /**
+     * The file is here, or it is on its way.
+     *
+     * Deliberately not "there is a `storageId` on the row this instant". What
+     * the landing needs to know is whether this paper is going to have a
+     * document behind it, so that a reader who pressed "Keep the paper" is put
+     * on the paper's own record — where the file section fills itself in — and
+     * not on a shelf where a row appears and silently changes under them.
+     */
     hasPdf: v.boolean(),
   }),
 );
@@ -1041,11 +1155,29 @@ const importedPaper = v.union(
  * the share page already had on it. Nothing is disclosed by writing them down
  * that was not disclosed by rendering them.
  *
- * **The file, only if the live share still says so.** `includePdf` is the
- * sharer's decision that this document may travel, and it is re-read here
- * rather than inferred from the fact that the visitor could have downloaded it.
- * When it is off the paper lands `needs-pdf`, which is the state the DOI-fetch
- * ingest already produces and the record page already knows how to finish.
+ * **The file, only if the live share still says so** — and then as *bytes of
+ * the redeemer's own*, never as a second claim on the sharing lab's blob.
+ * `includePdf` is the sharer's decision that this document may travel, and it
+ * is re-read here rather than inferred from the fact that the visitor could
+ * have downloaded it. When it is off the paper lands `needs-pdf`, which is the
+ * state the DOI-fetch ingest already produces and the record page already knows
+ * how to finish.
+ *
+ * Copying rather than referencing is the ruling this feature was reviewed into,
+ * and both halves of the argument are worth keeping written down. A shared
+ * claim is **an oracle**: a sharer who kept the storage id of a file they have
+ * since replaced can ask whether those bytes still exist, and survival is the
+ * answer to a question they were never entitled to ask — *did anybody take my
+ * paper?* It is also **permanent**: `papers.blobIsStillClaimed` refuses to
+ * delete a blob any paper still points at, so one stranger's import would take
+ * the sharing lab's ability to destroy its own file away for good. Bytes are
+ * cheap; both of those are not.
+ *
+ * A mutation cannot read a blob, so the copy happens in `copySharedPdf` a
+ * moment later and the paper is file-less until it lands. Every gate is asked
+ * again there, inside the transaction that performs the write, so a link
+ * revoked in that moment leaves a paper in exactly the state a withheld file
+ * produces — no error, no half-attached document, no explanation.
  *
  * **The margin, never.** Not a note, not a reply, not a thread, not an author's
  * name. The lab's margin is rendered read-only on their page and stops there;
@@ -1090,6 +1222,13 @@ export const importFromShare = mutation({
       return null;
     }
 
+    // The one refusal here that is not about the link — see
+    // `MAX_IMPORTS_PER_WINDOW`. Same `null`, so it is indistinguishable from
+    // every other way this can come to nothing.
+    if (await importBurstSpent(ctx, mine._id)) {
+      return null;
+    }
+
     const existing = await alreadyOnShelf(ctx, mine._id, paper);
     if (existing !== null) {
       return {
@@ -1103,39 +1242,15 @@ export const importFromShare = mutation({
     // `=== true` rather than a falsy check, for the same reason `pdfForShare`
     // spells it out: a row minted before the field existed withholds its file
     // rather than inheriting a default of yes. And the blob is asked about
-    // before it is claimed — a file swapped or swept out from under the
-    // sharing lab would otherwise be inherited as a `ready` paper whose pages
-    // render as a broken download.
-    const storageId = paper.storageId;
-    const fileTravels =
-      share.includePdf === true &&
-      storageId !== undefined &&
-      (await ctx.db.system.get(storageId)) !== null;
+    // before anything is promised about it — a file swept out from under the
+    // sharing lab would otherwise schedule a copy of nothing and leave a paper
+    // waiting for a document that is never coming.
+    const fileTravels = (await consentingSource(ctx, share._id)) !== null;
 
-    // The same blob, not a copy of it. `papers.blobIsStillClaimed` already
-    // counts claims through `by_pdf_storage` before deleting anything — it has
-    // to, because every personal library points at the one demo PDF — so a
-    // second paper pointing here is a claim the deleting paths already respect.
-    // Duplicating the bytes per redemption would buy nothing and would make a
-    // popular link a way to fill a deployment.
-    const pages = fileTravels
-      ? await ctx.db
-          .query("paperPages")
-          .withIndex("by_paper", (q) => q.eq("paperId", paper._id))
-          .collect()
-      : [];
-    // The text layer travels with the file, and it is derived from the file
-    // rather than written by the lab — pdf.js output, the same bytes, the same
-    // pages. Copying it is what makes the imported paper `ready` on arrival, so
-    // the reader opens on it and the first thing the new account can do is
-    // write in the margin. Left behind, the paper would land `pending` and the
-    // reader would be a page you cannot annotate until a browser has ground
-    // through the file again for the identical answer. Bounded by where these
-    // rows were written: `papers.replacePageText` refuses a text layer past
-    // `MAX_PAGES` / `MAX_TOTAL_CHARS`, so anything already on a shelf fits.
-    pages.sort((a, b) => a.pageIndex - b.pageIndex);
-    const hasText = pages.some((page) => page.text.trim().length > 0);
-
+    // Metadata, and nothing derived from a file that is not here yet. The paper
+    // lands in exactly the state a DOI fetch that found no open-access copy
+    // produces — `needs-pdf`, no `pageCount`, no text layer — which is the
+    // state every other surface in the product already knows how to finish.
     const paperId = await ctx.db.insert("papers", {
       labId: mine._id,
       title: paper.title,
@@ -1143,25 +1258,19 @@ export const importFromShare = mutation({
       ...(paper.year === undefined ? {} : { year: paper.year }),
       ...(paper.venue === undefined ? {} : { venue: paper.venue }),
       ...(paper.doi === undefined ? {} : { doi: paper.doi }),
-      ...(fileTravels && storageId !== undefined ? { storageId } : {}),
-      // Only alongside a text layer, and this is load-bearing rather than
-      // tidy: `pdf-panel.tsx` starts extraction for a paper with a file, no
-      // text and no `pageCount`, so a page count carried across without the
-      // pages it counts would switch that off and leave a paper stuck one step
-      // from readable with nothing on screen offering to finish it.
-      ...(hasText ? { pageCount: pages.length } : {}),
-      ingestStatus: !fileTravels ? "needs-pdf" : hasText ? "ready" : "pending",
+      ingestStatus: "needs-pdf",
       addedBy: userId,
     });
 
-    if (hasText) {
-      for (const page of pages) {
-        await ctx.db.insert("paperPages", {
-          paperId,
-          pageIndex: page.pageIndex,
-          text: page.text,
-        });
-      }
+    if (fileTravels) {
+      // The share's id rather than its token. A scheduled call's arguments are
+      // written down and kept until the job runs, and a bearer capability is
+      // not a thing to leave lying in a queue when an internal id revalidates
+      // exactly as much.
+      await ctx.scheduler.runAfter(0, internal.shares.copySharedPdf, {
+        shareId: share._id,
+        paperId,
+      });
     }
 
     // In the redeemer's own lab, about the redeemer, and nowhere else. The
@@ -1179,9 +1288,200 @@ export const importFromShare = mutation({
     return {
       paperId,
       labId: mine._id,
-      ready: hasText,
+      ready: false,
       hasPdf: fileTravels,
     };
+  },
+});
+
+/* -------------------------------------------------------------------------
+ * The file, a moment later and on its own bytes
+ * ---------------------------------------------------------------------- */
+
+/**
+ * How many pages of a text layer travel with a copied file.
+ *
+ * `papers.MAX_PAGES`, restated on the same terms as the other ceilings in this
+ * module. It is the bound these rows were written under —
+ * `papers.replacePageText` refuses a longer text layer outright — so anything
+ * already on a shelf fits inside it, and a read that assumed so without saying
+ * so would be an unbounded query wearing a promise.
+ */
+const IMPORTED_PAGE_LIMIT = 2_000;
+
+/**
+ * The file a live share still consents to hand over, and the paper it is on.
+ *
+ * Every gate, asked from scratch: the share exists, is not revoked, is a paper
+ * share, still points at a paper in the lab it names, that lab still exists,
+ * the sharer still says the file may travel, and the bytes are still there.
+ * Three callers ask it — the redemption, the copy, and the attach — so that
+ * consent is re-established at each of the three moments this feature touches
+ * a file, rather than inferred from the moment before.
+ */
+async function consentingSource(
+  ctx: QueryCtx,
+  shareId: Id<"shares">,
+): Promise<{ paper: Doc<"papers">; storageId: Id<"_storage"> } | null> {
+  const share = await ctx.db.get(shareId);
+  if (share === null || share.revokedAt !== undefined) {
+    return null;
+  }
+  const live = await paperBehind(ctx, share);
+  if (live === null || live.share.includePdf !== true) {
+    return null;
+  }
+  const storageId = live.paper.storageId;
+  if (storageId === undefined) {
+    return null;
+  }
+  if ((await ctx.db.system.get(storageId)) === null) {
+    return null;
+  }
+  return { paper: live.paper, storageId };
+}
+
+/** `consentingSource`, for the action, which has no database of its own. */
+export const sharedPdfSource = internalQuery({
+  args: { shareId: v.id("shares") },
+  returns: v.union(
+    v.null(),
+    v.object({ storageId: v.id("_storage") }),
+  ),
+  handler: async (ctx, args) => {
+    const source = await consentingSource(ctx, args.shareId);
+    return source === null ? null : { storageId: source.storageId };
+  },
+});
+
+/**
+ * Put the shared file on the redeemer's shelf as bytes of their own.
+ *
+ * The half of an import a mutation cannot do: reading a blob needs an action,
+ * so the paper is inserted first and the document catches up. In practice that
+ * is one scheduler hop — the paper is usually complete before the reader has
+ * finished looking at its title — and the intervening state is one the product
+ * already has a face for, because it is the same one a paper added by DOI with
+ * no open-access copy sits in.
+ *
+ * Silent in every failure. A revoked link, a sharer who switched the file off,
+ * a blob that has gone, a paper deleted from the redeemer's own shelf in the
+ * meantime: all of them leave the paper file-less, which is a state with a
+ * remedy already on screen. There is nothing here worth telling somebody about
+ * a lab they have no relationship with.
+ */
+export const copySharedPdf = internalAction({
+  args: { shareId: v.id("shares"), paperId: v.id("papers") },
+  returns: v.null(),
+  // Annotated because this handler reaches its own module through
+  // `internal.shares.*`, and the generated api's type is derived from these
+  // exports — a circle TypeScript cannot close on its own.
+  handler: async (ctx, args): Promise<null> => {
+    const source: { storageId: Id<"_storage"> } | null = await ctx.runQuery(
+      internal.shares.sharedPdfSource,
+      { shareId: args.shareId },
+    );
+    if (source === null) {
+      return null;
+    }
+    const bytes = await ctx.storage.get(source.storageId);
+    if (bytes === null) {
+      return null;
+    }
+    // Stored before the gates are asked the last time, because storing is the
+    // only step here that cannot happen inside a transaction. If the answer has
+    // changed by the time the mutation runs, the mutation is what discards
+    // these bytes — see `attachImportedPdf` for why the delete has to commit
+    // rather than being rolled back by a throw.
+    const copied = await ctx.storage.store(bytes);
+    await ctx.runMutation(internal.shares.attachImportedPdf, {
+      shareId: args.shareId,
+      paperId: args.paperId,
+      sourceStorageId: source.storageId,
+      storageId: copied,
+    });
+    return null;
+  },
+});
+
+/**
+ * Attach the copied file, and the text layer that describes it, in one write.
+ *
+ * The last gate, and the one that matters most, because it is the only one
+ * inside the transaction that performs the write. `consentingSource` is asked
+ * again here rather than trusted from the query a network round trip ago: a
+ * link revoked in that window must leave the paper exactly as a withheld file
+ * would, and the copied bytes must go rather than sitting in the deployment
+ * with nothing pointing at them.
+ *
+ * `sourceStorageId` has to still be the file the share points at. The sharer
+ * replacing their PDF between the read and this write would otherwise attach
+ * the old document under a consent that now covers a different one.
+ *
+ * The text layer travels *here*, with the file, rather than in the redemption.
+ * It is derived from the document — pdf.js output over the same bytes — so it
+ * is the same disclosure and belongs to the same decision: pages copied into a
+ * paper whose file never arrived would leave the whole text of the paper on a
+ * shelf the ruling says should be empty of it, and would buy nothing, because
+ * nothing can be annotated until there is a page on screen to select from.
+ *
+ * The outcome comes back as a value rather than a throw, for the reason
+ * `papers.attachFetchedPdf` documents at length: a handler that throws rolls
+ * back its own `ctx.storage.delete` while the action's `store` — which
+ * committed outside this transaction — survives, so throwing would leak the
+ * blob on exactly the race the delete exists for.
+ */
+export const attachImportedPdf = internalMutation({
+  args: {
+    shareId: v.id("shares"),
+    paperId: v.id("papers"),
+    sourceStorageId: v.id("_storage"),
+    storageId: v.id("_storage"),
+  },
+  returns: v.union(v.literal("attached"), v.literal("declined")),
+  handler: async (ctx, args) => {
+    const source = await consentingSource(ctx, args.shareId);
+    const mine = await ctx.db.get(args.paperId);
+    if (
+      source === null ||
+      source.storageId !== args.sourceStorageId ||
+      mine === null ||
+      mine.storageId !== undefined
+    ) {
+      await ctx.storage.delete(args.storageId);
+      return "declined" as const;
+    }
+
+    const pages = await ctx.db
+      .query("paperPages")
+      .withIndex("by_paper", (q) => q.eq("paperId", source.paper._id))
+      .take(IMPORTED_PAGE_LIMIT);
+    pages.sort((a, b) => a.pageIndex - b.pageIndex);
+    const hasText = pages.some((page) => page.text.trim().length > 0);
+
+    if (hasText) {
+      for (const page of pages) {
+        await ctx.db.insert("paperPages", {
+          paperId: mine._id,
+          pageIndex: page.pageIndex,
+          text: page.text,
+        });
+      }
+    }
+
+    await ctx.db.patch(mine._id, {
+      storageId: args.storageId,
+      // Only alongside a text layer, and this is load-bearing rather than
+      // tidy: `pdf-panel.tsx` starts extraction for a paper with a file, no
+      // text and no `pageCount`, so a page count written without the pages it
+      // counts would switch that off and leave a paper stuck one step from
+      // readable with nothing on screen offering to finish it.
+      ...(hasText ? { pageCount: pages.length } : {}),
+      // `pending` is the same state a file fetched from a DOI lands in: the
+      // document is here and the first browser to open it reads the text.
+      ingestStatus: hasText ? "ready" : "pending",
+    });
+    return "attached" as const;
   },
 });
 

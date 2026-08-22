@@ -1,5 +1,7 @@
+import { getFunctionName } from "convex/server";
 import { ConvexError } from "convex/values";
 import { describe, expect, it, vi } from "vitest";
+import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import {
   FakeCtx,
@@ -11,6 +13,8 @@ import {
 import {
   REDACTED_NOTE_TEXT,
   admitShare,
+  attachImportedPdf,
+  copySharedPdf,
   forPaper,
   forSession,
   importFromShare,
@@ -18,6 +22,7 @@ import {
   revoke,
   setPaperOptIn,
   sharePaper,
+  sharedPdfSource,
   sweepRateWindows,
   shareSynthesis,
   view,
@@ -1774,6 +1779,9 @@ async function visitor(ctx: FakeCtx, name = "Chidi Adeyemi") {
   return { userId, labId };
 }
 
+/** The bytes behind the sharing lab's file, for the copy to actually copy. */
+const SHARED_BYTES = "%PDF-1.7 the sharing lab's own upload";
+
 /** The sharing lab's paper, with the citable facts and a real text layer. */
 async function publishablePaper(ctx: FakeCtx, paperId: Id<"papers">) {
   await ctx.db.patch(paperId, {
@@ -1787,6 +1795,7 @@ async function publishablePaper(ctx: FakeCtx, paperId: Id<"papers">) {
     contentType: "application/pdf",
     size: 200_000,
   });
+  ctx.putBlob("storage_seed", new Blob([SHARED_BYTES]));
   for (const [pageIndex, text] of [
     "Samples were incubated at 4°C overnight.",
     "The second cohort diverged.",
@@ -1798,6 +1807,38 @@ async function publishablePaper(ctx: FakeCtx, paperId: Id<"papers">) {
 /** Everything the redeemer's library holds, for counting. */
 function shelfOf(ctx: FakeCtx, labId: Id<"labs">) {
   return ctx.db.all("papers").filter((paper) => paper.labId === labId);
+}
+
+const copyJob = call<
+  { shareId: Id<"shares">; paperId: Id<"papers"> },
+  null
+>(copySharedPdf);
+
+const COPY_JOB = getFunctionName(internal.shares.copySharedPdf);
+
+/**
+ * Run the copy the redemption queued, exactly as the deployment would.
+ *
+ * The file no longer arrives inside the redemption — a mutation cannot read a
+ * blob — so every assertion about a document landing on the redeemer's shelf
+ * has to go through the scheduled action, and every assertion about the state
+ * *before* it lands simply does not call this.
+ *
+ * Returns how many jobs it ran, so a test can say that nothing was queued.
+ */
+async function deliverTheFile(ctx: FakeCtx): Promise<number> {
+  ctx
+    .register(internal.shares.sharedPdfSource, sharedPdfSource)
+    .register(internal.shares.attachImportedPdf, attachImportedPdf);
+  const queued = ctx.scheduled.filter((job) => job.name === COPY_JOB);
+  for (const job of queued) {
+    await copyJob(
+      ctx,
+      job.args as { shareId: Id<"shares">; paperId: Id<"papers"> },
+    );
+  }
+  ctx.scheduled.length = 0;
+  return queued.length;
 }
 
 describe("what travels into the redeemer's own library", () => {
@@ -1856,7 +1897,33 @@ describe("what travels into the redeemer's own library", () => {
     );
   });
 
-  it("carries the file, and the same bytes, when the sharer said it may", async () => {
+  it("carries the file as bytes of the redeemer's own, never the sharer's blob", async () => {
+    const { ctx, labId, paperId } = await setup();
+    await publishablePaper(ctx, paperId);
+    const { token } = await share(ctx, { paperId, includePdf: true });
+
+    const me = await visitor(ctx);
+    ctx.auth = { userId: me.userId };
+    const outcome = await importShare(ctx, { token });
+    expect(outcome?.hasPdf).toBe(true);
+    expect(await deliverTheFile(ctx)).toBe(1);
+
+    const mine = rowAt(shelfOf(ctx, me.labId));
+    // A *copy*, and the identity of the blob is the whole assertion. Claiming
+    // the sharer's would be an oracle — a sharer who kept the storage id of a
+    // file they have since replaced could ask whether those bytes still exist,
+    // and survival answers a question they were never entitled to ask — and it
+    // would be permanent, because `papers.blobIsStillClaimed` refuses to delete
+    // a blob any paper still points at.
+    expect(mine.storageId).toBeDefined();
+    expect(mine.storageId).not.toBe("storage_seed");
+    expect(ctx.stored).toHaveLength(1);
+    expect(await rowAt(ctx.stored).text()).toBe(SHARED_BYTES);
+    // And the sharing lab's own row is untouched, still pointing where it did.
+    expect(rowAt(shelfOf(ctx, labId)).storageId).toBe("storage_seed");
+  });
+
+  it("is file-less until the copy lands, in the state a DOI fetch produces", async () => {
     const { ctx, paperId } = await setup();
     await publishablePaper(ctx, paperId);
     const { token } = await share(ctx, { paperId, includePdf: true });
@@ -1865,29 +1932,42 @@ describe("what travels into the redeemer's own library", () => {
     ctx.auth = { userId: me.userId };
     const outcome = await importShare(ctx, { token });
 
+    // The intervening state, which the reader may well see: exactly what a
+    // paper added by DOI with no open-access copy sits in, and which the record
+    // page already knows how to finish.
     const mine = rowAt(shelfOf(ctx, me.labId));
-    // The same blob, deliberately. `papers.blobIsStillClaimed` counts claims
-    // through `by_pdf_storage` before any delete, so a second row pointing here
-    // is a claim the deleting paths already honour — and copying the bytes per
-    // redemption would make a popular link a way to fill a deployment.
-    expect(mine.storageId).toBe("storage_seed");
-    expect(ctx.stored).toEqual([]);
+    expect(mine.storageId).toBeUndefined();
+    expect(mine.ingestStatus).toBe("needs-pdf");
+    expect(mine.pageCount).toBeUndefined();
+    // `ready` is about the row; `hasPdf` is about where the reader belongs, and
+    // a paper whose file is one scheduler hop away belongs on its own record.
+    expect(outcome?.ready).toBe(false);
     expect(outcome?.hasPdf).toBe(true);
   });
 
-  it("copies the text layer, so the margins are open on arrival", async () => {
+  it("brings the text layer with the file, and only with the file", async () => {
     const { ctx, paperId } = await setup();
     await publishablePaper(ctx, paperId);
     const { token } = await share(ctx, { paperId, includePdf: true });
 
     const me = await visitor(ctx);
     ctx.auth = { userId: me.userId };
-    const outcome = await importShare(ctx, { token });
-
+    await importShare(ctx, { token });
     const mine = rowAt(shelfOf(ctx, me.labId));
-    expect(mine.ingestStatus).toBe("ready");
-    expect(mine.pageCount).toBe(2);
-    expect(outcome?.ready).toBe(true);
+
+    // Nothing before the document arrives. The text layer is pdf.js output over
+    // the same bytes, so it is the same disclosure and travels on the same
+    // decision — and it would buy nothing on its own, since nothing can be
+    // annotated until there is a page on screen to select from.
+    expect(
+      ctx.db.all("paperPages").filter((page) => page.paperId === mine._id),
+    ).toEqual([]);
+
+    await deliverTheFile(ctx);
+
+    const landed = rowAt(shelfOf(ctx, me.labId));
+    expect(landed.ingestStatus).toBe("ready");
+    expect(landed.pageCount).toBe(2);
     const pages = ctx.db
       .all("paperPages")
       .filter((page) => page.paperId === mine._id)
@@ -1920,6 +2000,9 @@ describe("what travels into the redeemer's own library", () => {
       ready: false,
       hasPdf: false,
     });
+    // Nothing queued: there is no file to fetch, so no copy is even attempted.
+    expect(await deliverTheFile(ctx)).toBe(0);
+    expect(ctx.stored).toEqual([]);
     // And not the text layer either. It is extracted from the file, so it
     // travels with the file or not at all.
     expect(
@@ -1938,10 +2021,157 @@ describe("what travels into the redeemer's own library", () => {
     ctx.auth = { userId: me.userId };
     const outcome = await importShare(ctx, { token });
 
-    // Inheriting the claim would produce a `ready` paper whose every page
-    // renders as a broken download, with nothing on screen offering to fix it.
+    // Promising a document that is never coming would leave the reader on a
+    // record page waiting for a file with nothing on its way.
     expect(rowAt(shelfOf(ctx, me.labId)).storageId).toBeUndefined();
     expect(outcome?.hasPdf).toBe(false);
+    expect(await deliverTheFile(ctx)).toBe(0);
+  });
+});
+
+describe("the file, a moment later", () => {
+  /** A redemption that has queued a copy but not run it yet. */
+  async function midFlight(includePdf = true) {
+    const { ctx, pi, paperId, labId } = await setup();
+    await publishablePaper(ctx, paperId);
+    const { token } = await share(ctx, { paperId, includePdf });
+    const me = await visitor(ctx);
+    ctx.auth = { userId: me.userId };
+    const outcome = await importShare(ctx, { token });
+    const live = rowAt(ctx.db.all("shares"));
+    return { ctx, pi, me, paperId, labId, token, outcome, shareId: live._id };
+  }
+
+  /** The redeemer's row, as it stands. */
+  function mineNow(ctx: FakeCtx, labId: Id<"labs">) {
+    return rowAt(shelfOf(ctx, labId));
+  }
+
+  it("imports no file when the link is revoked between the paper and its bytes", async () => {
+    const { ctx, pi, me, shareId } = await midFlight();
+    // The sharing lab takes the link down while the copy is still queued.
+    ctx.auth = { userId: pi };
+    await takeDown(ctx, { shareId });
+    ctx.auth = { userId: me.userId };
+
+    await deliverTheFile(ctx);
+
+    // The state a withheld file produces, arrived at by a different road. No
+    // error, no half-attached document, and nothing on the redeemer's screen
+    // about a lab they have no relationship with.
+    const mine = mineNow(ctx, me.labId);
+    expect(mine.storageId).toBeUndefined();
+    expect(mine.ingestStatus).toBe("needs-pdf");
+    expect(
+      ctx.db.all("paperPages").filter((page) => page.paperId === mine._id),
+    ).toEqual([]);
+    // Nothing was even read, so there are no bytes to have leaked.
+    expect(ctx.stored).toEqual([]);
+  });
+
+  it("discards the copy when the sharer switches the file off mid-flight", async () => {
+    const { ctx, me, shareId } = await midFlight();
+    // The consent, withdrawn between the two halves of the import.
+    await ctx.db.patch(shareId, { includePdf: false });
+
+    await deliverTheFile(ctx);
+
+    expect(mineNow(ctx, me.labId).storageId).toBeUndefined();
+    expect(ctx.stored).toEqual([]);
+  });
+
+  it("discards the copy when the sharer replaced the file underneath it", async () => {
+    const { ctx, me, paperId, shareId } = await midFlight();
+    ctx.register(internal.shares.sharedPdfSource, sharedPdfSource);
+    ctx.register(internal.shares.attachImportedPdf, attachImportedPdf);
+
+    // The bytes the action read, then a swap, then the attach — the shape of a
+    // sharer replacing their PDF inside the window.
+    const stale = await ctx.storage.store(new Blob(["stale bytes"]));
+    ctx.db.putSystem("storage_new", { contentType: "application/pdf", size: 1 });
+    ctx.putBlob("storage_new", new Blob(["a different paper entirely"]));
+    await ctx.db.patch(paperId, { storageId: "storage_new" });
+
+    const attach = call<
+      {
+        shareId: Id<"shares">;
+        paperId: Id<"papers">;
+        sourceStorageId: Id<"_storage">;
+        storageId: Id<"_storage">;
+      },
+      "attached" | "declined"
+    >(attachImportedPdf);
+    const outcome = await attach(ctx, {
+      shareId,
+      paperId: mineNow(ctx, me.labId)._id,
+      sourceStorageId: "storage_seed" as Id<"_storage">,
+      storageId: stale,
+    });
+
+    // Consent now covers a different document. Attaching the old one would be
+    // handing over a file under a permission given for another.
+    expect(outcome).toBe("declined");
+    expect(mineNow(ctx, me.labId).storageId).toBeUndefined();
+    expect(ctx.discarded).toContain(stale);
+  });
+
+  it("discards the copy when the redeemer's own paper is gone", async () => {
+    const { ctx, me } = await midFlight();
+    await ctx.db.delete(mineNow(ctx, me.labId)._id);
+
+    await deliverTheFile(ctx);
+
+    // Stored, then found nowhere to go, then deleted — rather than left in the
+    // deployment with nothing pointing at it.
+    expect(ctx.stored).toHaveLength(1);
+    expect(ctx.discarded).toHaveLength(1);
+    expect(shelfOf(ctx, me.labId)).toEqual([]);
+  });
+
+  it("attaches once, and refuses to attach over a file already there", async () => {
+    const { ctx, me, shareId } = await midFlight();
+    await deliverTheFile(ctx);
+    const first = mineNow(ctx, me.labId).storageId;
+    expect(first).toBeDefined();
+
+    ctx.register(internal.shares.sharedPdfSource, sharedPdfSource);
+    ctx.register(internal.shares.attachImportedPdf, attachImportedPdf);
+    const second = await ctx.storage.store(new Blob(["a second copy"]));
+    const attach = call<
+      {
+        shareId: Id<"shares">;
+        paperId: Id<"papers">;
+        sourceStorageId: Id<"_storage">;
+        storageId: Id<"_storage">;
+      },
+      "attached" | "declined"
+    >(attachImportedPdf);
+
+    expect(
+      await attach(ctx, {
+        shareId,
+        paperId: mineNow(ctx, me.labId)._id,
+        sourceStorageId: "storage_seed" as Id<"_storage">,
+        storageId: second,
+      }),
+    ).toBe("declined");
+    expect(mineNow(ctx, me.labId).storageId).toBe(first);
+    expect(ctx.discarded).toContain(second);
+    // And no second text layer stacked on the first.
+    expect(
+      ctx.db
+        .all("paperPages")
+        .filter((page) => page.paperId === mineNow(ctx, me.labId)._id),
+    ).toHaveLength(2);
+  });
+
+  it("says nothing to the sharing lab about any of it", async () => {
+    const { ctx, labId } = await midFlight();
+    const before = ctx.db.all("events").filter((e) => e.labId === labId).length;
+    await deliverTheFile(ctx);
+    expect(
+      ctx.db.all("events").filter((e) => e.labId === labId).length,
+    ).toBe(before);
   });
 });
 
@@ -2079,10 +2309,37 @@ describe("redeeming more than once", () => {
     const me = await visitor(ctx);
     ctx.auth = { userId: me.userId };
     const first = await importShare(ctx, { token });
+    await deliverTheFile(ctx);
     const second = await importShare(ctx, { token });
 
-    expect(second).toEqual(first);
+    expect(second?.paperId).toBe(first?.paperId);
     expect(shelfOf(ctx, me.labId)).toHaveLength(1);
+    // The second answer describes the row as it now stands rather than as the
+    // first redemption left it: the file has landed, so the reader who presses
+    // the link again goes straight to the paper.
+    expect(second).toEqual({
+      paperId: first?.paperId,
+      labId: me.labId,
+      ready: true,
+      hasPdf: true,
+    });
+    // One copy of the bytes, not two.
+    expect(ctx.stored).toHaveLength(1);
+  });
+
+  it("does not queue a second copy for a paper it already recognised", async () => {
+    const { ctx, paperId } = await setup();
+    await publishablePaper(ctx, paperId);
+    const { token } = await share(ctx, { paperId, includePdf: true });
+
+    const me = await visitor(ctx);
+    ctx.auth = { userId: me.userId };
+    await importShare(ctx, { token });
+    await deliverTheFile(ctx);
+    await importShare(ctx, { token });
+
+    expect(await deliverTheFile(ctx)).toBe(0);
+    expect(ctx.stored).toHaveLength(1);
   });
 
   it("recognises a paper already on the shelf by its DOI", async () => {
@@ -2127,6 +2384,53 @@ describe("redeeming more than once", () => {
     expect(shelfOf(ctx, me.labId)).toHaveLength(1);
   });
 
+  it("keeps two papers apart when their DOIs prove them distinct", async () => {
+    // Title-and-year is the last resort, and it never overrules a DOI. Two rows
+    // that both carry one and carry different ones are two different papers
+    // however alike their titles read — that is what a DOI is *for* — and
+    // merging them would lose one behind the other with nothing to show for it.
+    const { ctx, paperId } = await setup();
+    await publishablePaper(ctx, paperId);
+    const { token } = await share(ctx, { paperId });
+
+    const me = await visitor(ctx);
+    const other = await ctx.db.insert("papers", {
+      labId: me.labId,
+      title: "Cold-chain effects on assay reproducibility",
+      year: 2019,
+      doi: "10.1000/a-different-paper",
+      ingestStatus: "needs-pdf",
+      addedBy: me.userId,
+    });
+
+    ctx.auth = { userId: me.userId };
+    const outcome = await importShare(ctx, { token });
+    expect(outcome?.paperId).not.toBe(other);
+    expect(shelfOf(ctx, me.labId)).toHaveLength(2);
+  });
+
+  it("still merges on title and year when only one side has a DOI", async () => {
+    // The DOI is evidence of difference only when both sides have one. A row
+    // filed by hand with no DOI and the same title is the duplicate this pass
+    // exists to catch.
+    const { ctx, paperId } = await setup();
+    await publishablePaper(ctx, paperId);
+    const { token } = await share(ctx, { paperId });
+
+    const me = await visitor(ctx);
+    const already = await ctx.db.insert("papers", {
+      labId: me.labId,
+      title: "Cold-Chain Effects on Assay Reproducibility",
+      year: 2019,
+      ingestStatus: "needs-pdf",
+      addedBy: me.userId,
+    });
+
+    ctx.auth = { userId: me.userId };
+    expect((await importShare(ctx, { token }))?.paperId).toBe(already);
+    expect(shelfOf(ctx, me.labId)).toHaveLength(1);
+  });
+
   it("recognises one by title and year when it has neither", async () => {
     const { ctx, paperId } = await setup();
     await publishablePaper(ctx, paperId);
@@ -2163,6 +2467,78 @@ describe("redeeming more than once", () => {
     // Two libraries, one paper each, and neither read the other's shelf.
     expect(shelfOf(ctx, me.labId)).toHaveLength(1);
     expect(shelfOf(ctx, you.labId)).toHaveLength(1);
+  });
+});
+
+describe("how often anyone may redeem", () => {
+  /** A library that has just been filled, as a script would fill one. */
+  async function fillShelf(ctx: FakeCtx, me: { userId: string; labId: string }, count: number) {
+    for (let index = 0; index < count; index += 1) {
+      const id = await ctx.db.insert("papers", {
+        labId: me.labId as Id<"labs">,
+        title: `Filler ${index}`,
+        ingestStatus: "needs-pdf",
+        addedBy: me.userId as Id<"users">,
+      });
+      // The fixture stamps rows with a counter rather than a clock, so the
+      // window has to be put where the mutation will look for it.
+      await ctx.db.patch(id, { _creationTime: Date.now() });
+    }
+  }
+
+  it("stops opening the door once a library has gained two hundred in an hour", async () => {
+    const { ctx, paperId } = await setup();
+    await publishablePaper(ctx, paperId);
+    const { token } = await share(ctx, { paperId, includePdf: true });
+
+    const me = await visitor(ctx);
+    await fillShelf(ctx, me, 201);
+    ctx.auth = { userId: me.userId };
+
+    // The same `null` every other refusal gives, so it is indistinguishable
+    // from a revoked link and says nothing about why.
+    expect(await importShare(ctx, { token })).toBeNull();
+    expect(shelfOf(ctx, me.labId)).toHaveLength(201);
+    expect(await deliverTheFile(ctx)).toBe(0);
+  });
+
+  it("counts the hour, not the shelf", async () => {
+    // A researcher with a large library is not a script. What is being bounded
+    // is how fast one arrived, not how much of it there is.
+    const { ctx, paperId } = await setup();
+    await publishablePaper(ctx, paperId);
+    const { token } = await share(ctx, { paperId, includePdf: true });
+
+    const me = await visitor(ctx);
+    await fillShelf(ctx, me, 201);
+    for (const paper of shelfOf(ctx, me.labId)) {
+      await ctx.db.patch(paper._id, {
+        _creationTime: Date.now() - 2 * 60 * 60 * 1000,
+      });
+    }
+    ctx.auth = { userId: me.userId };
+
+    expect(await importShare(ctx, { token })).not.toBeNull();
+    expect(shelfOf(ctx, me.labId)).toHaveLength(202);
+  });
+
+  it("is a fact about the caller's own shelf and nobody else's", async () => {
+    // Keyed by the redeemer's library rather than by the link, which is the
+    // opposite of every other guard on this module — and deliberately so. A
+    // counter keyed by the share would be a count of how many strangers took a
+    // lab's paper, which is the read report P7 refuses to keep.
+    const { ctx, paperId } = await setup();
+    await publishablePaper(ctx, paperId);
+    const { token } = await share(ctx, { paperId, includePdf: true });
+
+    const me = await visitor(ctx);
+    const you = await visitor(ctx, "Dara Ito");
+    await fillShelf(ctx, me, 201);
+
+    ctx.auth = { userId: me.userId };
+    expect(await importShare(ctx, { token })).toBeNull();
+    ctx.auth = { userId: you.userId };
+    expect(await importShare(ctx, { token })).not.toBeNull();
   });
 });
 

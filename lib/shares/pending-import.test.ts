@@ -18,7 +18,11 @@ import { mintShareToken } from "./token";
  *   2. Reading spends it. A token still sitting in the tab after it has been
  *      read is one the *next* arrival gets to spend.
  *   3. Every way storage can be unavailable or hostile fails closed — no
- *      throw reaches the caller, and nothing is imported.
+ *      throw reaches the caller, nothing is imported, and nothing that could
+ *      not be cleared is ever believed.
+ *   4. A hand-off that was never spent stops being one. A capability left in a
+ *      tab is not allowed to sit there indefinitely waiting for whoever uses
+ *      the machine next.
  */
 
 /**
@@ -88,6 +92,51 @@ describe("leaving the token behind", () => {
     );
     spy.mockRestore();
   });
+
+  it("clears whatever was there when the write fails, rather than leaving it", () => {
+    // A quota that filled between two presses leaves the *previous* press's
+    // token standing, and that token names a different link. Whatever survives
+    // a failed write is not what this press meant, so it goes.
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const tab = storage();
+    rememberSharedPaper(() => tab, TOKEN);
+    const other = mintShareToken();
+
+    expect(rememberSharedPaper(() => throwingOn(tab, "setItem"), other)).toBe(
+      false,
+    );
+    expect(tab.keys()).toEqual([]);
+    spy.mockRestore();
+  });
+
+  it("says so when reaching for the store is itself what throws", () => {
+    // Reading `window.sessionStorage` throws in Safari's private mode, which is
+    // why the store arrives as a thunk rather than a value.
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(
+      rememberSharedPaper(() => {
+        throw new Error("access to storage is denied in this context");
+      }, TOKEN),
+    ).toBe(false);
+    spy.mockRestore();
+  });
+
+  it("never puts the token in the console when it complains", () => {
+    // A console line is not a place a capability may appear. The caught value
+    // is deliberately dropped: an exception raised by a storage implementation
+    // is one careless `toString` away from carrying the value that caused it.
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const tab = storage();
+    rememberSharedPaper(() => throwingOn(tab, "setItem"), TOKEN);
+    consumeSharedPaper(() => throwingOn(tab, "getItem"));
+
+    expect(spy).toHaveBeenCalled();
+    expect(JSON.stringify(spy.mock.calls)).not.toContain(TOKEN);
+    for (const [...args] of spy.mock.calls) {
+      expect(args.every((arg) => typeof arg === "string")).toBe(true);
+    }
+    spy.mockRestore();
+  });
 });
 
 describe("spending it on the far side", () => {
@@ -135,12 +184,87 @@ describe("spending it on the far side", () => {
   it("imports nothing when the clearing throws", () => {
     // The delete sits between the read and the answer, so a store that refuses
     // it is a store that could hand the same token back forever. It gets
-    // nothing instead.
+    // nothing instead — a value that could not be cleared is never judged.
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     const tab = storage();
     rememberSharedPaper(() => tab, TOKEN);
     expect(consumeSharedPaper(() => throwingOn(tab, "removeItem"))).toBeNull();
     spy.mockRestore();
+  });
+
+  it("clears the key even on the paths that answer nothing", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const tab = storage();
+    rememberSharedPaper(() => tab, TOKEN);
+    consumeSharedPaper(() => throwingOn(tab, "getItem"));
+    // The read failed, so nothing was imported — and the token is gone anyway,
+    // rather than waiting in the tab for the next arrival to try again.
+    expect(tab.keys()).toEqual([]);
+    spy.mockRestore();
+  });
+
+  it("imports nothing when reaching for the store throws", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(
+      consumeSharedPaper(() => {
+        throw new Error("access to storage is denied in this context");
+      }),
+    ).toBeNull();
+    spy.mockRestore();
+  });
+});
+
+describe("a hand-off that was never spent", () => {
+  /** The envelope, as a tab that has been sitting open would hold it. */
+  function marked(tab: ReturnType<typeof storage>, at: number) {
+    rememberSharedPaper(() => tab, TOKEN);
+    const key = tab.keys()[0] ?? "";
+    tab.setItem(key, JSON.stringify({ token: TOKEN, at }));
+    return key;
+  }
+
+  it("stops being a hand-off after half an hour", () => {
+    // A tab left open over a weekend is not a sign-up in progress. Honouring an
+    // unbounded hand-off means the next person at this machine spends it.
+    const tab = storage();
+    marked(tab, Date.now() - 31 * 60 * 1000);
+    expect(consumeSharedPaper(() => tab)).toBeNull();
+    expect(tab.keys()).toEqual([]);
+  });
+
+  it("still works inside the window", () => {
+    const tab = storage();
+    marked(tab, Date.now() - 5 * 60 * 1000);
+    expect(consumeSharedPaper(() => tab)).toBe(TOKEN);
+  });
+
+  it("refuses a stamp from the future", () => {
+    // A clock that moved backwards makes a fresh stamp look like a future one.
+    // Losing a hand-off costs a press of Back; honouring an unbounded one costs
+    // a capability, so the ambiguity is resolved the safe way.
+    const tab = storage();
+    marked(tab, Date.now() + 60 * 60 * 1000);
+    expect(consumeSharedPaper(() => tab)).toBeNull();
+  });
+
+  it("refuses an envelope that is not one", () => {
+    const tab = storage();
+    const key = marked(tab, Date.now());
+    for (const written of [
+      TOKEN,
+      "{",
+      "null",
+      "[]",
+      JSON.stringify({ token: TOKEN }),
+      JSON.stringify({ token: TOKEN, at: "now" }),
+      JSON.stringify({ token: TOKEN, at: Number.NaN }),
+      JSON.stringify({ token: "not-a-token", at: Date.now() }),
+      JSON.stringify({ at: Date.now() }),
+    ]) {
+      tab.setItem(key, written);
+      expect(consumeSharedPaper(() => tab), written).toBeNull();
+      expect(tab.keys()).toEqual([]);
+    }
   });
 });
 
@@ -149,11 +273,14 @@ describe("what is kept, and what is not", () => {
     // Not the title, not the lab, not whether the file travelled. Everything
     // the redemption needs to know it asks the database for, at redemption
     // time, so there is nothing cached here that could be believed after it
-    // stopped being true.
+    // stopped being true. The stamp beside it is there to take the token away
+    // again, not to describe anything.
     const tab = storage();
     rememberSharedPaper(() => tab, TOKEN);
     expect(tab.keys()).toHaveLength(1);
-    expect(tab.getItem(tab.keys()[0] ?? "")).toBe(TOKEN);
+    const written: unknown = JSON.parse(tab.getItem(tab.keys()[0] ?? "") ?? "");
+    expect(Object.keys(written as object).sort()).toEqual(["at", "token"]);
+    expect((written as { token: string }).token).toBe(TOKEN);
   });
 
   it("writes under a key namespaced to this product", () => {

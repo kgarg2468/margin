@@ -24,6 +24,16 @@ const nextConfig: NextConfig = {
         source: "/s/:token*",
         headers: [
           { key: "X-Robots-Tag", value: "noindex, nofollow, noarchive" },
+          /**
+           * The URL of this page *is* the capability, and a `Referer` header
+           * is how a browser hands the current URL to somewhere else. Every
+           * link on a share page is therefore a way out for the token: the
+           * DOI that leaves for a publisher, the sign-in door, and whatever
+           * the next surface built here happens to add. `rel="noreferrer"` on
+           * the one link that exists today closes one of those; the header
+           * closes all of them, including the ones nobody has written yet.
+           */
+          { key: "Referrer-Policy", value: "no-referrer" },
         ],
       },
     ];

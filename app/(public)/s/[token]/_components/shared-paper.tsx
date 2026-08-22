@@ -135,6 +135,12 @@ export function SharedPaper({
  * into the URL — see `lib/shares/pending-import.ts`. The press is a plain
  * link either way: if that write fails, or if scripts never ran, the reader
  * still gets where the link says they are going.
+ *
+ * Only a plain press writes it, though. Middle-click, ⌘-click and ⇧-click all
+ * open somewhere this tab is not going, so the write would leave a live
+ * capability sitting in a tab whose reader has gone back to the paper — and
+ * `sessionStorage` is per tab, so the new one it opened cannot see it anyway.
+ * A press that goes nowhere here should leave nothing behind here.
  */
 function KeepThisPaper({
   token,
@@ -150,7 +156,16 @@ function KeepThisPaper({
       {hasNotes ? "The notes above stay with the lab that wrote them. " : null}
       <Link
         href="/app"
-        onClick={() => {
+        onClick={(event) => {
+          if (
+            event.button !== 0 ||
+            event.metaKey ||
+            event.ctrlKey ||
+            event.shiftKey ||
+            event.altKey
+          ) {
+            return;
+          }
           rememberSharedPaper(() => window.sessionStorage, token);
         }}
         className="text-ink underline decoration-rule underline-offset-4 transition-colors hover:decoration-ink-faint"

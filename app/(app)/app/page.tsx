@@ -97,8 +97,18 @@ export default function AppHome() {
     // not be the lab the shell was last left showing. Switched before the
     // navigation rather than after, so the shelf the reader arrives on is the
     // one the paper is actually on.
+    //
+    // Guarded because remembering the choice writes to `localStorage`, which
+    // throws on a device with site data blocked or a quota full — and the
+    // navigation underneath must not be taken down by a failure to write down
+    // a preference. The reader still arrives on their paper; the shell simply
+    // does not remember which library they were in next time.
     if (importedPaper !== null) {
-      selectLab(importedPaper.labId as LabSummary["_id"]);
+      try {
+        selectLab(importedPaper.labId as LabSummary["_id"]);
+      } catch {
+        // Deliberately swallowed — see above.
+      }
     }
     // Where to go, and the signal to leave behind — see `landOnShelf`. That the
     // server decides whether this account is new, rather than which tab of the
