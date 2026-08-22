@@ -1,6 +1,6 @@
 # Margin — Execution Timeline
 
-**Updated:** 2026-08-22 (Wave 5b: PDF gate #89 + sweep rollout #90 shipped) · against `origin/main` @ `c6e51ec`
+**Updated:** 2026-08-22 (P7 shipped #92; Track P complete but P5) · against `origin/main` @ `ecc90d3`
 **This is the single source of truth for execution order.** The other docs stay as rationale and design — when sequencing here disagrees with a roadmap section elsewhere, this file wins and the other doc should be corrected.
 
 | Source doc | Role |
@@ -67,9 +67,9 @@ The ladder: see it without an account → useful alone in three actions → seco
 - [x] **P4 — Seeded demo paper.** (#82) Every new library opens on Ioannidis 2005 (CC-BY, SHA-256-pinned blob shared per deployment) with five substantive notes, owner-authored and private by the founder's ship-as-is call. Operator step per environment: `npx convex run seedDemo:seedCanonicalPdf`.
 - [ ] **P5 — Quiet lab conversion + guest tier.** Invite-from-personal-library names/converts the lab; a viewer/guest state on shared artifacts (membership roles are exactly `pi|member` today — deliberate schema change, needs design). After P2.
 - [ ] **P6 — Projected-board polish.** Rides Track A (A2 shipped #73); the weekly 10-person demo is the 39% discovery channel. No new box — fold future board work here.
-- [ ] **P7 — Share-link → signup → annotate continuity (in flight).** Closes rung 0 into rung 1. Dispatched 2026-08-22 on `kgarg2468/wave5-p7`; the box ticks when its PR merges.
+- [x] **P7 — Share-link → signup → annotate continuity.** (#92) One quiet line on the share page; the token crosses signup in per-tab sessionStorage (never a URL, and `/s/:token*` now sends `Referrer-Policy: no-referrer`), redeemed after auth by a mutation that revalidates the live share. Metadata always travels; the PDF only when the live share still includes it — as a byte copy with its own lifecycle, so nothing couples the two labs and nothing flows back to the sharer; the lab's annotations never. Idempotent, capped, every refusal the same bare null.
 
-Ordering: **P1–P4 and the PDF gate (#89) are shipped; P7 is in flight; P5 waits on its design call (guest tier is a deliberate membership-schema change)** — P5 rewrites the same signup/onboarding surfaces P1 touched, so it does not start against a moving base. Monetization stays out of the product entirely (standing rule); nothing in Track P adds pricing surfaces.
+Ordering: **P1–P4, the PDF gate (#89), and P7 (#92) are shipped — Track P is complete except P5, which waits on its design call (guest tier is a deliberate membership-schema change)** — P5 rewrites the same signup/onboarding surfaces P1 touched, so it does not start against a moving base. Monetization stays out of the product entirely (standing rule); nothing in Track P adds pricing surfaces.
 
 ## 3c. Track V — Signature visual layer (founder direction 2026-08-18)
 
@@ -108,7 +108,7 @@ Non-engineering, founder-owned, runs alongside everything: recruit 5–10 design
 - **Wave 2:** A2 ∥ B3 ∥ C2 ∥ B4 — shipped
 - **Wave 3:** A3 ∥ C3 ∥ B5 — shipped
 - **Wave 4:** A4 ∥ C4+C5 → design-partner launch gate (C2 results) → Track D decision — shipped; gate still shut (C2 n=0)
-- **Wave 5:** ~~P1+P4 ∥ P3 ∥ V1 → founder review → P2 → V2 ∥ PDF gate~~ → **(now)** P7 → P5 (needs design)
+- **Wave 5:** ~~P1+P4 ∥ P3 ∥ V1 → founder review → P2 → V2 ∥ PDF gate → P7~~ → **(now)** P5 (needs founder design call)
 
 ## 6. Done (context for agents — don't rebuild these)
 
