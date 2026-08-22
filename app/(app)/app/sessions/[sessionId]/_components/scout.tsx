@@ -3,6 +3,7 @@
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { stripLabels } from "@/lib/citations/labels";
+import { ScanSweep, scanRowClass } from "@/lib/scan/scan-sweep";
 import {
   citationSummary,
   coverageLine,
@@ -108,8 +109,15 @@ export function ScoutFinding({
       {line}
       <div
         style={{ borderLeftColor: "var(--secondary)" }}
-        className="mt-3 flex flex-col gap-2 border-l-2 pl-3.5"
+        className={`${scanRowClass} mt-3 flex flex-col gap-2 border-l-2 pl-3.5`}
       >
+        {/* The one moment on this page where a scan is the literal truth: a
+            gather ran across the lab's corpus and this is what came back. In
+            the model's own violet, for the reason the colour note above gives.
+            Keyed on the report so a rerun's answer is lit as it lands — a
+            standing card whose sentences changed underneath is the case this
+            exists to make visible. */}
+        <ScanSweep key={report._id} tone="secondary" />
         <p className="flex flex-wrap items-baseline gap-x-3">
           <span
             style={{ color: "var(--secondary)" }}
