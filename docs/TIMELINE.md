@@ -67,7 +67,7 @@ The ladder: see it without an account → useful alone in three actions → seco
 - [x] **P4 — Seeded demo paper.** (#82) Every new library opens on Ioannidis 2005 (CC-BY, SHA-256-pinned blob shared per deployment) with five substantive notes, owner-authored and private by the founder's ship-as-is call. Operator step per environment: `npx convex run seedDemo:seedCanonicalPdf`.
 - [ ] **P5 — Quiet lab conversion + guest tier.** Invite-from-personal-library names/converts the lab; a viewer/guest state on shared artifacts (membership roles are exactly `pi|member` today — deliberate schema change, needs design). After P2.
 - [ ] **P6 — Projected-board polish.** Rides Track A (A2 shipped #73); the weekly 10-person demo is the 39% discovery channel. No new box — fold future board work here.
-- [ ] **P7 — Share-link → signup → annotate continuity.** Closes rung 0 into rung 1. After P2.
+- [ ] **P7 — Share-link → signup → annotate continuity (in flight).** Closes rung 0 into rung 1. Dispatched 2026-08-22 on `kgarg2468/wave5-p7`; the box ticks when its PR merges.
 
 Ordering: **P1–P4 and the PDF gate (#89) are shipped; P7 is in flight; P5 waits on its design call (guest tier is a deliberate membership-schema change)** — P5 rewrites the same signup/onboarding surfaces P1 touched, so it does not start against a moving base. Monetization stays out of the product entirely (standing rule); nothing in Track P adds pricing surfaces.
 
