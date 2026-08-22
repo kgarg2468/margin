@@ -736,7 +736,9 @@ export const view = query({
         // small, but it is the withheld artifact talking. No public surface
         // reads it when there are no pages to number: the notes carry their
         // own page numbers, which is what a reader actually navigates by.
-        ...(paper.pageCount === undefined || share.includePdf !== true
+        ...(paper.pageCount === undefined ||
+        share.includePdf !== true ||
+        paper.storageId === undefined
           ? {}
           : { pageCount: paper.pageCount }),
         pdf:
