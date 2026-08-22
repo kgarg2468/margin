@@ -330,6 +330,26 @@ export const shareDoc = v.union(
     ...shareBase,
     kind: v.literal("paper"),
     paperId: v.id("papers"),
+    /**
+     * Whether the stored publisher PDF travels with the link. Absent is false.
+     *
+     * The margin is the lab's own writing and always travels. The file
+     * underneath it is usually somebody else's copyright, and a link that
+     * hands it to anyone who has the URL is a redistribution the lab may have
+     * no right to make — so it is a separate decision, made once by the person
+     * minting the link, and it is off unless they say otherwise.
+     *
+     * Optional rather than required so that shares minted before this field
+     * existed keep working, and `=== true` at every read so that they keep
+     * working *with the file withheld*: the unset state and the "no" state are
+     * the same answer, which is the only reading of a missing consent flag
+     * that cannot publish something nobody agreed to publish.
+     *
+     * It lives on the paper variant alone because a write-up share carries
+     * prose and no file at all — there is no question to answer there, and a
+     * field on `shareBase` would invite a read that thinks there is.
+     */
+    includePdf: v.optional(v.boolean()),
   }),
   /**
    * A write-up share points at the *session*, not at the `syntheses` row.

@@ -184,8 +184,28 @@ const publicPaperView = v.object({
   venue: v.optional(v.string()),
   doi: v.optional(v.string()),
   pageCount: v.optional(v.number()),
-  /** Whether there are bytes to fetch from the token-scoped delivery route. */
-  hasPdf: v.boolean(),
+  /**
+   * What the delivery route will do about the file, in the three states that
+   * are genuinely different to a reader.
+   *
+   * `included` — there are bytes and the sharer said to send them.
+   * `withheld` — there are bytes and the sharer did not. The page says so, in
+   * its own words: this is a choice somebody made, not something taken back,
+   * and it must not borrow the vocabulary of withdrawal.
+   * `none` — the library never had the file. Nobody decided anything.
+   *
+   * A boolean would have collapsed the last two, and the page would have had
+   * to either accuse the sharer of withholding a file that never existed or
+   * stay silent about a decision ruling 3 asks it to state.
+   *
+   * The delivery route makes no such distinction — see `pdfForShare`, where
+   * `withheld` and `none` are the same `null`.
+   */
+  pdf: v.union(
+    v.literal("included"),
+    v.literal("withheld"),
+    v.literal("none"),
+  ),
   notes: v.array(publicNote),
 });
 
@@ -711,7 +731,12 @@ export const view = query({
         ...(paper.venue === undefined ? {} : { venue: paper.venue }),
         ...(paper.doi === undefined ? {} : { doi: paper.doi }),
         ...(paper.pageCount === undefined ? {} : { pageCount: paper.pageCount }),
-        hasPdf: paper.storageId !== undefined,
+        pdf:
+          paper.storageId === undefined
+            ? ("none" as const)
+            : share.includePdf === true
+              ? ("included" as const)
+              : ("withheld" as const),
         notes,
       };
     }
@@ -792,6 +817,28 @@ export const storedFileExists = internalQuery({
   },
 });
 
+/**
+ * The file behind a share token, if the share carries one at all.
+ *
+ * `null` is the whole vocabulary of refusal here, and every reason collapses
+ * into it deliberately: no such token, revoked, a write-up rather than a paper,
+ * the paper deleted or moved to another lab, no file in the library, and — now
+ * — a sharer who chose not to include the file. The route turns `null` into
+ * one 404 with one body, so a link whose PDF is switched off answers a probe
+ * exactly as a paper that never had a file does, and neither can be told from
+ * a token that was never minted.
+ *
+ * That indistinguishability is the point rather than a side effect. The
+ * alternative — a distinct status or message for "the sharer said no" — would
+ * publish the existence of a file somebody deliberately did not publish, and
+ * would let anyone holding a revoked link work out whether the paper had a PDF
+ * behind it. The public *page* does say which of those states it is in, and
+ * that is a disclosure the sharer makes by sharing; this endpoint adds nothing
+ * to it.
+ *
+ * `=== true` rather than a falsy check, so a row minted before the field
+ * existed withholds its file rather than inheriting a default of yes.
+ */
 export const pdfForShare = internalQuery({
   args: { token: v.string() },
   returns: v.union(
@@ -801,6 +848,9 @@ export const pdfForShare = internalQuery({
   handler: async (ctx, args) => {
     const share = await liveShare(ctx, args.token);
     if (share === null || share.kind !== "paper") {
+      return null;
+    }
+    if (share.includePdf !== true) {
       return null;
     }
     const paper = await ctx.db.get(share.paperId);
@@ -828,6 +878,11 @@ const shareState = v.union(
     createdByName: v.string(),
     /** Whether the caller may take this link down: its creator, or the PI. */
     canRevoke: v.boolean(),
+    /**
+     * Whether the file travels with this link. Always false for a write-up
+     * share, which has no file to carry — the panel for those never asks.
+     */
+    includePdf: v.boolean(),
   }),
 );
 
@@ -866,6 +921,7 @@ async function describeShare(
   createdAt: number;
   createdByName: string;
   canRevoke: boolean;
+  includePdf: boolean;
 } | null> {
   if (share === null) {
     return null;
@@ -875,6 +931,10 @@ async function describeShare(
     _id: share._id,
     token: share.token,
     createdAt: share.createdAt,
+    // A write-up share has no `includePdf` to read and no file to carry, so
+    // the answer for one is false rather than absent: the panel asks a
+    // `shareState`, not a kind.
+    includePdf: share.kind === "paper" && share.includePdf === true,
     // The email fallback is right here and wrong on the public page: inside a
     // lab it is how you tell two people with the same name apart, and this
     // string never leaves a membership check. See `publicName`.
@@ -931,6 +991,12 @@ export const forPaper = query({
     optedIn: v.boolean(),
     /** How many members have said yes, so the panel can say whose margin it is. */
     optedInCount: v.number(),
+    /**
+     * Whether the library holds the file at all. The panel asks so that it can
+     * omit the question entirely for a paper with nothing to send, rather than
+     * offering a control over a file that does not exist.
+     */
+    hasPdf: v.boolean(),
   }),
   handler: async (ctx, args) => {
     const paper = await ctx.db.get(args.paperId);
@@ -944,6 +1010,7 @@ export const forPaper = query({
       share: await describeShare(ctx, share, membership),
       optedIn: optedIn.has(membership.userId),
       optedInCount: optedIn.size,
+      hasPdf: paper.storageId !== undefined,
     };
   },
 });
@@ -999,7 +1066,7 @@ export const forSession = query({
  * control whose whole job is taking something back.
  */
 export const sharePaper = mutation({
-  args: { paperId: v.id("papers") },
+  args: { paperId: v.id("papers"), includePdf: v.optional(v.boolean()) },
   returns: v.object({ token: v.string() }),
   handler: async (ctx, args) => {
     const paper = await ctx.db.get(args.paperId);
@@ -1009,6 +1076,12 @@ export const sharePaper = mutation({
     const membership = await requireMembership(ctx, paper.labId);
     await optIn(ctx, paper, membership.userId);
 
+    // The existing link keeps the terms it was minted under, including this
+    // one. A second press is how the panel hands back a link that already
+    // exists, and letting it carry a new answer would mean the file could be
+    // switched on underneath a URL already sent to people — everyone holding
+    // it would silently gain the paper. Changing the terms takes revoking and
+    // minting again, so the new terms arrive with a new address.
     const existing = await liveShareForPaper(ctx, paper._id);
     if (existing !== null) {
       return { token: existing.token };
@@ -1022,6 +1095,11 @@ export const sharePaper = mutation({
       paperId: paper._id,
       createdBy: membership.userId,
       createdAt: Date.now(),
+      // Written for every new row even when false, so a row says what was
+      // decided rather than leaving the reader to infer it from an absence.
+      // Absent keeps meaning false, for the rows minted before the question
+      // was asked.
+      includePdf: args.includePdf === true,
     });
     await recordEvent(ctx, {
       type: "share.created",

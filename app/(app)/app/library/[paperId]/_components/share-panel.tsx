@@ -35,15 +35,19 @@ export function SharePanel({ paperId }: { paperId: Id<"papers"> }) {
   const revoke = useMutation(api.shares.revoke);
   const setOptIn = useMutation(api.shares.setPaperOptIn);
   const [working, setWorking] = useState(false);
+  // Off unless the sharer says otherwise, and held here rather than on the
+  // server until they press: an unminted link has no row to remember it on,
+  // and the answer only becomes a fact when the link does.
+  const [includePdf, setIncludePdf] = useState(false);
 
   const mint = useCallback(async () => {
     setWorking(true);
     try {
-      await create({ paperId });
+      await create({ paperId, includePdf });
     } finally {
       setWorking(false);
     }
-  }, [create, paperId]);
+  }, [create, paperId, includePdf]);
 
   if (state === undefined) {
     return (
@@ -68,6 +72,29 @@ export function SharePanel({ paperId }: { paperId: Id<"papers"> }) {
             carries your notes and nobody else&rsquo;s until they say so
             themselves.
           </p>
+          {/* Asked only where there is a file to ask about, and only before
+              minting: the answer is one of the link's terms, so changing it
+              means a new link rather than new terms on an address people
+              already have. */}
+          {state.hasPdf ? (
+            <div className="flex flex-col gap-1.5">
+              <label className="flex items-baseline gap-2.5">
+                <input
+                  type="checkbox"
+                  checked={includePdf}
+                  onChange={(event) => setIncludePdf(event.target.checked)}
+                  className="accent-accent"
+                />
+                <span className="font-serif text-sm leading-relaxed text-ink">
+                  Include the PDF itself
+                </span>
+              </label>
+              <p className="max-w-prose pl-6 font-sans text-xs leading-relaxed text-ink-faint">
+                Anyone with the link will be able to download the file, so
+                include it only if you have the right to pass it on.
+              </p>
+            </div>
+          ) : null}
           <button
             type="button"
             onClick={() => void mint()}
@@ -86,6 +113,16 @@ export function SharePanel({ paperId }: { paperId: Id<"papers"> }) {
               ? "1 member has shared their notes"
               : `${state.optedInCount} members have shared their notes`}
           </p>
+          {/* Stated for a link that exists, because it is a term of that link
+              and the person reading the panel may not be the one who set it.
+              Not editable here — see the mint comment above. */}
+          {state.hasPdf ? (
+            <p className="font-sans text-xs text-ink-faint">
+              {share.includePdf
+                ? "The PDF is included — anyone with the link can download it."
+                : "The PDF is not included. The link opens the margin only."}
+            </p>
+          ) : null}
           {share.canRevoke ? (
             <ConfirmAction
               label="Revoke this link"

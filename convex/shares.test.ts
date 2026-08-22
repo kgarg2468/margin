@@ -76,7 +76,7 @@ const publicView = call<
       kind: "paper";
       labName: string;
       title: string;
-      hasPdf: boolean;
+      pdf: "included" | "withheld" | "none";
       notes: {
         _id: Id<"annotations">;
         authorName: string;
@@ -98,7 +98,10 @@ const publicView = call<
     }
 >(view);
 
-const share = call<{ paperId: Id<"papers"> }, { token: string }>(sharePaper);
+const share = call<
+  { paperId: Id<"papers">; includePdf?: boolean },
+  { token: string }
+>(sharePaper);
 const shareWriteUp = call<{ sessionId: Id<"sessions"> }, { token: string }>(
   shareSynthesis,
 );
@@ -109,14 +112,28 @@ const optIn = call<{ paperId: Id<"papers">; included: boolean }, null>(
 const panel = call<
   { paperId: Id<"papers"> },
   {
-    share: { _id: Id<"shares">; token: string; canRevoke: boolean } | null;
+    share: {
+      _id: Id<"shares">;
+      token: string;
+      canRevoke: boolean;
+      includePdf: boolean;
+    } | null;
     optedIn: boolean;
     optedInCount: number;
+    hasPdf: boolean;
   }
 >(forPaper);
 const sessionPanel = call<
   { sessionId: Id<"sessions"> },
-  { share: { _id: Id<"shares">; token: string } | null; approved: boolean; canShare: boolean }
+  {
+    share: {
+      _id: Id<"shares">;
+      token: string;
+      includePdf: boolean;
+    } | null;
+    approved: boolean;
+    canShare: boolean;
+  }
 >(forSession);
 const leaveLab = call<{ labId: Id<"labs"> }, null>(leaveLabMutation);
 const continueSweep = call<
@@ -508,7 +525,9 @@ describe("revocation", () => {
 
   it("deads the PDF with it", async () => {
     const { ctx, paperId } = await setup();
-    const { token } = await share(ctx, { paperId });
+    // Minted with the file included, because a link without it has no PDF to
+    // dead and would pass this test for the wrong reason.
+    const { token } = await share(ctx, { paperId, includePdf: true });
     expect(await pdf(ctx, { token })).not.toBeNull();
 
     const live = (await panel(ctx, { paperId })).share;
@@ -558,6 +577,149 @@ describe("revocation", () => {
     // Idempotent: a second press is the same link, so revoking really revokes.
     expect(second.token).toBe(first.token);
     expect(ctx.db.all("shares")).toHaveLength(1);
+  });
+});
+
+/* -------------------------------------------------------------------------
+ * 4b. The file, which is somebody else's to give away
+ * ---------------------------------------------------------------------- */
+
+describe("the PDF gate", () => {
+  it("withholds the file unless the sharer asked for it", async () => {
+    const { ctx, paperId } = await setup();
+    const { token } = await share(ctx, { paperId });
+
+    expect(await pdf(ctx, { token })).toBeNull();
+    // The page still carries the whole margin — only the file is missing.
+    expect(asPaper(await publicView(ctx, { token })).pdf).toBe("withheld");
+  });
+
+  it("sends the file when the sharer asked for it", async () => {
+    const { ctx, paperId } = await setup();
+    const { token } = await share(ctx, { paperId, includePdf: true });
+
+    expect(await pdf(ctx, { token })).not.toBeNull();
+    expect(asPaper(await publicView(ctx, { token })).pdf).toBe("included");
+  });
+
+  it("treats an explicit no exactly as an unasked question", async () => {
+    const { ctx, paperId } = await setup();
+    const { token } = await share(ctx, { paperId, includePdf: false });
+
+    expect(await pdf(ctx, { token })).toBeNull();
+    const row = ctx.db.all("shares")[0]!;
+    expect(row.kind === "paper" && row.includePdf).toBe(false);
+  });
+
+  it("withholds the file from a link minted before the question existed", async () => {
+    const { ctx, paperId, labId, pi } = await setup();
+    // A row as it would have been written before this field: no answer at all.
+    // Absent has to read as no, or shipping the field would have published
+    // every link already out there.
+    await ctx.db.insert("shares", {
+      kind: "paper",
+      token: "abcdefghijkmnpqrstuvwxyz23",
+      labId,
+      paperId,
+      createdBy: pi,
+      createdAt: Date.now(),
+    });
+
+    expect(
+      await pdf(ctx, { token: "abcdefghijkmnpqrstuvwxyz23" }),
+    ).toBeNull();
+  });
+
+  it("tells a withheld file from one the library never had", async () => {
+    const { ctx, labId, pi } = await setup();
+    const bare = await ctx.db.insert("papers", {
+      labId,
+      title: "Metadata only",
+      addedBy: pi,
+      ingestStatus: "needs-pdf",
+    });
+    const { token } = await share(ctx, {
+      paperId: bare,
+      // Asked for, and still absent: there is nothing to send.
+      includePdf: true,
+    });
+
+    expect(asPaper(await publicView(ctx, { token })).pdf).toBe("none");
+    expect(await pdf(ctx, { token })).toBeNull();
+  });
+
+  it("gives the delivery route one answer for every reason to refuse", async () => {
+    // The property in full: from outside, a link with the file switched off, a
+    // link revoked after being minted with it off, a paper that never had a
+    // file, and a token nobody ever minted are the same event. Any difference
+    // between them is an oracle — it would publish the existence of a file
+    // somebody deliberately did not publish.
+    const { ctx, paperId, labId, pi } = await setup();
+
+    const off = (await share(ctx, { paperId, includePdf: false })).token;
+
+    const otherPaper = await ctx.db.insert("papers", {
+      labId,
+      title: "Revoked",
+      addedBy: pi,
+      ingestStatus: "ready",
+      storageId: "storage_other",
+    });
+    const revokedOff = (await share(ctx, { paperId: otherPaper })).token;
+    const live = (await panel(ctx, { paperId: otherPaper })).share;
+    await takeDown(ctx, { shareId: live!._id });
+
+    const bare = await ctx.db.insert("papers", {
+      labId,
+      title: "No file",
+      addedBy: pi,
+      ingestStatus: "needs-pdf",
+    });
+    const neverHad = (await share(ctx, { paperId: bare, includePdf: true }))
+      .token;
+
+    const answers = await Promise.all(
+      [off, revokedOff, neverHad, "abcdefghijkmnpqrstuvwxyz23", "nope"].map(
+        (token) => pdf(ctx, { token }),
+      ),
+    );
+
+    expect(answers).toEqual([null, null, null, null, null]);
+  });
+
+  it("will not widen a link that is already out there", async () => {
+    const { ctx, paperId } = await setup();
+    const first = await share(ctx, { paperId });
+    // The same press again, this time asking for the file. The link people
+    // already hold must not quietly start carrying it.
+    const second = await share(ctx, { paperId, includePdf: true });
+
+    expect(second.token).toBe(first.token);
+    expect(ctx.db.all("shares")).toHaveLength(1);
+    expect(await pdf(ctx, { token: first.token })).toBeNull();
+  });
+
+  it("tells the lab which terms its link was minted under", async () => {
+    const { ctx, paperId } = await setup();
+    await share(ctx, { paperId, includePdf: true });
+
+    const state = await panel(ctx, { paperId });
+    expect(state.hasPdf).toBe(true);
+    expect(state.share!.includePdf).toBe(true);
+  });
+
+  it("says a write-up share carries no file", async () => {
+    const { ctx, sessionId } = await setup();
+    await ctx.db.patch(sessionId, {
+      synthesis: "The lab worked it out.",
+      synthesisApprovedAt: Date.now(),
+      synthesisCitedAnnotationIds: [],
+    });
+    await shareWriteUp(ctx, { sessionId });
+
+    expect((await sessionPanel(ctx, { sessionId })).share!.includePdf).toBe(
+      false,
+    );
   });
 });
 
