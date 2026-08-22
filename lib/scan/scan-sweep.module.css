@@ -1,0 +1,216 @@
+/*
+ * A light crossing a rectangle, for the two places where a scan is literally
+ * what happened: the shelf as it arrives, and a scout's report as it lands.
+ *
+ * The spike this comes from drew the same idea in WebGL. A canvas per row was
+ * never on the table even there — browsers cap live WebGL contexts somewhere
+ * around sixteen, so the seventeenth paper on a shelf would have taken the
+ * first one's renderer away. A rectangle crossed by a light is a gradient
+ * behind a moving mask, and that is all this file is.
+ *
+ * The whole animation is two transforms and one opacity, which is the entire
+ * point. Margin's motion budget (`app/globals.css`) promises the press renders
+ * at the display's refresh rate whatever the main thread is doing, and that
+ * promise is only kept by animating properties the compositor owns. Nothing
+ * here animates a mask position, a background position, a filter or a width —
+ * every one of those repaints on the main thread every frame, and any of them
+ * would put a decoration in front of the press.
+ *
+ * Which forces the one trick worth explaining. The band moves; the ruling it
+ * reveals must not, or the grid slides along with the light and reads as a
+ * scanline artefact rather than as ground being lit. So the ruling is a child
+ * of the band translated by exactly the opposite amount, in its own units: the
+ * band is 40% of the host and the ruling is 250% of the band, which makes the
+ * ruling exactly one host wide, so a percentage of the ruling's width and a
+ * percentage of the host are the same distance. Band -105% of itself is -42%
+ * of the host; ruling +42% of itself cancels it. The two keyframe sets share a
+ * timing function for the same reason — the cancellation has to hold at every
+ * instant, not just at both ends.
+ */
+
+.row {
+  /* The only thing asked of the host. Deliberately not `overflow: hidden`: the
+     library's filing panel opens inside its row, and clipping the row to hide a
+     decoration would clip that too. The sweep clips itself. */
+  position: relative;
+}
+
+.sweep {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  /* Decoration, and nothing else. The host's press feel is the existing
+     `pressable` grammar on the controls inside it and activation is still
+     their own `onClick`; this layer must never be in the way of either. */
+  pointer-events: none;
+  /* Blue is the lab's own hand and violet is "a model wrote this" (see the
+     colour note in the scout component). The light obeys the same law as the
+     text it crosses, so the tint is a variable and the two tones below are the
+     only two answers. */
+  --scan-tint: var(--accent);
+  /* The taper across the host's height, applied once here rather than on each
+     band: it never moves, so it costs one paint, and it is what keeps the light
+     from having a top and a bottom edge — the difference between a lamp passing
+     over the row and a rectangle sliding along it. */
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent,
+    #000 20%,
+    #000 80%,
+    transparent
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent,
+    #000 20%,
+    #000 80%,
+    transparent
+  );
+}
+
+.secondary {
+  --scan-tint: var(--secondary);
+}
+
+.band,
+.hover {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 40%;
+  opacity: 0;
+  /* Bright at the leading edge and trailing off behind it. The band travels
+     left to right, so the front is the right-hand end. The gradient supplies
+     the light and the mask supplies its shape, including the last few percent:
+     without that final fade the front is a razor-straight edge on a box, which
+     is what a sliding rectangle looks like. */
+  background: linear-gradient(
+    to right,
+    transparent,
+    color-mix(in oklab, var(--scan-tint) 20%, transparent)
+  );
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent,
+    rgba(0, 0, 0, 0.25) 45%,
+    rgba(0, 0, 0, 0.95) 90%,
+    #000 96%,
+    transparent
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    rgba(0, 0, 0, 0.25) 45%,
+    rgba(0, 0, 0, 0.95) 90%,
+    #000 96%,
+    transparent
+  );
+  transform: translate3d(-105%, 0, 0);
+}
+
+.ruling {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 250%;
+  background-image:
+    linear-gradient(
+      to right,
+      color-mix(in oklab, var(--scan-tint) 55%, transparent) 1px,
+      transparent 1px
+    ),
+    linear-gradient(
+      to bottom,
+      color-mix(in oklab, var(--scan-tint) 55%, transparent) 1px,
+      transparent 1px
+    );
+  background-size: 22px 22px;
+  transform: translate3d(42%, 0, 0);
+}
+
+@keyframes scan-band {
+  from {
+    transform: translate3d(-105%, 0, 0);
+    opacity: 0;
+  }
+  14% {
+    opacity: 1;
+  }
+  to {
+    transform: translate3d(250%, 0, 0);
+    opacity: 0;
+  }
+}
+
+@keyframes scan-ruling {
+  from {
+    transform: translate3d(42%, 0, 0);
+  }
+  to {
+    transform: translate3d(-100%, 0, 0);
+  }
+}
+
+/*
+ * One pass as the host appears — the shelf staggered down the list so the rows
+ * are lit in the order they are read, a scout's report on its own as it lands.
+ * The stagger is capped by the component; a hundred-paper library must not
+ * spend seven seconds finishing its entrance.
+ */
+/*
+ * The durations come down from `sweep-delay.ts`, which is where every timing in
+ * this effect is written; nothing here restates one. They carry no fallback and
+ * the delay does, which is not an oversight — 0ms of delay is a real answer
+ * ("no stagger"), and 0s of duration is not an answer at all. A host that
+ * forgot to hand one down should draw no light rather than quietly fall back to
+ * a literal that has since drifted from the one the test checks.
+ */
+.band {
+  animation: scan-band var(--scan-duration) cubic-bezier(0.32, 0, 0.35, 1)
+    var(--scan-delay, 0ms) both;
+}
+
+.band .ruling {
+  animation: scan-ruling var(--scan-duration) cubic-bezier(0.32, 0, 0.35, 1)
+    var(--scan-delay, 0ms) both;
+}
+
+/*
+ * And, where the host asks for it, one pass under the pointer. A second element
+ * rather than a restart of the first: re-running a finished animation means
+ * taking its name away and giving it back, which is a trick, whereas two
+ * elements is just what is true — the arrival and the attention are different
+ * events. Nothing here loops; both are single passes that end at rest.
+ */
+.row:hover .hover {
+  animation: scan-band var(--scan-hover-duration) cubic-bezier(0.32, 0, 0.35, 1)
+    both;
+}
+
+.row:hover .hover .ruling {
+  animation: scan-ruling var(--scan-hover-duration)
+    cubic-bezier(0.32, 0, 0.35, 1) both;
+}
+
+/*
+ * A media query, never a JS read of the preference: deciding this in the first
+ * render is what produced the hydration mismatch in #84, and a stylesheet knows
+ * the answer before React has an opinion.
+ *
+ * It takes everything with it — no sweep, and no static ghost of one either. A
+ * reader who asked for less motion is not asking for a faint grid over every
+ * row instead.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .band,
+  .hover,
+  .row:hover .hover,
+  .ruling,
+  .band .ruling,
+  .row:hover .hover .ruling {
+    animation: none;
+    opacity: 0;
+  }
+}

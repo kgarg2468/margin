@@ -6,6 +6,7 @@ import { papersToBibtex } from "@/lib/export/bibtex";
 import { downloadText, exportFilename } from "@/lib/export/download";
 import type { LibraryFilter } from "@/lib/library/filter";
 import { applyLibraryFilter, emptyFilter } from "@/lib/library/filter";
+import { ScanSweep, scanRowClass } from "@/lib/scan/scan-sweep";
 import { eyebrowClass, secondaryButtonClass } from "@/lib/ui";
 import { useQuery } from "convex-helpers/react/cache/hooks";
 import Link from "next/link";
@@ -440,12 +441,16 @@ function Library({
                   tabIndex={-1}
                   onFocus={() => setMarked(index)}
                   className={
-                    "flex flex-col gap-1 border-l-2 py-4 pl-4 transition-colors focus:outline-none " +
+                    `${scanRowClass} flex flex-col gap-1 border-l-2 py-4 pl-4 transition-colors focus:outline-none ` +
                     (isMarked
                       ? "border-accent bg-surface-sunken/50"
                       : "border-transparent")
                   }
                 >
+                  {/* Decoration only: out of flow, aria-hidden, and deaf to the
+                      pointer. The row's marked state, its press feel and its
+                      links are all exactly as they were. */}
+                  <ScanSweep index={index} hover />
                   <span className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
                     {row.titleOpensReader ? (
                       <Link
