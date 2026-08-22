@@ -1,6 +1,6 @@
 # Margin — Execution Timeline
 
-**Updated:** 2026-08-18 (Track P folded in; Waves 1–4 all shipped) · against `origin/main` @ `012a0c9`
+**Updated:** 2026-08-21 (Wave 5 founder verdicts recorded; P1–P4 shipped) · against `origin/main` @ `9c94d5b`
 **This is the single source of truth for execution order.** The other docs stay as rationale and design — when sequencing here disagrees with a roadmap section elsewhere, this file wins and the other doc should be corrected.
 
 | Source doc | Role |
