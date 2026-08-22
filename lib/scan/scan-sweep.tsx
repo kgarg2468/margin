@@ -1,6 +1,6 @@
 import type { CSSProperties } from "react";
 import styles from "./scan-sweep.module.css";
-import { sweepDelayMs } from "./sweep-delay";
+import { HOVER_SWEEP_MS, SWEEP_MS, sweepDelayMs } from "./sweep-delay";
 
 /**
  * A surface being scanned.
@@ -55,7 +55,16 @@ export function ScanSweep({
           ? `${styles.sweep ?? ""} ${styles.secondary ?? ""}`
           : (styles.sweep ?? "")
       }
-      style={{ "--scan-delay": `${sweepDelayMs(index)}ms` } as CSSProperties}
+      // Every timing the stylesheet animates on is handed down from here, so
+      // `sweep-delay.ts` is the only place any of them is written. The hover
+      // duration is set only where a hover pass exists to read it.
+      style={
+        {
+          "--scan-delay": `${sweepDelayMs(index)}ms`,
+          "--scan-duration": `${SWEEP_MS}ms`,
+          ...(hover ? { "--scan-hover-duration": `${HOVER_SWEEP_MS}ms` } : {}),
+        } as CSSProperties
+      }
     >
       <span className={styles.band}>
         <span className={styles.ruling} />

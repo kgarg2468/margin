@@ -159,13 +159,21 @@
  * The stagger is capped by the component; a hundred-paper library must not
  * spend seven seconds finishing its entrance.
  */
+/*
+ * The durations come down from `sweep-delay.ts`, which is where every timing in
+ * this effect is written; nothing here restates one. They carry no fallback and
+ * the delay does, which is not an oversight — 0ms of delay is a real answer
+ * ("no stagger"), and 0s of duration is not an answer at all. A host that
+ * forgot to hand one down should draw no light rather than quietly fall back to
+ * a literal that has since drifted from the one the test checks.
+ */
 .band {
-  animation: scan-band 1.15s cubic-bezier(0.32, 0, 0.35, 1)
+  animation: scan-band var(--scan-duration) cubic-bezier(0.32, 0, 0.35, 1)
     var(--scan-delay, 0ms) both;
 }
 
 .band .ruling {
-  animation: scan-ruling 1.15s cubic-bezier(0.32, 0, 0.35, 1)
+  animation: scan-ruling var(--scan-duration) cubic-bezier(0.32, 0, 0.35, 1)
     var(--scan-delay, 0ms) both;
 }
 
@@ -177,11 +185,13 @@
  * events. Nothing here loops; both are single passes that end at rest.
  */
 .row:hover .hover {
-  animation: scan-band 0.9s cubic-bezier(0.32, 0, 0.35, 1) both;
+  animation: scan-band var(--scan-hover-duration) cubic-bezier(0.32, 0, 0.35, 1)
+    both;
 }
 
 .row:hover .hover .ruling {
-  animation: scan-ruling 0.9s cubic-bezier(0.32, 0, 0.35, 1) both;
+  animation: scan-ruling var(--scan-hover-duration)
+    cubic-bezier(0.32, 0, 0.35, 1) both;
 }
 
 /*
