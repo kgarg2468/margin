@@ -55,8 +55,18 @@ export function SharedPaper({
 
         <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_22rem]">
           <div ref={pagesRef} className="min-w-0">
-            {shared.hasPdf ? (
+            {shared.pdf === "included" ? (
               <PdfPages token={token} />
+            ) : shared.pdf === "withheld" ? (
+              // A choice, not a withdrawal, and worded so it cannot be read as
+              // one: nothing here was taken back or stopped being shared. The
+              // reason goes unstated because it is the sharer's, and the
+              // likeliest one — they have no right to redistribute a
+              // publisher's file — is nobody else's business.
+              <p className="font-serif text-sm text-ink-muted">
+                Whoever shared this link included the margin but not the paper
+                itself. The notes are written against the passages they quote.
+              </p>
             ) : (
               <p className="font-serif text-sm text-ink-muted">
                 The paper itself isn&rsquo;t attached to this link — the notes
