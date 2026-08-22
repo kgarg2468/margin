@@ -29,10 +29,22 @@ describe("sweepDelayMs", () => {
     expect(sweepDelayMs(8)).toBeGreaterThan(sweepDelayMs(7));
   });
 
-  it("keeps the whole entrance inside a second", () => {
-    // Sweep duration is 1.15s; the last row starting near a second in means the
-    // shelf is still lighting up two seconds after it is readable, which is the
-    // failure mode the cap exists to prevent.
+  it("starts the last row inside a second, however long the shelf is", () => {
+    // The start, and only the start. The sweep itself runs for 1.15s on top of
+    // whatever this returns (`scan-sweep.module.css`), so the capped delay of
+    // 680ms means the shelf actually stops moving around 1.83s — and *that* is
+    // the number the cap is chosen against, since the failure mode is a library
+    // still lighting up long after it became readable.
+    //
+    // The total is deliberately not asserted. Pinning it here would mean
+    // copying the duration out of the stylesheet into this file, where nothing
+    // checks the copy is still true — a second claim resting on nothing, which
+    // is the exact defect this test was rewritten to remove. The honest fix is
+    // structural rather than a better assertion: if the component set a
+    // `--scan-duration` that the stylesheet consumed, the duration would have
+    // one home, and the entrance total would become checkable arithmetic. That
+    // needs the component and the stylesheet, which this change is fenced out
+    // of; see the PR discussion.
     expect(sweepDelayMs(Number.MAX_SAFE_INTEGER)).toBeLessThan(1000);
   });
 });
