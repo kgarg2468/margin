@@ -61,22 +61,22 @@ Gate: **C3/C4/C5 do not launch to design partners until C2 shows the scout beati
 
 The ladder: see it without an account → useful alone in three actions → second person costs one click → the ritual. Everything below is small-to-medium; P1/P3/P4 are independent of all other tracks.
 
-- [ ] **P1 — Solo entry.** Auto-provision a personal library at signup (an invisible one-member lab — the model already supports it); land new users in the library with the add-paper panel open, not on organizational setup; jump straight into the reader after ingest. Eight actions become three.
+- [x] **P1 — Solo entry.** (#82) Personal library auto-provisioned at signup via authenticated `ensureMyLibrary`; new users land in the library with the add-paper panel open and go straight to the reader after ingest. Eight actions became two.
 - [x] **P2 — Read-only share links.** (#86) Annotated paper + signed-off synthesis, opt-in per artifact (row + current membership, asked on every read), unlisted 130-bit capability URLs, revocation-on-read with revoked ≡ nonexistent, only lab-visible annotations ever render; the PDF route throttled per-link without logging any reader. The viral loop; the first public surface — shipped through dual security review.
 - [x] **P3 — Solo catch-up mode.** (#81) In a one-member lab the digest surfaces your own notes older than both the arrival window and 14 days, and says so — recall provenance is stored on the digest, not inferred at read. The thesis delivered to a single user.
-- [ ] **P4 — Seeded demo paper.** Every new library opens containing one classic annotated paper so the first screen demonstrates the margin-conversation idea instead of showing a form.
+- [x] **P4 — Seeded demo paper.** (#82) Every new library opens on Ioannidis 2005 (CC-BY, SHA-256-pinned blob shared per deployment) with five substantive notes, owner-authored and private by the founder's ship-as-is call. Operator step per environment: `npx convex run seedDemo:seedCanonicalPdf`.
 - [ ] **P5 — Quiet lab conversion + guest tier.** Invite-from-personal-library names/converts the lab; a viewer/guest state on shared artifacts (membership roles are exactly `pi|member` today — deliberate schema change, needs design). After P2.
 - [ ] **P6 — Projected-board polish.** Rides Track A (A2 shipped #73); the weekly 10-person demo is the 39% discovery channel. No new box — fold future board work here.
 - [ ] **P7 — Share-link → signup → annotate continuity.** Closes rung 0 into rung 1. After P2.
 
-Ordering: **P3 and P2 are shipped (#81, #86); P1+P4 are built and gated on the founder's attribution call (#82); P5/P7 are next, after #82 merges** — P5 rewrites the same signup/onboarding surfaces P1 touched, so it does not start against a moving base. Monetization stays out of the product entirely (standing rule); nothing in Track P adds pricing surfaces.
+Ordering: **P1+P4 (#82), P3 (#81), and P2 (#86) are shipped; P5/P7 are next, alongside the share-PDF gate (founder call 2026-08-19: `includePdf` opt-in at mint, default off)** — P5 rewrites the same signup/onboarding surfaces P1 touched, so it does not start against a moving base. Monetization stays out of the product entirely (standing rule); nothing in Track P adds pricing surfaces.
 
 ## 3c. Track V — Signature visual layer (founder direction 2026-08-18)
 
 Direction from Krish: use three.js for front-end animation; scan effects over cards; wireframe treatments in the spirit of Death Stranding's terrain-scan sweep.
 
-- [ ] **V1 — Scan-effect spike.** One shared WebGL surface (never per-card contexts), a wireframe/scan sweep grammar that respects `prefers-reduced-motion` and never regresses the 120Hz compositor-only press feel; applied first where it earns its bytes (landing hero, card reveal/hover sweep). Ships as its own PR with screenshots/recordings for founder judgment before any wider rollout.
-- [ ] **V2 — Rollout.** Apply the approved grammar across card surfaces (library, scout findings, session board). Gated on V1 approval.
+- [x] **V1 — Scan-effect spike.** (#83, closed unmerged — the spike's job was a verdict, and it got one.) The WebGL wireframe hero was declined: +238 kB of deferred JS on the highest-bounce page; the shader work is preserved on `kgarg2468/wave5-v1`. The CSS sweep grammar (~0.3 kB, compositor-only, reduced-motion-safe) was approved for selective rollout.
+- [ ] **V2 — Rollout (in flight).** The approved CSS grammar goes to library shelf rows and scout finding cards — where a scan literally just happened. The session board is excluded by the founder's ruling: selective placement, never blanket; ambient motion has no place on a live-meeting focus surface.
 
 ## 4. Track D — Later (strategy Phase 3; do not start without a new decision)
 
@@ -108,7 +108,7 @@ Non-engineering, founder-owned, runs alongside everything: recruit 5–10 design
 - **Wave 2:** A2 ∥ B3 ∥ C2 ∥ B4 — shipped
 - **Wave 3:** A3 ∥ C3 ∥ B5 — shipped
 - **Wave 4:** A4 ∥ C4+C5 → design-partner launch gate (C2 results) → Track D decision — shipped; gate still shut (C2 n=0)
-- **Wave 5 (now):** ~~P1+P4 ∥ P3 ∥ V1~~ → founder review (V1 verdicts + #82 attribution call, where the wave stands) → ~~P2~~ → P5/P7 ∥ V2
+- **Wave 5:** ~~P1+P4 ∥ P3 ∥ V1 → founder review → P2~~ → **(now)** P5/P7 ∥ V2 ∥ PDF gate
 
 ## 6. Done (context for agents — don't rebuild these)
 
