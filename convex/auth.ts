@@ -643,13 +643,30 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
      */
     async afterUserCreatedOrUpdated(ctx, { userId }) {
       const user = (await ctx.db.get(userId)) as Doc<"users"> | null;
-      if (user === null || (user.name !== undefined && user.name.length > 0)) {
+      if (user === null) {
         return;
       }
-      const name = nameFromEmail(user.email);
-      if (name !== undefined) {
-        await ctx.db.patch(userId, { name });
+      if (user.name === undefined || user.name.length === 0) {
+        const name = nameFromEmail(user.email);
+        if (name !== undefined) {
+          await ctx.db.patch(userId, { name });
+        }
       }
+
+      // Deliberately the only thing this callback does.
+      //
+      // Provisioning the new account's personal library belongs here by every
+      // instinct — it is the one point all three doors pass through, and it
+      // shares the transaction that creates the user. It is still wrong, and
+      // `createVerificationCodeImpl` in `@convex-dev/auth` is why: requesting an
+      // emailed sign-in link calls `upsertUserAndAccount` *before the mail is
+      // sent*, so this runs with `existingUserId === null` for an address nobody
+      // has proven they can read. A lab, a membership, two ledger events and a
+      // seeded paper, from an unauthenticated POST, repeatable in a loop.
+      //
+      // So the library is minted on first authenticated arrival instead, by
+      // `labs.ensureMyLibrary`. See that mutation for how it stays a *new*
+      // account's privilege without this callback's `existingUserId` to lean on.
     },
   },
 });

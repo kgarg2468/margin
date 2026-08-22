@@ -30,6 +30,7 @@ import type * as notifications from "../notifications.js";
 import type * as papers from "../papers.js";
 import type * as scoutEval from "../scoutEval.js";
 import type * as search from "../search.js";
+import type * as seedDemo from "../seedDemo.js";
 import type * as sessionTemplates from "../sessionTemplates.js";
 import type * as sessions from "../sessions.js";
 import type * as shares from "../shares.js";
@@ -68,6 +69,7 @@ declare const fullApi: ApiFromModules<{
   papers: typeof papers;
   scoutEval: typeof scoutEval;
   search: typeof search;
+  seedDemo: typeof seedDemo;
   sessionTemplates: typeof sessionTemplates;
   sessions: typeof sessions;
   shares: typeof shares;

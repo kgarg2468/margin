@@ -28,6 +28,7 @@ import { ReferenceImport } from "./reference-import";
 import type { PanelHold } from "./upload-flow";
 import {
   cancelOffer,
+  destinationAfterUpload,
   isCancellation,
   lookupHold,
   percentSent,
@@ -275,6 +276,7 @@ function DoiTab({
 }) {
   const createFromDoi = useAction(api.papers.createFromDoi);
   const textLayer = useTextLayer();
+  const router = useRouter();
   const [doi, setDoi] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -287,6 +289,28 @@ function DoiTab({
    * moved on.
    */
   const attempt = useRef(0);
+  /**
+   * Whether this panel is still on screen.
+   *
+   * `attempt` says which lookup is current; this says whether *any* of them
+   * still has a right to speak. They are different questions and only the
+   * second one covers unmounting: extraction resolves long after the submit
+   * does, and a member who pressed "Done adding" or walked off to the reader
+   * has an attempt counter that still matches perfectly. Without this, that
+   * extraction finishing thirty seconds later yanks them into a paper they have
+   * stopped thinking about.
+   */
+  const live = useRef(true);
+  // Set on the way in as well as cleared on the way out. A cleanup-only effect
+  // reads correctly and is wrong in development: StrictMode mounts, tears down
+  // and remounts, so the cleanup fires once with nothing to undo it and every
+  // later navigation is silently declined.
+  useEffect(() => {
+    live.current = true;
+    return () => {
+      live.current = false;
+    };
+  }, []);
 
   const hold = lookupHold(pending);
 
@@ -359,8 +383,29 @@ function DoiTab({
             // to be told that, or go and find the button: the reader is right
             // here, so do it now and say so. The promise on this panel is that
             // an open-access paper "arrives ready to read".
+            //
+            // And when it does read, go there. Both halves of the promise have
+            // now been kept — there is a file and there is a text layer — so the
+            // sentence below has nothing left to report and the outcome panel's
+            // "Read it now" is a button whose only purpose is to be pressed. The
+            // two cases it does *not* cover keep exactly what they had: a lookup
+            // that found no open-access copy, and an extraction that failed, both
+            // of which have a real gap for the record page to explain.
+            //
+            // Guarded twice, on two different things. `read` resolves long after
+            // the submit does — a whole PDF is fetched and run through pdf.js in
+            // between — and by then the member may have pressed "Stop waiting"
+            // or pasted a second DOI, both of which bump `attempt`; or they may
+            // have closed the panel and gone somewhere else entirely, which
+            // bumps nothing at all. Neither is somebody asking to be taken to
+            // this paper, and a navigation is not a thing to perform on a page
+            // the member chose over this one.
             if (!outcome.alreadyInLibrary && outcome.hasPdf) {
-              void textLayer.read(outcome.paperId);
+              void textLayer.read(outcome.paperId).then((extracted) => {
+                if (extracted && live.current && attempt.current === mine) {
+                  router.push(`/app/library/${outcome.paperId}/read`);
+                }
+              });
             }
           } catch (caught) {
             if (attempt.current !== mine) {
@@ -594,6 +639,22 @@ function UploadTab({
    * it would navigate away from a form the member had gone back to.
    */
   const attempt = useRef(0);
+  /**
+   * And whether the form is still there at all. The hold this tab reports keeps
+   * the *panel* from closing under a save, but it has no say over a member who
+   * takes the sidebar to Sessions mid-upload: that unmounts everything without
+   * touching `attempt`, and the save then resolves and pushes them into a reader
+   * they never asked for. Same discipline as `DoiTab`.
+   */
+  const live = useRef(true);
+  // Set on entry, not only cleared on exit — see `DoiTab` for the StrictMode
+  // remount this would otherwise lose every navigation to.
+  useEffect(() => {
+    live.current = true;
+    return () => {
+      live.current = false;
+    };
+  }, []);
 
   // The same offer the control below is drawn from, so the panel can never be
   // held shut by a stage whose exit is not on screen.
@@ -687,10 +748,13 @@ function UploadTab({
         authors: authors.length > 0 ? authors : undefined,
         pages: extraction.pages,
       });
-      if (attempt.current !== mine) {
+      if (attempt.current !== mine || !live.current) {
         return;
       }
-      router.push(`/app/library/${paperId}`);
+      // Into the reader rather than onto the record — see
+      // `destinationAfterUpload`, which owns the one case that still stops at
+      // the record and is testable where a rule inside JSX would not be.
+      router.push(destinationAfterUpload(paperId, extraction.pages));
     } catch (caught) {
       // The blob goes first, above the staleness guard. An abandoned run whose
       // `createFromUpload` rejects later still owns bytes nothing points at,

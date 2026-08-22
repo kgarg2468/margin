@@ -33,9 +33,9 @@ import { ShortcutHint } from "./_components/shortcuts";
 export default function LibraryPage({
   searchParams,
 }: {
-  searchParams: Promise<{ collection?: string }>;
+  searchParams: Promise<{ collection?: string; add?: string }>;
 }) {
-  const { collection } = use(searchParams);
+  const { collection, add } = use(searchParams);
   const { labs, currentLab } = useLabs();
 
   if (labs === undefined) {
@@ -73,6 +73,19 @@ export default function LibraryPage({
           ? null
           : collection
       }
+      // `?add=1` is how a door elsewhere asks for the panel — today `/app`, on
+      // the one arrival that provisioned this library. A URL rather than
+      // something stored, because "open the form" is a fact about this arrival
+      // and not about the library: it must not survive a reload, must not follow
+      // the reader to their second visit, and must be as easy to drop as
+      // pressing Done. A flag on a row would be all three of those things wrong,
+      // and would need clearing by a write nobody would remember to make.
+      //
+      // It is a request, and `Library` spends it — see `consumed` there. Left in
+      // the bar it would stop being about this arrival: pressing Done and
+      // reloading would reopen the panel, and so would picking a collection,
+      // which remounts through the key above.
+      startAdding={add === "1"}
     />
   );
 }
@@ -80,9 +93,11 @@ export default function LibraryPage({
 function Library({
   lab,
   collectionId,
+  startAdding,
 }: {
   lab: LabSummary;
   collectionId: string | null;
+  startAdding: boolean;
 }) {
   const papers = useQuery(api.papers.listPapers, { labId: lab._id });
   const collections = useQuery(api.collections.listCollections, {
@@ -95,7 +110,31 @@ function Library({
     collectionId,
   });
   const [text, setText] = useState("");
-  const [adding, setAdding] = useState(false);
+  const [adding, setAdding] = useState(startAdding);
+  /**
+   * Spend `?add=1` the moment it has been honoured.
+   *
+   * The flag opened the panel on the line above and has no second job; leaving
+   * it in the address bar turns a request about one arrival into a standing
+   * instruction, so Done followed by a reload — or simply picking a collection,
+   * which remounts this component — would open it again over a library that by
+   * then has papers on it.
+   *
+   * `history.replaceState` rather than `router.replace`, the same way
+   * `LabProvider` spends an invite code: this rewrites the bar without asking
+   * the router to re-run a page whose state is the very thing being preserved.
+   */
+  useEffect(() => {
+    if (!startAdding) {
+      return;
+    }
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("add") === null) {
+      return;
+    }
+    url.searchParams.delete("add");
+    window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+  }, [startAdding]);
   /**
    * Whether the add panel has work in flight, reported up by the panel itself.
    *
