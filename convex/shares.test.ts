@@ -2165,6 +2165,31 @@ describe("the file, a moment later", () => {
     ).toHaveLength(2);
   });
 
+  it("discards the copy when the attach itself fails, and re-raises", async () => {
+    // The committed delete inside the mutation covers every ordinary refusal —
+    // but it cannot cover the mutation failing, because a transaction that
+    // throws leaves nothing behind, including its own delete. Without the
+    // action cleaning up after itself, those bytes would sit in the deployment
+    // forever with no row and no query able to reach them.
+    const { ctx } = await midFlight();
+    ctx.register(internal.shares.sharedPdfSource, sharedPdfSource);
+    ctx.register(internal.shares.attachImportedPdf, {
+      _handler: () => {
+        throw new Error("the attach fell over");
+      },
+    });
+
+    const job = rowAt(ctx.scheduled.filter((each) => each.name === COPY_JOB));
+    await expect(
+      copyJob(ctx, job.args as { shareId: Id<"shares">; paperId: Id<"papers"> }),
+    ).rejects.toThrow("the attach fell over");
+
+    // Stored once, discarded once — and the failure surfaced rather than being
+    // swallowed, so the scheduler records it as the fault it is.
+    expect(ctx.stored).toHaveLength(1);
+    expect(ctx.discarded).toHaveLength(1);
+  });
+
   it("says nothing to the sharing lab about any of it", async () => {
     const { ctx, labId } = await midFlight();
     const before = ctx.db.all("events").filter((e) => e.labId === labId).length;
@@ -2409,16 +2434,18 @@ describe("redeeming more than once", () => {
     expect(shelfOf(ctx, me.labId)).toHaveLength(2);
   });
 
-  it("still merges on title and year when only one side has a DOI", async () => {
-    // The DOI is evidence of difference only when both sides have one. A row
-    // filed by hand with no DOI and the same title is the duplicate this pass
-    // exists to catch.
+  it("does not fold a paper with a DOI into a row that has none", async () => {
+    // Title and year decide nothing unless *neither* row has a DOI. A shelf row
+    // filed by hand under the same normalized title and year is not evidence of
+    // the same paper — "Editorial 2019" collides with "Editorial 2019" — and
+    // folding into it would hand the reader back the wrong row while the paper
+    // they actually asked for, and its file, never arrived and never said so.
     const { ctx, paperId } = await setup();
     await publishablePaper(ctx, paperId);
-    const { token } = await share(ctx, { paperId });
+    const { token } = await share(ctx, { paperId, includePdf: true });
 
     const me = await visitor(ctx);
-    const already = await ctx.db.insert("papers", {
+    const unrelated = await ctx.db.insert("papers", {
       labId: me.labId,
       title: "Cold-Chain Effects on Assay Reproducibility",
       year: 2019,
@@ -2427,8 +2454,67 @@ describe("redeeming more than once", () => {
     });
 
     ctx.auth = { userId: me.userId };
-    expect((await importShare(ctx, { token }))?.paperId).toBe(already);
-    expect(shelfOf(ctx, me.labId)).toHaveLength(1);
+    const outcome = await importShare(ctx, { token });
+    expect(outcome?.paperId).not.toBe(unrelated);
+    expect(shelfOf(ctx, me.labId)).toHaveLength(2);
+
+    // And the shared paper really did arrive whole, which is the half of this
+    // that a wrong merge takes away silently.
+    await deliverTheFile(ctx);
+    const mine = await ctx.db.get(outcome!.paperId);
+    expect(mine?.doi).toBe("10.1000/cold-chain");
+    expect(mine?.storageId).toBeDefined();
+  });
+
+  it("does not fold a DOI-less share into a shelf row that has one", async () => {
+    // The same rule read from the other side, so neither direction can drift.
+    const { ctx, paperId } = await setup();
+    await publishablePaper(ctx, paperId);
+    await ctx.db.patch(paperId, { doi: undefined });
+    const { token } = await share(ctx, { paperId });
+
+    const me = await visitor(ctx);
+    const unrelated = await ctx.db.insert("papers", {
+      labId: me.labId,
+      title: "Cold-Chain Effects on Assay Reproducibility",
+      year: 2019,
+      doi: "10.1000/somebody-elses-record",
+      ingestStatus: "needs-pdf",
+      addedBy: me.userId,
+    });
+
+    ctx.auth = { userId: me.userId };
+    expect((await importShare(ctx, { token }))?.paperId).not.toBe(unrelated);
+    expect(shelfOf(ctx, me.labId)).toHaveLength(2);
+  });
+
+  it("reads the newest of a long shelf, where a fresh import actually is", async () => {
+    // The last pass is bounded, so which end it reads decides whether a second
+    // press of the same link finds the row the first press wrote. On a shelf
+    // longer than the bound, the oldest rows are the ones least likely to be
+    // the paper in question — and the import, being minutes old, is the newest
+    // thing there.
+    const { ctx, paperId } = await setup();
+    await publishablePaper(ctx, paperId);
+    await ctx.db.patch(paperId, { doi: undefined });
+    const { token } = await share(ctx, { paperId });
+
+    const me = await visitor(ctx);
+    for (let index = 0; index < 200; index += 1) {
+      await ctx.db.insert("papers", {
+        labId: me.labId,
+        title: `Filler ${index}`,
+        ingestStatus: "needs-pdf",
+        addedBy: me.userId,
+      });
+    }
+
+    ctx.auth = { userId: me.userId };
+    const first = await importShare(ctx, { token });
+    const second = await importShare(ctx, { token });
+
+    expect(second?.paperId).toBe(first?.paperId);
+    expect(shelfOf(ctx, me.labId)).toHaveLength(201);
   });
 
   it("recognises one by title and year when it has neither", async () => {
@@ -2492,14 +2578,55 @@ describe("how often anyone may redeem", () => {
     const { token } = await share(ctx, { paperId, includePdf: true });
 
     const me = await visitor(ctx);
-    await fillShelf(ctx, me, 201);
+    // Exactly the ceiling, not one past it: two hundred inside the window means
+    // the allowance is spent, and the two hundred and first is the one refused.
+    await fillShelf(ctx, me, 200);
     ctx.auth = { userId: me.userId };
 
     // The same `null` every other refusal gives, so it is indistinguishable
     // from a revoked link and says nothing about why.
     expect(await importShare(ctx, { token })).toBeNull();
-    expect(shelfOf(ctx, me.labId)).toHaveLength(201);
+    expect(shelfOf(ctx, me.labId)).toHaveLength(200);
     expect(await deliverTheFile(ctx)).toBe(0);
+  });
+
+  it("still opens it one short of the ceiling", async () => {
+    // The other side of the boundary, so the count cannot quietly drift by one
+    // in either direction.
+    const { ctx, paperId } = await setup();
+    await publishablePaper(ctx, paperId);
+    const { token } = await share(ctx, { paperId, includePdf: true });
+
+    const me = await visitor(ctx);
+    await fillShelf(ctx, me, 199);
+    ctx.auth = { userId: me.userId };
+
+    expect(await importShare(ctx, { token })).not.toBeNull();
+    expect(shelfOf(ctx, me.labId)).toHaveLength(200);
+  });
+
+  it("lets a second press of the same link through a spent hour", async () => {
+    // The ceiling gates new rows. A redemption that finds the paper already on
+    // the shelf writes nothing at all, and refusing it would spend a token the
+    // reader's browser has already let go of in order to protect the
+    // deployment from a mutation that inserts nothing.
+    const { ctx, paperId } = await setup();
+    await publishablePaper(ctx, paperId);
+    const { token } = await share(ctx, { paperId, includePdf: true });
+
+    const me = await visitor(ctx);
+    ctx.auth = { userId: me.userId };
+    const first = await importShare(ctx, { token });
+    await deliverTheFile(ctx);
+    await fillShelf(ctx, me, 200);
+    // The import counts towards the hour too — it is a paper the library
+    // gained — so the whole shelf is inside the window and the ceiling is
+    // genuinely spent when the second press arrives.
+    await ctx.db.patch(first!.paperId, { _creationTime: Date.now() });
+
+    const again = await importShare(ctx, { token });
+    expect(again?.paperId).toBe(first?.paperId);
+    expect(shelfOf(ctx, me.labId)).toHaveLength(201);
   });
 
   it("counts the hour, not the shelf", async () => {

@@ -955,10 +955,11 @@ export const pdfForShare = internalQuery({
  *
  * `zotero.newAmong`'s ceiling and `papers.listPapers`'s, restated for the same
  * reason `MAX_ANNOTATIONS_PER_PAPER` is: neither module exports it, and a
- * cross-module import for one number is a worse coupling than a number. Past
- * two hundred papers this stops catching a duplicate that shares neither a DOI
- * nor a file with what is already on the shelf — the same limit the library
- * page itself has, and the 201st paper is the signal to lift both together.
+ * cross-module import for one number is a worse coupling than a number. Beyond
+ * the two hundred most recently added papers this stops catching a duplicate
+ * that shares neither a DOI nor a file with what is already on the shelf — the
+ * same limit the library page itself has, and the 201st paper is the signal to
+ * lift both together.
  *
  * It is the *last* pass and not the only one, which is what keeps that ceiling
  * a nuisance rather than a hole: the two passes above it go through indexes and
@@ -998,12 +999,19 @@ const BLOB_CLAIM_SCAN_LIMIT = 50;
  * 3. **Title and year**, over one bounded read of the shelf. The last resort,
  *    for a preprint with no DOI and no file to be recognised by.
  *
- * **Pass 3 never overrules a DOI.** Two rows that both carry one, and carry
- * different ones, are two different papers however alike their titles read —
- * that is what a DOI is *for* — and merging them would lose one of them behind
- * the other with no way for the reader to tell it had happened. Since pass 1
- * has already returned for a matching DOI, any row that reaches pass 3 holding
- * one alongside a source that also holds one is provably distinct.
+ * **Pass 3 matches only when neither row carries a DOI.** Not "at least one of
+ * them" — a shared paper with a DOI must not collapse into a DOI-less shelf row
+ * that merely normalizes to the same title and year, because titles like
+ * "Editorial" or "Correction" against a year are a real collision and the merge
+ * would be invisible: the redemption hands back the wrong row, and the paper
+ * the reader actually asked for, with its file, never arrives and never says
+ * so. The strict rule costs a duplicate to a reader who had hand-added the same
+ * paper without a DOI, and a duplicate row is a thing you can see and delete.
+ *
+ * Newest first, because the row a re-redemption has to find is the one the
+ * previous redemption wrote minutes ago. Reading the *oldest* two hundred rows
+ * of a large shelf would answer about the papers least likely to be the one in
+ * question and would make a second press of the same link build a second copy.
  */
 async function alreadyOnShelf(
   ctx: QueryCtx,
@@ -1037,11 +1045,13 @@ async function alreadyOnShelf(
   const shelf = await ctx.db
     .query("papers")
     .withIndex("by_lab", (q) => q.eq("labId", labId))
+    .order("desc")
     .take(IDENTITY_SCAN_LIMIT);
   return (
     shelf.find(
       (row) =>
-        (doi === undefined || row.doi === undefined) &&
+        doi === undefined &&
+        row.doi === undefined &&
         referenceIdentity(row.title, row.year) === identity,
     ) ?? null
   );
@@ -1067,10 +1077,17 @@ async function alreadyOnShelf(
  * researcher who genuinely crosses it has to wait rather than being refused
  * forever.
  *
- * Read before the dedupe rather than after, so the refusal is the cheapest
- * thing this mutation can do. The cost of being wrong that way round is that a
- * *second* redemption of a link — which writes nothing — is also refused at the
- * ceiling, which is the harmless direction.
+ * Read *after* the dedupe and not before, even though the refusal is the
+ * cheaper read. This gates new rows, and a redemption that finds the paper
+ * already on the shelf writes nothing at all — refusing that one would spend a
+ * token the client has already dropped in order to protect the deployment from
+ * a mutation that inserts nothing.
+ *
+ * The residual, stated rather than hidden: a genuinely new import during an
+ * hour in which the library gained two hundred papers by any route is refused,
+ * and the pending token goes with it, because it was consumed on the way in.
+ * That is bounded by the window — an hour later the same link works — and it is
+ * the price of not keeping a column that says where each paper came from.
  */
 const IMPORT_WINDOW_MS = 60 * 60 * 1000;
 const MAX_IMPORTS_PER_WINDOW = 200;
@@ -1080,15 +1097,16 @@ async function importBurstSpent(
   labId: Id<"labs">,
 ): Promise<boolean> {
   const since = Date.now() - IMPORT_WINDOW_MS;
-  // Newest first, one row past the ceiling. If that row is itself inside the
-  // window then everything above it is too, which is the whole question — and
-  // it is answered without reading a shelf of any size.
+  // Newest first, exactly as many rows as the ceiling allows. If the last of
+  // them is itself inside the window then the window already holds the full
+  // allowance and this one would be over it — and the question is answered
+  // without reading a shelf of any size.
   const newest = await ctx.db
     .query("papers")
     .withIndex("by_lab", (q) => q.eq("labId", labId))
     .order("desc")
-    .take(MAX_IMPORTS_PER_WINDOW + 1);
-  const oldestCounted = newest[MAX_IMPORTS_PER_WINDOW];
+    .take(MAX_IMPORTS_PER_WINDOW);
+  const oldestCounted = newest[MAX_IMPORTS_PER_WINDOW - 1];
   return oldestCounted !== undefined && oldestCounted._creationTime > since;
 }
 
@@ -1222,13 +1240,6 @@ export const importFromShare = mutation({
       return null;
     }
 
-    // The one refusal here that is not about the link — see
-    // `MAX_IMPORTS_PER_WINDOW`. Same `null`, so it is indistinguishable from
-    // every other way this can come to nothing.
-    if (await importBurstSpent(ctx, mine._id)) {
-      return null;
-    }
-
     const existing = await alreadyOnShelf(ctx, mine._id, paper);
     if (existing !== null) {
       return {
@@ -1237,6 +1248,14 @@ export const importFromShare = mutation({
         ready: existing.ingestStatus === "ready" && existing.storageId !== undefined,
         hasPdf: existing.storageId !== undefined,
       };
+    }
+
+    // The one refusal here that is not about the link — see
+    // `MAX_IMPORTS_PER_WINDOW`. Asked only once the answer is known to be a new
+    // row, and answered with the same `null`, so it is indistinguishable from
+    // every other way this can come to nothing.
+    if (await importBurstSpent(ctx, mine._id)) {
+      return null;
     }
 
     // `=== true` rather than a falsy check, for the same reason `pdfForShare`
@@ -1393,13 +1412,31 @@ export const copySharedPdf = internalAction({
     // changed by the time the mutation runs, the mutation is what discards
     // these bytes — see `attachImportedPdf` for why the delete has to commit
     // rather than being rolled back by a throw.
+    //
+    // The residual this cannot close: a process death between the store above
+    // and either arm below leaves one blob with nothing pointing at it. That is
+    // storage spend and only storage spend — no row references it, no query can
+    // reach it, nothing about it is disclosed — and a sweeper that walked the
+    // deployment's blobs looking for unclaimed ones would be more moving parts,
+    // and more ways to delete a file somebody wanted, than the megabyte is
+    // worth.
     const copied = await ctx.storage.store(bytes);
-    await ctx.runMutation(internal.shares.attachImportedPdf, {
-      shareId: args.shareId,
-      paperId: args.paperId,
-      sourceStorageId: source.storageId,
-      storageId: copied,
-    });
+    try {
+      await ctx.runMutation(internal.shares.attachImportedPdf, {
+        shareId: args.shareId,
+        paperId: args.paperId,
+        sourceStorageId: source.storageId,
+        storageId: copied,
+      });
+    } catch (failure) {
+      // The mutation's own committed delete covers the ordinary refusals; it
+      // cannot cover its own failure, because a transaction that throws leaves
+      // nothing behind — including the delete. So the copy is discarded here,
+      // where the `store` actually happened, and the failure is re-raised so
+      // the scheduler records it as what it is.
+      await ctx.storage.delete(copied);
+      throw failure;
+    }
     return null;
   },
 });
